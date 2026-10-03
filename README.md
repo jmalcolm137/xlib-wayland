@@ -1,8 +1,20 @@
-# Xlib-Wayland
+# Xlib for Wayland
 
 A Wayland-native, ABI-compatible implementation of `libX11` (Xlib) plus the
 build integration that lets the stock Xt/Motif stack — and unmodified XV and
 NEdit — run on top of it. See [DESIGN.md](DESIGN.md) for the full rationale.
+
+The motivation for this project is to run the Motif text editor NEdit on Wayland.
+
+NEdit -> OpenMotif -> libXt -> Xlib -> Wayland
+
+libXt (from Xorg) builds and runs unmodified on Xlib (for Wayland).
+
+OpenMotif builds and runs without modification on libXt.
+
+NEdit builds and runs unmodified on OpenMotif.
+
+This is not the same as Xwayland. NEdit run this way is a real native Wayland app.
 
 ## Status
 
