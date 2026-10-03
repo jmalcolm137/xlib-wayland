@@ -252,6 +252,15 @@ struct mw_compositor {
 	const char *output_path;
 	const char *input_path;
 
+	/* Optional periodic capture: with --capture-prefix P --capture-every MS,
+	 * write P0001.png, P0002.png, ... every MS while the run continues, so a
+	 * long-lived session can be turned into a frame sequence / animation
+	 * instead of a single screenshot. */
+	const char *capture_prefix;
+	int capture_every_ms;
+	int capture_count;
+	struct wl_event_source *capture_timer;
+
 	struct wl_list surfaces;          /* mw_surface */
 	struct wl_list pointers;          /* mw_device */
 	struct wl_list keyboards;         /* mw_device */
@@ -536,7 +545,7 @@ static struct mw_surface *pick_screenshot_surface(struct mw_compositor *comp)
 	return best;
 }
 
-static void save_screenshot(struct mw_compositor *comp)
+static void save_screenshot_path(struct mw_compositor *comp, const char *path)
 {
 	struct mw_surface *s = pick_screenshot_surface(comp);
 	uint8_t *rgba = NULL;
@@ -567,10 +576,10 @@ static void save_screenshot(struct mw_compositor *comp)
 					h = ch;
 				}
 			}
-			if (write_png(comp->output_path, rgba, w, h) == 0)
+			if (write_png(path, rgba, w, h) == 0)
 				fprintf(stderr,
 					"headless-compositor: captured %dx%d -> %s\n",
-					w, h, comp->output_path);
+					w, h, path);
 		} else {
 			fprintf(stderr,
 				"headless-compositor: could not read the mapped buffer\n");
@@ -593,10 +602,15 @@ static void save_screenshot(struct mw_compositor *comp)
 				rgba[i * 4u + 2] = 0;
 				rgba[i * 4u + 3] = 255;
 			}
-			write_png(comp->output_path, rgba, w, h);
+			write_png(path, rgba, w, h);
 		}
 	}
 	free(rgba);
+}
+
+static void save_screenshot(struct mw_compositor *comp)
+{
+	save_screenshot_path(comp, comp->output_path);
 }
 
 static void capture_and_exit(struct mw_compositor *comp)
@@ -2730,6 +2744,22 @@ static int timeout_func(void *data)
 	return 0;
 }
 
+/* Write P0001.png, P0002.png, ... at a fixed interval without ending the run,
+ * so a long-lived client can be recorded as a frame sequence. */
+static int capture_timer_func(void *data)
+{
+	struct mw_compositor *comp = data;
+	char path[1024];
+
+	if (comp->captured || !comp->capture_prefix)
+		return 0;
+	snprintf(path, sizeof path, "%s%04d.png", comp->capture_prefix,
+		 ++comp->capture_count);
+	save_screenshot_path(comp, path);
+	wl_event_source_timer_update(comp->capture_timer, comp->capture_every_ms);
+	return 0;
+}
+
 static int stdin_func(int fd, uint32_t mask, void *data)
 {
 	struct mw_compositor *comp = data;
@@ -2772,6 +2802,8 @@ static void usage(const char *argv0)
 		"  --size WxH      toplevel configure size (default %dx%d)\n"
 		"  --timeout SEC   seconds before the screenshot (default %d)\n"
 		"  --output FILE   PNG path (default %s)\n"
+		"  --capture-prefix P   also write P0001.png every --capture-every ms\n"
+		"  --capture-every MS   periodic capture interval (default 0 = off)\n"
 		"  --input FILE    replay a script before the screenshot:\n"
 		"                    motion X Y\n"
 		"                    button PRESS|RELEASE BUTTON\n"
@@ -2816,6 +2848,10 @@ int main(int argc, char **argv)
 			comp.output_path = argv[++i];
 		} else if (!strcmp(argv[i], "--input") && i + 1 < argc) {
 			input_path = argv[++i];
+		} else if (!strcmp(argv[i], "--capture-prefix") && i + 1 < argc) {
+			comp.capture_prefix = argv[++i];
+		} else if (!strcmp(argv[i], "--capture-every") && i + 1 < argc) {
+			comp.capture_every_ms = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
 			usage(argv[0]);
 			return 0;
@@ -2904,6 +2940,13 @@ int main(int argc, char **argv)
 		wl_event_source_timer_update(comp.timeout_timer, comp.timeout * 1000);
 	comp.frame_timer = wl_event_loop_add_timer(comp.loop, frame_timer_func, &comp);
 	comp.script_timer = wl_event_loop_add_timer(comp.loop, script_timer_func, &comp);
+	if (comp.capture_every_ms > 0 && comp.capture_prefix) {
+		comp.capture_timer = wl_event_loop_add_timer(comp.loop,
+				capture_timer_func, &comp);
+		if (comp.capture_timer)
+			wl_event_source_timer_update(comp.capture_timer,
+					comp.capture_every_ms);
+	}
 	if (comp.action_count > 0) {
 		struct wl_event_source *fallback =
 			wl_event_loop_add_timer(comp.loop, script_fallback_func, &comp);
