@@ -1,0 +1,10 @@
+# resize.input — compositor-driven resize for tests/test_xm_menubar.c.
+#
+# With server-side decorations the compositor owns interactive resize, so it
+# sends a new size in xdg_toplevel.configure.  The window has to adopt it (the
+# X client needs a ConfigureNotify, or it never re-lays out) and repaint the
+# newly exposed area.
+
+sleep 1200
+resize 500 400
+sleep 1400

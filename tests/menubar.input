@@ -1,0 +1,29 @@
+# menubar.input — drive tests/test_xm_menubar.c: use the File cascade, then the
+# Edit cascade.  The second cascade is the interesting one -- a menu that opens
+# after another menu has already been used and dismissed.
+#
+# Coordinates while the app toplevel has focus are surface-relative (the app
+# has a 24px client-side titlebar).  Once a menu is posted it takes input
+# focus, so subsequent coordinates are relative to the menu itself.
+
+sleep 1500
+
+# --- File cascade: press on the menu bar, drag onto the first item, release ---
+motion 31 19
+sleep 400
+button press left
+sleep 700
+motion 26 15
+sleep 500
+button release left
+sleep 1500
+
+# --- Edit cascade: the second menu ---
+motion 83 19
+sleep 400
+button press left
+sleep 700
+motion 26 15
+sleep 500
+button release left
+sleep 1500

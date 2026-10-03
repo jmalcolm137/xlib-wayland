@@ -1,0 +1,17 @@
+# filesel.input — drive the Motif XmFileSelectionBox test using NEdit's own
+# code shape (FileSB-level XmNcancelCallback + a nested XtAppProcessEvent loop).
+#
+# The dialog is a popup shell (XmCSHUFMask) parented to the app toplevel, so it
+# becomes its own xdg_popup, exactly like NEdit's File -> Open dialog.  The
+# popup has no client-side titlebar, so its coordinates are surface-relative.
+#
+# Geometry is printed by the test (tests/test_xm_filesel.c):
+#   GEO:CANCEL  w=82 h=48 rel=175,411   -> centre 216,435
+
+sleep 900
+motion 216 435
+sleep 200
+button press left
+button release left
+sleep 800
+screenshot

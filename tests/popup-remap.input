@@ -1,0 +1,43 @@
+# popup-remap.input — scripted pointer input for the menu re-map regression
+# test (tests/test_popup.c 8 3).
+#
+# Same script shape as popup.input, but repeated three times.  Each repetition
+# posts the menu, selects an item, and dismisses the shell, so the client
+# re-maps the same wl_surface.  That is the path on which the shim used to
+# attach a buffer before the surface had been re-configured, which KWin
+# rejects with "attached a buffer before configure event" and kills the
+# client.
+
+# --- cycle 1 ---
+motion 40 12
+button press left
+button release left
+sleep 400
+motion 70 47
+sleep 200
+button press left
+button release left
+sleep 300
+
+# --- cycle 2 ---
+motion 40 12
+button press left
+button release left
+sleep 400
+motion 70 47
+sleep 200
+button press left
+button release left
+sleep 300
+
+# --- cycle 3 ---
+motion 40 12
+button press left
+button release left
+sleep 400
+motion 70 47
+sleep 200
+button press left
+button release left
+sleep 100
+screenshot

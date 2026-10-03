@@ -1,0 +1,217 @@
+# Motif/Wayland
+
+A Wayland-native, ABI-compatible implementation of `libX11` (Xlib) plus the
+build integration that lets the stock Xt/Motif stack — and unmodified XV and
+NEdit — run on top of it. See [DESIGN.md](DESIGN.md) for the full rationale.
+
+## Status
+
+The shim (`src/`, installed as `libX11.so.6`) is implemented and working.
+It is validated end-to-end, without any X server, against a bundled headless
+Wayland compositor:
+
+| Milestone | State |
+|---|---|
+| M0 model + build + unit tests | ✅ done (`meson test`) |
+| M1 Wayland backend, windows, drawing, `XImage`, events | ✅ done |
+| M2 fonts/text, colours, cursors, selections, Xrm, XRandR, XShape, local XIM | ✅ done |
+| M3 upstream libXt built unmodified; real Xt program runs | ✅ done |
+| M4 Open Motif (`libXm`) built unmodified; a Motif program runs | ✅ done |
+| **XV 6.2 built unmodified and rendering** | ✅ **done** |
+| **NEdit 5.7 built unmodified and rendering** | ✅ **done** |
+| X resource database (`RESOURCE_MANAGER`, `~/.Xresources`, `$XENVIRONMENT`) | ✅ done |
+| Client-side decorations when the compositor has none | ✅ done |
+| M5 Xft/Render, full IME | ⏳ planned |
+
+Verified behaviour (see `scripts/run-tests.sh`): display/screen/visual setup,
+the X window tree, GCs and the drawing primitives, `XPutImage`/`XGetImage`
+pixel-exact, core-font text, `Expose`/`Configure`/`Button`/`Key`/`Motion`
+events, atoms and window properties, Xrm, X's integer pixel grid for 1px
+stroked lines, and menu interaction — an override-redirect popup is promoted to
+an `xdg_popup`, takes a grab, arms items on `EnterNotify`, and routes presses
+to the item window.  Beyond the unit/golden tests, the stock **libXt**,
+**libXm**, **XV** and **NEdit** have all been built from unmodified sources
+against the prefix and run under the headless compositor.
+
+> Note: Open Motif needs `-std=gnu17` (its build tools predate C23) and its
+> `configure` must be given `--disable-xft`; NEdit needs `-std=gnu89 -fcommon`.
+> Both are host-compiler accommodations, not shim changes.
+
+## Quick start
+
+```sh
+# build the shim and run the unit + headless render tests
+scripts/run-tests.sh
+```
+
+The test runner needs `python3`+Pillow for pixel verification; it builds the
+shim with meson, runs `test_core`, renders `test_draw` under the bundled
+`headless-compositor`, and asserts the captured frame pixel-for-pixel.
+
+## Repository layout
+
+```
+src/raster/     pluggable raster interface (raster.h) + cairo backend
+src/wayland/    wl.c (connection/registry), surface.c (xdg_toplevel + compositor)
+src/xlib/       the Xlib implementation (display, window, gcontext, image,
+                font, event, input, atom/property, selection, cursor, Xrm,
+                region, XIM, XRandR, XShape, and xlibint.c: the internal ABI
+                that libXext/libXrender/libcairo depend on)
+tools/          headless-compositor.c (test compositor)
+tests/          test_core.c (unit), test_draw.c (Xlib), test_xt.c (Xt),
+                test_xm_menu.c (Motif menu), test_popup.c (menu interaction,
+                Motif-free), popup.input (scripted clicks for test_popup)
+scripts/        run-tests.sh, build-stack.sh, build-xv.sh, build-nedit.sh
+```
+
+## Building the full stack
+
+The stack is built in layers, bottom-up. The build scripts install into a
+single prefix, so every consumer links against the shim plus the libXt/libXm
+built here, never against the system copies.
+
+### 0. Prerequisites
+
+* Build tools: `meson`, `ninja`, `gcc`/`cc`, `make`, `cmake`, `pkg-config`,
+  `autoconf`, `automake`, `libtool`/`libtoolize`, plus `bison`/`byacc` and
+  `flex`/`lex` for Open Motif.
+* Upstream sources (already checked out in this environment):
+
+  | Component | Path                    | Build system |
+  |-----------|-------------------------|--------------|
+  | libXt     | `/tmp/opencode/src/libxt`  | autotools |
+  | Open Motif| `/tmp/opencode/src/motif`  | autotools |
+  | XV 6.2    | `/tmp/opencode/src/xv`     | CMake     |
+  | NEdit 5.7 | `/tmp/opencode/src/nedit`  | plain makefiles |
+
+No `sudo` is required: everything installs under `$MW_PREFIX`.
+
+### 1. Choose a prefix
+
+All scripts read the install prefix from `MW_PREFIX` (default
+`$HOME/.local/motif-wayland`). Set it once and it propagates to every script:
+
+```sh
+export MW_PREFIX="${MW_PREFIX:-$HOME/.local/motif-wayland}"
+```
+
+### 2. Build and install the libX11 shim
+
+`build-stack.sh` deliberately does **not** build the shim; it expects
+`$MW_PREFIX/lib/libX11.so` to already be installed. Build it with meson from
+the project root (use the same prefix):
+
+```sh
+meson setup build --prefix="$MW_PREFIX"
+meson install -C build
+```
+
+If `$MW_PREFIX/lib/libX11.so` is missing, `build-stack.sh` stops immediately
+with this exact instruction.
+
+### 3. Build libXt + Open Motif
+
+```sh
+scripts/build-stack.sh
+```
+
+This runs two stages, printing a banner for each:
+
+1. **libXt** — regenerates autotools and configures with
+   `CPPFLAGS=-I$MW_PREFIX/include`,
+   `LDFLAGS=-L$MW_PREFIX/lib -Wl,-rpath,$MW_PREFIX/lib` and
+   `PKG_CONFIG_PATH=$MW_PREFIX/lib/pkgconfig`, then `make -j`/`make install`.
+   `--disable-xkb` is passed only if the generated `configure` accepts it.
+2. **Open Motif** — regenerates autotools with `./autogen.sh`, then configures
+   with `--prefix=$MW_PREFIX`, `--x-includes=$MW_PREFIX/include`,
+   `--x-libraries=$MW_PREFIX/lib`, and `--disable-xft` (only if supported),
+   then `make -j`/`make install`.
+   (`--disable-build-demos` is passed only if a future tree supports it;
+   Open Motif 2.3.9 has no such option, so its demos build too — harmless.)
+
+Useful flags / overrides:
+
+```sh
+# Rebuild only one stage
+scripts/build-stack.sh --skip-xt        # libXt already good, rebuild Motif
+scripts/build-stack.sh --skip-motif     # rebuild libXt only
+
+# Different prefix for this run
+MW_PREFIX=/opt/motifwl scripts/build-stack.sh
+scripts/build-stack.sh --prefix=/opt/motifwl
+
+# Fewer parallel jobs
+JOBS=4 scripts/build-stack.sh
+```
+
+Both stages are idempotent: re-running simply reconfigures and reinstalls.
+
+### 4. Build XV
+
+```sh
+scripts/build-xv.sh
+```
+
+Configures with CMake against the prefix and builds:
+
+```sh
+cmake -S /tmp/opencode/src/xv -B "$MW_PREFIX/build/xv" \
+      -DCMAKE_PREFIX_PATH="$MW_PREFIX" -DCMAKE_BUILD_TYPE=Release
+cmake --build "$MW_PREFIX/build/xv" -j
+```
+
+`find_package(X11)` **must** resolve to `$MW_PREFIX` (our libX11/libXt), not
+the system X11. The script passes `CMAKE_PREFIX_PATH` plus include/library
+hints to force this; check the configure output if in doubt.
+
+### 5. Build NEdit
+
+```sh
+scripts/build-nedit.sh
+```
+
+NEdit ships hand-written makefiles and no configuration system, so the script
+builds it unmodified by overriding `CFLAGS`/`LIBS` on the make command line
+(the hardcoded `/usr/X11R6` paths in `makefiles/Makefile.linux` are replaced
+with `$MW_PREFIX`):
+
+```sh
+make -C /tmp/opencode/src/nedit linux \
+     CFLAGS="-O2 -I$MW_PREFIX/include ... -DHAVE__XMVERSIONSTRING" \
+     LIBS="-L$MW_PREFIX/lib -lXm -lXt -lX11 -lm -Wl,-rpath,$MW_PREFIX/lib"
+```
+
+`HAVE__XMVERSIONSTRING` is enabled because Open Motif 2.3.9 exports
+`_XmVersionString`, which lets `nedit -V` report both compile-time and
+run-time Motif versions. No extra "NEDIT version symbol" is needed for Motif
+2.1 compat: NEdit reads `XmVersion` from `<Xm/Xm.h>`. (The `-lXp`/`-lXpm`
+note in `Makefile.linux` only applies when linking `-lXext`, which NEdit's
+baseline link line does not.)
+
+The result is a self-contained `source/nedit` and `source/nc`; the script
+leaves them in the source tree and prints their paths.
+
+### One-shot sequence
+
+```sh
+export MW_PREFIX="$HOME/.local/motif-wayland"
+
+meson setup build --prefix="$MW_PREFIX" && meson install -C build
+scripts/build-stack.sh
+scripts/build-xv.sh
+scripts/build-nedit.sh
+```
+
+### Script environment variables
+
+| Variable     | Default                              | Used by |
+|--------------|--------------------------------------|---------|
+| `MW_PREFIX`  | `$HOME/.local/motif-wayland`         | all |
+| `JOBS`       | `nproc`                              | all |
+| `LIBXT_SRC`  | `/tmp/opencode/src/libxt`            | `build-stack.sh` |
+| `MOTIF_SRC`  | `/tmp/opencode/src/motif`            | `build-stack.sh` |
+| `XV_SRC`     | `/tmp/opencode/src/xv`               | `build-xv.sh` |
+| `NEDIT_SRC`  | `/tmp/opencode/src/nedit`            | `build-nedit.sh` |
+| `NEDIT_MAKE_TARGET` | `linux`                       | `build-nedit.sh` |
+
+Each script also accepts `--prefix=DIR` and `-h`/`--help`.

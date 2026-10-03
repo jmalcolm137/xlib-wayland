@@ -1,0 +1,6 @@
+option('tests', type: 'boolean', value: true,
+       description: 'Build the test programs')
+option('tools', type: 'boolean', value: true,
+       description: 'Build the headless test compositor')
+option('raster', type: 'combo', choices: ['cairo', 'skia'], value: 'cairo',
+       description: 'Raster backend (only cairo is implemented)')

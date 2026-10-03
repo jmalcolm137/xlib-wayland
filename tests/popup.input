@@ -1,0 +1,23 @@
+# popup.input — scripted pointer input for tests/test_popup.c
+#
+# Coordinates are surface-relative, as delivered in wl_pointer.motion, and are
+# interpreted against whichever surface currently has input focus.  The app
+# toplevel has a 24px client-side titlebar, so content y = surface y - 24.
+# The popup has no titlebar, so its coordinates are used directly.
+
+# Open the File cascade: menubar occupies content y 0..23, so click at
+# surface y=36 (24 titlebar + 12).
+motion 40 12
+button press left
+button release left
+sleep 400
+
+# Move into item 1 ("Beta"): popup-local y = ITEM_Y(4) + 1*ITEM_PITCH(30) + 13
+motion 70 47
+sleep 200
+
+# Select it.
+button press left
+button release left
+sleep 100
+screenshot

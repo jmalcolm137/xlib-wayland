@@ -1,0 +1,17 @@
+# Build output
+/build/
+/build-*/
+/subprojects/packagecache/
+
+# Compiled objects and libraries
+*.o
+*.a
+*.so
+*.so.*
+*.lo
+*.la
+
+# Editor/OS noise
+*~
+*.swp
+.DS_Store

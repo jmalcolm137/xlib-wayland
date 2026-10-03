@@ -1,0 +1,26 @@
+sleep 1500
+# File -> Open (the callback creates the dialog and runs a nested loop)
+motion 31 19
+sleep 400
+button press left
+sleep 700
+motion 26 15
+sleep 400
+button release left
+sleep 2000
+# press OK on the dialog (dialog-local); the callback destroys the shell
+motion 52 435
+sleep 500
+button press left
+sleep 300
+button release left
+sleep 2000
+# File -> Quit: the menu must still work
+motion 31 19
+sleep 500
+button press left
+sleep 700
+motion 26 43
+sleep 400
+button release left
+sleep 2000

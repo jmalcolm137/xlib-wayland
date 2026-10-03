@@ -1,0 +1,32 @@
+# popup-dismiss.input — the "use one menu, then open another" cycle for
+# tests/test_popup.c.
+#
+# A compositor can dismiss a popup on its own (KWin does this on a click
+# outside) by sending xdg_popup.popup_done.  The dismissed xdg_popup is inert
+# and cannot be re-used, so the shim has to rebuild the popup when the menu is
+# posted again.  The parent it anchors the new popup to must be a real
+# toplevel: anchoring to the previous menu shell (which is itself an
+# override-redirect toplevel, and by then torn down) made every menu after the
+# first refuse to drop down.
+
+motion 40 12
+button press left
+button release left
+sleep 500
+
+# Compositor-side dismissal.
+popupdone
+sleep 500
+
+# Re-post without any intervening motion, so any pointer-derived state is
+# still the stale state left by the dismissal.
+button press left
+button release left
+sleep 500
+
+# Select an item from the re-posted menu.
+motion 70 47
+sleep 300
+button press left
+button release left
+sleep 400
