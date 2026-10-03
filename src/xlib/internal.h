@@ -491,6 +491,13 @@ typedef struct _XDisplayImpl {
     MwWindow                   *ptr_focus;            /* deepest window */
     MwWindow                   *kbd_focus;            /* XSetInputFocus target */
     bool                        focus_explicit;
+    /* Mouse wheel: Wayland reports scroll as axis events, but X clients expect
+     * the wheel buttons (4/5, 6/7).  Accumulate per axis and emit one click per
+     * detent in ptr_frame (see input.c). */
+    double                      scroll_acc[2];      /* residual detents */
+    double                      scroll_cont[2];     /* continuous motion */
+    double                      scroll_step[2];     /* discrete steps this frame */
+    bool                        scroll_have_step[2];
     /* Most recently mapped ordinary (non-override, non-popup) toplevel.  A
      * Motif menu shell is parented to the *root*, so when the pointer-derived
      * candidates are unusable there is no way to find the application's

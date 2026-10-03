@@ -645,14 +645,15 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial,
     }
 }
 
-static void ptr_axis(void *data, struct wl_pointer *p, uint32_t time,
-                     uint32_t axis, wl_fixed_t value)
+/* One wheel click as the X button clients expect: 4/5 vertical, 6/7 horizontal.
+ * Wayland's positive direction is down/right, which X reports as 5 and 7. */
+static void wheel_click(Display *d, int axis, int dir)
 {
-    (void)p; (void)time; (void)value;
-    Display *d = data;
     MwWindow *target = MWD(d)->ptr_focus;
     if (!target) return;
-    unsigned int b = axis == WL_POINTER_AXIS_VERTICAL_SCROLL ? 4 : 6;
+    unsigned int b;
+    if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) b = dir > 0 ? 5 : 4;
+    else                                         b = dir > 0 ? 7 : 6;
     XButtonEvent be;
     pt_event(d, target, (XEvent *)&be, ButtonPress, MWD(d)->ptr_x, MWD(d)->ptr_y,
              current_mods(d), (int)b, NotifyNormal, 0);
@@ -662,11 +663,60 @@ static void ptr_axis(void *data, struct wl_pointer *p, uint32_t time,
     deliver(d, target, (XEvent *)&be, ButtonReleaseMask);
 }
 
-static void ptr_frame(void *data, struct wl_pointer *p) { (void)data; (void)p; }
+/* Wayland delivers scroll on the axis, in surface-local coordinates; X clients
+ * instead expect wheel-button clicks.  A wheel also carries a discrete step
+ * count (axis_discrete, or axis_value120 once the seat is v8), which is the
+ * reliable number of detents; the continuous value is the fallback for
+ * touchpads and for compositors that send only that.  Events are collected for
+ * the frame and turned into clicks in ptr_frame. */
+static void ptr_axis(void *data, struct wl_pointer *p, uint32_t time,
+                     uint32_t axis, wl_fixed_t value)
+{
+    (void)p; (void)time;
+    if (axis > 1) return;
+    MWD((Display *)data)->scroll_cont[axis] += wl_fixed_to_double(value) / 10.0;
+}
+
 static void ptr_axis_source(void *d, struct wl_pointer *p, uint32_t s) { (void)d;(void)p;(void)s; }
 static void ptr_axis_stop(void *d, struct wl_pointer *p, uint32_t t, uint32_t a) { (void)d;(void)p;(void)t;(void)a; }
-static void ptr_axis_discrete(void *d, struct wl_pointer *p, uint32_t a, int32_t v) { (void)d;(void)p;(void)a;(void)v; }
-static void ptr_axis_value120(void *d, struct wl_pointer *p, uint32_t a, int32_t v) { (void)d;(void)p;(void)a;(void)v; }
+
+static void ptr_axis_discrete(void *data, struct wl_pointer *p, uint32_t axis, int32_t v)
+{
+    (void)p;
+    if (axis > 1) return;
+    Display *d = data;
+    MWD(d)->scroll_step[axis] += v;
+    MWD(d)->scroll_have_step[axis] = true;
+}
+
+static void ptr_axis_value120(void *data, struct wl_pointer *p, uint32_t axis, int32_t v)
+{
+    (void)p;
+    if (axis > 1) return;
+    Display *d = data;
+    MWD(d)->scroll_step[axis] += (double)v / 120.0;
+    MWD(d)->scroll_have_step[axis] = true;
+}
+
+static void ptr_frame(void *data, struct wl_pointer *p)
+{
+    (void)p;
+    Display *d = data;
+    XDisplayImpl *dp = MWD(d);
+    for (int a = 0; a < 2; a++) {
+        double delta;
+        if (!dp->scroll_cont[a] && !dp->scroll_have_step[a]) continue;
+        delta = dp->scroll_have_step[a] ? dp->scroll_step[a] : dp->scroll_cont[a];
+        dp->scroll_cont[a] = 0;
+        dp->scroll_step[a] = 0;
+        dp->scroll_have_step[a] = false;
+        /* Keep the fraction so half-detent events still add up, and emit one
+         * click per whole detent. */
+        dp->scroll_acc[a] += delta;
+        while (dp->scroll_acc[a] >= 1.0)  { wheel_click(d, a, +1); dp->scroll_acc[a] -= 1.0; }
+        while (dp->scroll_acc[a] <= -1.0) { wheel_click(d, a, -1); dp->scroll_acc[a] += 1.0; }
+    }
+}
 
 static const struct wl_pointer_listener pointer_listener = {
     .enter = ptr_enter,

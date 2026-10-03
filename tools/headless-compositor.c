@@ -228,6 +228,7 @@ enum mw_action_kind {
 	ACT_SCREENSHOT,
 	ACT_POPUPDONE,
 	ACT_RESIZE,
+	ACT_AXIS,
 };
 
 struct mw_action {
@@ -235,6 +236,7 @@ struct mw_action {
 	int x, y;
 	uint32_t state;   /* pressed/released */
 	uint32_t code;    /* button or evdev keycode */
+	int value;        /* ACT_AXIS: signed wheel detents */
 	int delay_ms;
 	int has_xy;       /* motion only: the coordinates are meaningful */
 };
@@ -2422,6 +2424,17 @@ static void parse_script(struct mw_compositor *comp, const char *path)
 			a.kind = ACT_KEY;
 			a.state = parse_press_state(st);
 			a.code = (uint32_t)strtoul(code, NULL, 0);
+		} else if (!strcmp(tok, "axis")) {
+			/* axis vertical|horizontal NOTCHES: a wheel detent, positive
+			 * meaning down/right, as a compositor would deliver it. */
+			char *ax = strtok_r(NULL, " \t\r\n", &save);
+			char *n = strtok_r(NULL, " \t\r\n", &save);
+			if (!ax || !n)
+				continue;
+			a.kind = ACT_AXIS;
+			a.code = (!strcasecmp(ax, "horizontal") ||
+				  !strcmp(ax, "h")) ? 1 : 0;
+			a.value = atoi(n);
 		} else if (!strcmp(tok, "frame")) {
 			a.kind = ACT_FRAME;
 		} else if (!strcmp(tok, "screenshot")) {
@@ -2608,6 +2621,30 @@ static void execute_action(struct mw_compositor *comp, struct mw_action *a)
 			wl_pointer_send_frame(dev->resource);
 		break;
 	}
+	case ACT_AXIS: {
+		struct mw_device *dev = pointer_for_surface(comp, surface);
+		int ver;
+		if (!dev || !surface)
+			return;
+		pointer_focus(dev, surface, comp->ptr_x, comp->ptr_y);
+		ver = wl_resource_get_version(dev->resource);
+		/* A wheel detent as a compositor delivers it: the continuous axis
+		 * value, the discrete step count (axis_value120 on v8, the older
+		 * axis_discrete below that), then the frame that batches them. */
+		if (ver >= 5)
+			wl_pointer_send_axis_source(dev->resource,
+						    WL_POINTER_AXIS_SOURCE_WHEEL);
+		wl_pointer_send_axis(dev->resource, now_ms(), a->code,
+				     wl_fixed_from_int(a->value * 10));
+		if (ver >= 8)
+			wl_pointer_send_axis_value120(dev->resource, a->code,
+						      a->value * 120);
+		else if (ver >= 5)
+			wl_pointer_send_axis_discrete(dev->resource, a->code,
+						      a->value);
+		wl_pointer_send_frame(dev->resource);
+		break;
+	}
 	case ACT_SLEEP:
 		break;
 	case ACT_SCREENSHOT:
@@ -2739,6 +2776,7 @@ static void usage(const char *argv0)
 		"                    motion X Y\n"
 		"                    button PRESS|RELEASE BUTTON\n"
 		"                    key PRESS|RELEASE KEYCODE\n"
+		"                    axis vertical|horizontal NOTCHES\n"
 		"                    frame\n"
 		"                    sleep MS\n"
 		"                    screenshot\n",

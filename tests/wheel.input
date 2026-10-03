@@ -1,0 +1,11 @@
+# Wheel input for test_wheel.c.  Wayland's positive direction is down/right.
+# No screenshot line: the compositor captures on --timeout, after the client
+# has collected the events and printed its verdict.
+sleep 600
+motion 180 130
+sleep 200
+axis vertical 1
+axis vertical 1
+axis vertical -1
+axis horizontal 1
+sleep 400

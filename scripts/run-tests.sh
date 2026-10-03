@@ -819,6 +819,24 @@ else
     echo "  (skipped: xev not installed)"
 fi
 
+say "the mouse wheel maps to buttons 4/5 and 6/7"
+# Wayland delivers scroll on wl_pointer.axis; X clients expect the wheel
+# buttons instead (4/5 vertical, 6/7 horizontal).  The shim used to ignore the
+# sign, so every scroll went one way.  tests/wheel.input sends two detents
+# down, one up and one right.
+cc -o "$BUILD/test_wheel" "$ROOT/tests/test_wheel.c" \
+    -I"$PREFIX/include" -L"$PREFIX/lib" -lX11 \
+    -Wl,-rpath,"$PREFIX/lib" ${CFLAGS:-}
+INPUT="$ROOT/tests/wheel.input" HC_TIMEOUT=6 \
+    run_headless wheel mwwheel 400x300 "$WORK/wheel.png" "$BUILD/test_wheel"
+if grep -q 'all checks passed' "$WORK/wheel.client"; then
+    echo "  ok   down/up/right became buttons 5/4/7"
+else
+    echo "  FAIL: wheel buttons wrong"
+    sed 's/^/  /' "$WORK/wheel.client" | head
+    exit 1
+fi
+
 say "xdpyinfo queries the shim"
 # xdpyinfo drives the display/screen/visual and extension queries through
 # libX11 (and pulls in libXtst for XTest), so it is the broadest API query
