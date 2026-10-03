@@ -155,6 +155,17 @@ static void kbd_enter(void *data, struct wl_keyboard *kbd, uint32_t serial,
             fe.mode = NotifyNormal; fe.detail = NotifyNonlinear;
             mw_put_event(d, (XEvent *)&fe);
         }
+        /* X follows a FocusIn with a KeymapNotify for windows that selected
+         * KeymapStateMask; xev prints one and clients use it to resynchronise
+         * modifier state that was missed while unfocused. */
+        if (deep->event_mask & KeymapStateMask) {
+            XKeymapEvent ke;
+            memset(&ke, 0, sizeof ke);
+            ke.type = KeymapNotify;
+            ke.display = d;
+            ke.window = deep->id;
+            mw_put_event(d, (XEvent *)&ke);
+        }
     }
 }
 

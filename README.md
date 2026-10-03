@@ -72,25 +72,39 @@ scripts/run-x11-clients.sh        # or a subset: ... xterm xclock
 ```
 
 Each client runs under the bundled compositor with the shim first on the library
-path. `xmessage`, `xlogo`, `xload`, `xcalc`, `xclock` and `xterm` start and
-paint; clients that need an API the shim does not implement yet are reported as
-`gap` and name the missing symbol: `xdpyinfo` needs `_XGetAsyncData`, `xinput`
-needs the XInput2 event accessors, and `setxkbmap` needs its libxkbfile keyboard
-loader. A `crash` is always a regression. The matrix also runs as part of
-`scripts/run-tests.sh`.
+path. `xmessage`, `xlogo`, `xload`, `xcalc`, `xclock`, `xman`, `xedit` and
+`xterm` start and paint, and `xev` runs and reports the events the shim
+delivers; clients that need an API the shim does not implement yet are reported
+as `gap` and name the missing symbol: `xdpyinfo` needs `_XGetAsyncData`,
+`xinput` needs the XInput2 event accessors, and `setxkbmap` needs its libxkbfile
+keyboard loader. A `crash` is always a regression. The matrix also runs as part
+of `scripts/run-tests.sh`, which additionally drives `xev` through a
+map/enter/motion/button/key sequence and checks it reports each event.
 
-`xclock`, `xlogo`, `xload` and `xcalc` are the `xorg-xclock`, `xorg-xlogo`,
-`xorg-xload` and `xorg-xcalc` packages. Use them from the system, or unpack
-their binaries under `$MW_PREFIX` without root:
+`xclock`, `xlogo`, `xload`, `xcalc`, `xman`, `xedit` and `xev` are the
+`xorg-xclock`, `xorg-xlogo`, `xorg-xload`, `xorg-xcalc`, `xorg-xman`,
+`xorg-xedit` and `xorg-xev` packages. Use them from the system, or unpack their
+binaries under `$MW_PREFIX` without root:
 
 ```sh
 pacman -Sp --print-format '%l' xorg-xclock xorg-xlogo xorg-xload xorg-xcalc \
+                                   xorg-xman xorg-xedit xorg-xev \
     | xargs -n1 curl -fsLO
 d="$(mktemp -d)"; for f in *.pkg.tar.zst; do tar --zstd -xf "$f" -C "$d"; done
 mkdir -p "$MW_PREFIX/bin" "$MW_PREFIX/share/X11/app-defaults"
-cp "$d"/usr/bin/x{clock,logo,load,calc} "$MW_PREFIX/bin/"
-cp "$d"/usr/share/X11/app-defaults/X{Clock,Logo,Load,Calc}* \
+cp "$d"/usr/bin/x{clock,logo,load,calc,man,edit,ev} "$MW_PREFIX/bin/"
+cp "$d"/usr/share/X11/app-defaults/X{Clock,Logo,Load,Calc,man,edit}* \
    "$MW_PREFIX/share/X11/app-defaults/"
+```
+
+`xedit` needs one extra step: the directory it loads its Lisp files from is
+compiled in (`${libdir}/X11/xedit/lisp`), so the packaged binary exits as soon
+as it cannot find them. Build it from source with the path under the prefix
+rather than unpacking it:
+
+```sh
+./configure --prefix="$MW_PREFIX" --with-lispdir="$MW_PREFIX/share/xedit/lisp"
+make -j && make install
 ```
 
 ## Repository layout

@@ -794,6 +794,31 @@ sys.exit(0 if ok else 1)
 PY
 fi
 
+say "xev reports the events it selects"
+# xev exists to print every event it receives, so it is a direct check that the
+# shim delivers what a real X server would for a map/enter/motion/button/key
+# sequence -- including the KeymapNotify that X follows a FocusIn with, and the
+# LeaveNotify when the pointer leaves.
+if [ -x "$PREFIX/bin/xev" ]; then
+    printf 'sleep 1500\nmotion 90 90\nsleep 300\nbutton press left\nsleep 150\nbutton release left\nsleep 200\nkey press 38\nsleep 120\nkey release 38\nsleep 200\nmotion 380 280\nsleep 300\nmotion 20 20\nsleep 1200\n' > "$WORK/xev.input"
+    INPUT="$WORK/xev.input" HC_TIMEOUT=8 \
+        run_headless xev mwxev 400x300 "$WORK/xev.png" "$PREFIX/bin/xev"
+    missing=
+    for e in Expose PropertyNotify FocusIn KeymapNotify EnterNotify LeaveNotify \
+             MotionNotify ButtonPress ButtonRelease KeyPress KeyRelease; do
+        grep -q "^$e event" "$WORK/xev.client" || missing="$missing $e"
+    done
+    if [ -z "$missing" ]; then
+        echo "  ok   expose, focus, keymap, crossing, motion, button and key events"
+    else
+        echo "  FAIL: xev never saw:$missing"
+        sed 's/^/  /' "$WORK/xev.client" | head -20
+        exit 1
+    fi
+else
+    echo "  (skipped: xev not installed)"
+fi
+
 say "real X11 client matrix"
 # Running actual X11 programs is the most effective verification we have; see
 # scripts/run-x11-clients.sh for why a conformance suite does not apply here.

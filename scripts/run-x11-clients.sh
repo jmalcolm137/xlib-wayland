@@ -49,6 +49,9 @@ CLIENTS=(
     "xload|ok|"
     "xcalc|ok|"
     "xclock|ok|"
+    "xman|ok|"
+    "xedit|ok|"
+    "xev|ran|"
     "xterm|ok|-geometry 80x24"
     "xdpyinfo|gap|"
     "xinput|gap|list"
@@ -122,11 +125,15 @@ for entry in "${CLIENTS[@]}"; do
     fi
     printf '%-12s %-6s %s\n' "$name" "$result" "$detail"
 
-    # A crash is always a shim defect; a client we claim works must not regress.
+    # A crash is always a shim defect; a client we claim works must not
+    # regress.  "ran" only requires that it started without a missing symbol.
     if [ "$result" = crash ]; then
         fail=1
     elif [ "$expect" = ok ] && [ "$result" != ok ]; then
         echo "  ^ expected $name to run and paint; it did not" >&2
+        fail=1
+    elif [ "$expect" = ran ] && [ "$result" = gap ]; then
+        echo "  ^ expected $name to start; a symbol is missing" >&2
         fail=1
     fi
 done
