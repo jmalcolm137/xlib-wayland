@@ -338,6 +338,11 @@ Screen *XScreenOfDisplay(Display *d, int scr) { (void)scr; return MWSCR(d); }
 Display *XDisplayOfScreen(Screen *s) { return s->display; }
 VisualID XVisualIDFromVisual(Visual *v) { return v->visualid; }
 
+/* How many motion events the server buffers for this client.  There is no
+ * server-side event queue here, so report the value carried in the display
+ * structure (zero, i.e. motion is not buffered); xdpyinfo prints it. */
+unsigned long XDisplayMotionBufferSize(Display *d) { return MWD(d)->motion_buffer; }
+
 int XFlush(Display *d)
 {
     XDisplayImpl *dp = MWD(d);

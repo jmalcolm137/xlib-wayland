@@ -126,6 +126,26 @@ int _XReadEvents(Display *d) { mw_process_events(d, false); return 1; }
 int _XDeqAsyncHandler(Display *d, void *handler) { (void)d; (void)handler; return 0; }
 int _XGetAsyncReply(Display *d, void *rep, void *buf, int len, int extra, Bool discard)
 { (void)d; (void)rep; (void)buf; (void)len; (void)extra; (void)discard; return 1; }
+
+/* Xlib's asynchronous-reply machinery, resolved by libXtst and therefore by
+ * every program that links it (xdpyinfo among them).  The reference version
+ * reads further reply bytes off the wire; there is no wire here, so the bytes
+ * the caller already holds in buf are all there are and anything the
+ * connection would have supplied reads as zero. */
+void _XGetAsyncData(Display *d, char *data, char *buf, int len, int skip,
+                    int datalen, int discardtotal)
+{
+    (void)d; (void)discardtotal;
+    if (!data) return;
+    if (skip < 0) skip = 0;
+    if (len < skip) len = skip;
+    if (buf) buf += skip;
+    len -= skip;
+    int n = (datalen < len) ? datalen : len;
+    if (n > 0 && buf) memcpy(data, buf, (size_t)n);
+    if (datalen > n) memset(data + n, 0, (size_t)(datalen - n));
+}
+
 int _XData32(Display *d, void *src, long len) { (void)d; (void)src; (void)len; return 0; }
 int _XCopyToArg(void *src, void *dst, unsigned int n) { (void)src; (void)dst; (void)n; return 0; }
 unsigned long _XAllocID(Display *d) { return mw_alloc_id(d); }

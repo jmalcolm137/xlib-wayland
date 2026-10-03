@@ -73,13 +73,15 @@ scripts/run-x11-clients.sh        # or a subset: ... xterm xclock
 
 Each client runs under the bundled compositor with the shim first on the library
 path. `xmessage`, `xlogo`, `xload`, `xcalc`, `xclock`, `xman`, `xedit` and
-`xterm` start and paint, and `xev` runs and reports the events the shim
-delivers; clients that need an API the shim does not implement yet are reported
-as `gap` and name the missing symbol: `xdpyinfo` needs `_XGetAsyncData`,
-`xinput` needs the XInput2 event accessors, and `setxkbmap` needs its libxkbfile
-keyboard loader. A `crash` is always a regression. The matrix also runs as part
-of `scripts/run-tests.sh`, which additionally drives `xev` through a
-map/enter/motion/button/key sequence and checks it reports each event.
+`xterm` start and paint; `xev` runs and reports the events the shim delivers,
+and `xdpyinfo` — which also pulls in libXtst — produces a full
+display/screen/visual report.  Clients that need an API the shim does not
+implement yet are reported as `gap` and name the missing symbol: `xinput` needs
+the XInput2 event accessors and `setxkbmap` needs its libxkbfile keyboard
+loader.  A `crash` is always a regression.  The matrix also runs as part of
+`scripts/run-tests.sh`, which additionally drives `xev` through a
+map/enter/motion/button/key sequence and checks it reports each event, and
+checks that xdpyinfo's report contains each section.
 
 `xclock`, `xlogo`, `xload`, `xcalc`, `xman`, `xedit` and `xev` are the
 `xorg-xclock`, `xorg-xlogo`, `xorg-xload`, `xorg-xcalc`, `xorg-xman`,

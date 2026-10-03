@@ -819,6 +819,32 @@ else
     echo "  (skipped: xev not installed)"
 fi
 
+say "xdpyinfo queries the shim"
+# xdpyinfo drives the display/screen/visual and extension queries through
+# libX11 (and pulls in libXtst for XTest), so it is the broadest API query
+# client we run.  It opens no window: check the report is complete instead.
+XDPY="$PREFIX/bin/xdpyinfo"; [ -x "$XDPY" ] || XDPY="$(command -v xdpyinfo)"
+if [ -n "$XDPY" ] && [ -x "$XDPY" ]; then
+    run_headless xdpyinfo mwxdpy 640x480 "$WORK/xdpyinfo.png" "$XDPY"
+    missing=
+    for line in "version number" "vendor string:" "maximum request size" \
+                "motion buffer size" "keycode range" "number of extensions" \
+                "default screen number" "number of screens" "dimensions" \
+                "depth of root window" "default visual id" \
+                "red, green, blue masks"; do
+        grep -q "$line" "$WORK/xdpyinfo.client" || missing="$missing '$line'"
+    done
+    if [ -z "$missing" ]; then
+        echo "  ok   display, screen, visual and extension queries all answered"
+    else
+        echo "  FAIL: xdpyinfo output lacked:$missing"
+        sed 's/^/  /' "$WORK/xdpyinfo.client" | head -20
+        exit 1
+    fi
+else
+    echo "  (skipped: xdpyinfo not installed)"
+fi
+
 say "real X11 client matrix"
 # Running actual X11 programs is the most effective verification we have; see
 # scripts/run-x11-clients.sh for why a conformance suite does not apply here.
