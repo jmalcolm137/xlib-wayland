@@ -167,7 +167,13 @@ else
 fi
 
 nedit_xft=no
-strings "$NEDIT_BIN" | grep -q 'fixedRT' && nedit_xft=yes
+# Capture first: `strings ... | grep -q` closes the pipe as soon as it matches,
+# strings dies with SIGPIPE, and with `set -o pipefail` the pipeline then reads
+# as a failure even though the match succeeded.
+nedit_strings="$(strings "$NEDIT_BIN" 2>/dev/null || true)"
+case "$nedit_strings" in
+    *fixedRT*) nedit_xft=yes ;;
+esac
 
 if [ "$motif_xft" != "$nedit_xft" ]; then
     die "Xft mismatch: Motif ($MW_PREFIX/include/Xm/Xm.h) says USE_XFT=$motif_xft

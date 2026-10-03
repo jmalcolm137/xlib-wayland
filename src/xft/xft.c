@@ -15,6 +15,7 @@
 #include <X11/Xft/Xft.h>
 
 #include <stdarg.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -203,6 +204,15 @@ FcPattern *XftFontMatch(Display *dpy, int screen, _Xconst FcPattern *pattern,
 XftFont *XftFontOpenPattern(Display *dpy, FcPattern *pattern)
 {
     (void)dpy;
+    if (getenv("MW_TRACE")) {
+        FcChar8 *fam = NULL; double px = 0;
+        if (pattern) {
+            FcPatternGetString(pattern, FC_FAMILY, 0, &fam);
+            FcPatternGetDouble(pattern, FC_PIXEL_SIZE, 0, &px);
+        }
+        fprintf(stderr, "MW: XftFontOpenPattern family=%s px=%.1f\n",
+                fam ? (char *)fam : "(null)", px);
+    }
     if (!pattern) return NULL;
     double px = 0;
     FcPatternGetDouble(pattern, FC_PIXEL_SIZE, 0, &px);

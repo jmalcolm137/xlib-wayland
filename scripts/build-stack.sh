@@ -257,18 +257,24 @@ build_motif() {
         "--x-libraries=$MW_PREFIX/lib"
     )
 
-    # The shim does not provide Xft/XRender.  Note the two spellings: some Motif
-    # trees advertise --disable-xft, while 2.3.8 only has AC_ARG_ENABLE([xft])
-    # whose *default is yes* on Linux -- it links whatever system libXft it
-    # finds.  Leaving it on would bind libXm to the system libXft/libXrender,
-    # which in turn resolve libX11.so.6 to the shim and then call XRender
-    # entry points it does not implement.  So force it off either way.
-    if configure_supports ./configure --disable-xft; then
+    # Xft is deliberately left OFF for now.  The shim does provide
+    # libXft.so.2 (see src/xft), and Motif built with --enable-xft does load
+    # Xft fonts through it, but Motif then draws them through a path that ends
+    # up with no font bound to the GC (_XmXftDrawCreate/TextF use Xft only when
+    # its font list resolves to one; a core entry resets that), and a real
+    # server would fall back to a default font where the shim draws nothing --
+    # so menu and text labels disappear.  Leave it off until Motif's Xft draw
+    # path is made to work.  Pass --with-xft to build it enabled for testing.
+    if [ "${WITH_XFT:-0}" = 1 ] && configure_supports ./configure --enable-xft; then
+        export PKG_CONFIG_PATH="$MW_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+        conf_args+=(--enable-xft)
+        log "Motif: Xft ENABLED for testing (uses $MW_PREFIX/lib/libXft.so.2)."
+    elif configure_supports ./configure --disable-xft; then
         conf_args+=(--disable-xft)
-        log "Motif: Xft support disabled (shim has no Xft/XRender)."
+        log "Motif: Xft support disabled."
     elif configure_supports ./configure --enable-xft; then
         conf_args+=(--enable-xft=no)
-        log "Motif: Xft support disabled via --enable-xft=no (this tree defaults it to yes)."
+        log "Motif: Xft support disabled via --enable-xft=no."
     else
         warn "Motif: this configure cannot disable Xft; leaving it enabled."
     fi
