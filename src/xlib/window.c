@@ -249,21 +249,15 @@ void mw_map_window(Display *d, MwWindow *win, bool raised)
          * saw one.  It also showed up as a stray window on screen. */
         promotable = false;
     } else if (win->override_redirect) {
-        if (win->parent && is_root(d, win->parent)) {
-            /* An override-redirect window whose parent is the root is a
-             * standalone top-level in X: a window manager never manages it,
-             * but the application does expect it on screen.  CDE's dtwm creates
-             * its front panel and workspace window this way (and, unlike a
-             * menu, they have no ordinary toplevel to anchor a popup to), so it
-             * has to become a Wayland toplevel.  Small helpers are still
-             * skipped: Motif's 10x10 grab window lives far off-screen and has
-             * no pixels anyone expects to see. */
-            promotable = (win->w >= 32 || win->h >= 32);
-        } else {
-            /* An override-redirect window parented to another window is a
-             * popup (menus, tooltips), anchored to its toplevel. */
-            promotable = (mw_popup_anchor(win) != NULL);
-        }
+        /* Only as a popup anchored to an ordinary toplevel.  There is no
+         * "unmanaged but visible" toplevel on Wayland, so a helper the
+         * application never expected anyone to show (Motif's 10x10 window, or
+         * dtwm's full-screen workspace/backdrop overlays, which are meant to be
+         * invisible root covers) must stay out of the Wayland tree rather than
+         * appear as a stray window.  A legitimate override-redirect *panel* is
+         * not override-redirect in this sense -- CDE's front panel window is a
+         * normal root child and is promoted by the branch above. */
+        promotable = (mw_popup_anchor(win) != NULL);
     } else {
         promotable = win->parent && is_root(d, win->parent);
     }

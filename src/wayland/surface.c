@@ -389,8 +389,34 @@ void mw_toplevel_create(MwWindow *win)
 
     tl->xdg_toplevel = xdg_surface_get_toplevel(tl->xdg_surface);
     xdg_toplevel_add_listener(tl->xdg_toplevel, &toplevel_listener, tl);
-    xdg_toplevel_set_title(tl->xdg_toplevel, "Motif");
-    xdg_toplevel_set_app_id(tl->xdg_toplevel, "org.motif.wayland");
+
+    /* Report the application's identity to the compositor.  The WM_CLASS
+     * instance (falling back to the class) becomes the Wayland app_id, and
+     * WM_NAME the title.  Without this every window was "org.motif.wayland",
+     * so a window manager such as CoW could not tell one application from
+     * another -- nor dtwm's front panel from its workspace window. */
+    {
+        XClassHint ch = { NULL, NULL };
+        const char *app_id = "org.motif.wayland";
+        if (XGetClassHint(d, win->id, &ch) && ch.res_name) {
+            if (ch.res_name[0])
+                app_id = ch.res_name;
+            else if (ch.res_class && ch.res_class[0])
+                app_id = ch.res_class;
+        }
+        xdg_toplevel_set_app_id(tl->xdg_toplevel, app_id);
+        XFree(ch.res_name);
+        XFree(ch.res_class);
+
+        char *name = NULL;
+        if (XFetchName(d, win->id, &name) && name && name[0]) {
+            xdg_toplevel_set_title(tl->xdg_toplevel, name);
+            XFree(name);
+        } else {
+            XFree(name);
+            xdg_toplevel_set_title(tl->xdg_toplevel, "Motif");
+        }
+    }
 
     /* Ask for server-side decorations.  That is what an X client expects:
      * the window manager owns the frame, the titlebar and interactive
