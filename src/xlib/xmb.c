@@ -85,8 +85,12 @@ int XmbTextExtents(XFontSet fs, _Xconst char *s, int n,
     int w = utf8_text_width(fs, s, n);
     MwXFont *f = fs_font(fs);
     int asc = f ? f->ascent : 10, desc = f ? f->descent : 3;
-    if (ink) { ink->x = 0; ink->y = (short)-asc; ink->width = (unsigned short)w; ink->height = (unsigned short)(asc + desc); }
-    if (logical) *logical = *ink;
+    /* ink and logical are both optional; CDE's DtTerm calls this with a NULL
+     * ink and a non-NULL logical, so they must be filled independently. */
+    XRectangle e = { 0, (short)-asc, (unsigned short)w,
+                     (unsigned short)(asc + desc) };
+    if (ink) *ink = e;
+    if (logical) *logical = e;
     return w;
 }
 
@@ -158,8 +162,10 @@ int XwcTextExtents(XFontSet fs, _Xconst wchar_t *s, int n,
     int w = wc_text_width(fs, s, n);
     MwXFont *f = fs_font(fs);
     int asc = f ? f->ascent : 10, desc = f ? f->descent : 3;
-    if (ink) { ink->x = 0; ink->y = (short)-asc; ink->width = (unsigned short)w; ink->height = (unsigned short)(asc+desc); }
-    if (logical) *logical = *ink;
+    XRectangle e = { 0, (short)-asc, (unsigned short)w,
+                     (unsigned short)(asc+desc) };
+    if (ink) *ink = e;
+    if (logical) *logical = e;
     return w;
 }
 
