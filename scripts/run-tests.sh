@@ -6,8 +6,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 BUILD="${MW_BUILD:-$ROOT/build}"
-PREFIX="${MW_PREFIX:-/tmp/mw-prefix}"
-RUNTIME="${MW_RUNTIME:-/tmp/mw-runtime}"
+# $MW_SRC holds the reference source/build trees (Motif, Xt, XV, NEdit); the
+# X and NEdit tests are skipped when one is absent.
+MW_SRC="${MW_SRC:-${TMPDIR:-/tmp}/xlib-wayland}"
+PREFIX="${MW_PREFIX:-${TMPDIR:-/tmp}/mw-prefix}"
+RUNTIME="${MW_RUNTIME:-${TMPDIR:-/tmp}/mw-runtime}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -496,9 +499,11 @@ if [ -f "$PREFIX/lib/libXt.so" ] && [ -f "$ROOT/build/test_xt" ]; then
     grep -q 'captured' "$WORK/xt.err" && echo "  captured frame" || echo "  (skipped: no frame)"
 fi
 
-if [ -x /tmp/opencode/xvbuild/src/xv ]; then
+XV_BIN="${XV_BIN:-$MW_SRC/xv-build/src/xv}"
+XV_PIC="${XV_PIC:-$MW_SRC/testpic.png}"
+if [ -x "$XV_BIN" ] && [ -f "$XV_PIC" ]; then
     say "XV smoke test"
-    run_headless xv mwxv 640x480 "$WORK/xv.png" /tmp/opencode/xvbuild/src/xv /tmp/opencode/testpic.png
+    run_headless xv mwxv 640x480 "$WORK/xv.png" "$XV_BIN" "$XV_PIC"
     python3 - "$WORK/xv.png" <<'PY'
 import sys
 from PIL import Image
@@ -511,7 +516,7 @@ sys.exit(0 if inc > len(row) * 0.9 else 1)
 PY
 fi
 
-NEDIT_BIN="${NEDIT_SRC:-/tmp/opencode/src/nedit}/source/nedit"
+NEDIT_BIN="${NEDIT_SRC:-$MW_SRC/nedit}/source/nedit"
 if [ -x "$NEDIT_BIN" ]; then
     say "XDrawImageString erase extent (NEdit's main text cursor)"
     # Motif paints the editor text with XDrawImageString, which fills the

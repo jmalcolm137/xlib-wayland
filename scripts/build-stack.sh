@@ -11,14 +11,15 @@
 #     meson install -C build
 #
 # Reference sources (checked out already, override with the env vars below):
-#     libXt   (Xorg libXt, autotools)  /tmp/opencode/src/libxt
-#     Motif   (Open Motif, autotools)  /tmp/opencode/src/motif
+#     libXt   (Xorg libXt, autotools)  $MW_SRC/libxt
+#     Motif   (Open Motif, autotools)  $MW_SRC/motif
 #
 # Environment:
 #   MW_PREFIX   install prefix          (default: $HOME/.local/motif-wayland)
 #   JOBS        parallel build jobs     (default: nproc)
-#   LIBXT_SRC   path to libXt source    (default: /tmp/opencode/src/libxt)
-#   MOTIF_SRC   path to Open Motif src  (default: /tmp/opencode/src/motif)
+#   MW_SRC      reference source trees  (default: ${TMPDIR:-/tmp}/xlib-wayland)
+#   LIBXT_SRC   path to libXt source    (default: $MW_SRC/libxt)
+#   MOTIF_SRC   path to Open Motif src  (default: $MW_SRC/motif)
 #
 set -euo pipefail
 
@@ -26,8 +27,9 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 
 MW_PREFIX="${MW_PREFIX:-$HOME/.local/motif-wayland}"
-LIBXT_SRC="${LIBXT_SRC:-/tmp/opencode/src/libxt}"
-MOTIF_SRC="${MOTIF_SRC:-/tmp/opencode/src/motif}"
+MW_SRC="${MW_SRC:-${TMPDIR:-/tmp}/xlib-wayland}"
+LIBXT_SRC="${LIBXT_SRC:-$MW_SRC/libxt}"
+MOTIF_SRC="${MOTIF_SRC:-$MW_SRC/motif}"
 
 if [ -n "${JOBS:-}" ]; then
     :

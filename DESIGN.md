@@ -1,4 +1,4 @@
-# Motif/Wayland — Design Document
+# Xlib-Wayland — Design Document
 
 **Status:** draft / living document
 **Target:** run unmodified Motif applications — specifically **XV** and **NEdit** — natively on
@@ -482,7 +482,7 @@ wildcards/bindings). It is reimplemented in `src/xlib/resource.c`, including:
 ### 5.1 Layout
 
 ```
-motif-wayland/
+xlib-wayland/
 ├── DESIGN.md                     # this document
 ├── README.md                     # build/run, status matrix
 ├── meson.build / meson_options.txt

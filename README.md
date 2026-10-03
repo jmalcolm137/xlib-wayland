@@ -1,4 +1,4 @@
-# Motif/Wayland
+# Xlib-Wayland
 
 A Wayland-native, ABI-compatible implementation of `libX11` (Xlib) plus the
 build integration that lets the stock Xt/Motif stack — and unmodified XV and
@@ -75,14 +75,15 @@ built here, never against the system copies.
 * Build tools: `meson`, `ninja`, `gcc`/`cc`, `make`, `cmake`, `pkg-config`,
   `autoconf`, `automake`, `libtool`/`libtoolize`, plus `bison`/`byacc` and
   `flex`/`lex` for Open Motif.
-* Upstream sources (already checked out in this environment):
+* Upstream sources, unpacked under `$MW_SRC` (default
+  `${TMPDIR:-/tmp}/xlib-wayland`; set `MW_SRC` to wherever you keep them):
 
-  | Component | Path                    | Build system |
-  |-----------|-------------------------|--------------|
-  | libXt     | `/tmp/opencode/src/libxt`  | autotools |
-  | Open Motif| `/tmp/opencode/src/motif`  | autotools |
-  | XV 6.2    | `/tmp/opencode/src/xv`     | CMake     |
-  | NEdit 5.7 | `/tmp/opencode/src/nedit`  | plain makefiles |
+  | Component | Path              | Build system |
+  |-----------|-------------------|--------------|
+  | libXt     | `$MW_SRC/libxt`   | autotools |
+  | Open Motif| `$MW_SRC/motif`   | autotools |
+  | XV 6.2    | `$MW_SRC/xv`      | CMake     |
+  | NEdit 5.7 | `$MW_SRC/nedit`   | plain makefiles |
 
 No `sudo` is required: everything installs under `$MW_PREFIX`.
 
@@ -155,7 +156,7 @@ scripts/build-xv.sh
 Configures with CMake against the prefix and builds:
 
 ```sh
-cmake -S /tmp/opencode/src/xv -B "$MW_PREFIX/build/xv" \
+cmake -S "$MW_SRC/xv" -B "$MW_PREFIX/build/xv" \
       -DCMAKE_PREFIX_PATH="$MW_PREFIX" -DCMAKE_BUILD_TYPE=Release
 cmake --build "$MW_PREFIX/build/xv" -j
 ```
@@ -176,7 +177,7 @@ builds it unmodified by overriding `CFLAGS`/`LIBS` on the make command line
 with `$MW_PREFIX`):
 
 ```sh
-make -C /tmp/opencode/src/nedit linux \
+make -C "$MW_SRC/nedit" linux \
      CFLAGS="-O2 -I$MW_PREFIX/include ... -DHAVE__XMVERSIONSTRING" \
      LIBS="-L$MW_PREFIX/lib -lXm -lXt -lX11 -lm -Wl,-rpath,$MW_PREFIX/lib"
 ```
@@ -207,11 +208,12 @@ scripts/build-nedit.sh
 | Variable     | Default                              | Used by |
 |--------------|--------------------------------------|---------|
 | `MW_PREFIX`  | `$HOME/.local/motif-wayland`         | all |
+| `MW_SRC`     | `${TMPDIR:-/tmp}/xlib-wayland`       | all |
 | `JOBS`       | `nproc`                              | all |
-| `LIBXT_SRC`  | `/tmp/opencode/src/libxt`            | `build-stack.sh` |
-| `MOTIF_SRC`  | `/tmp/opencode/src/motif`            | `build-stack.sh` |
-| `XV_SRC`     | `/tmp/opencode/src/xv`               | `build-xv.sh` |
-| `NEDIT_SRC`  | `/tmp/opencode/src/nedit`            | `build-nedit.sh` |
+| `LIBXT_SRC`  | `$MW_SRC/libxt`                      | `build-stack.sh` |
+| `MOTIF_SRC`  | `$MW_SRC/motif`                       | `build-stack.sh` |
+| `XV_SRC`     | `$MW_SRC/xv`                         | `build-xv.sh` |
+| `NEDIT_SRC`  | `$MW_SRC/nedit`                      | `build-nedit.sh` |
 | `NEDIT_MAKE_TARGET` | `linux`                       | `build-nedit.sh` |
 
 Each script also accepts `--prefix=DIR` and `-h`/`--help`.

@@ -13,14 +13,16 @@
 # ---------------------------------------------------------------------------
 # Environment:
 #   MW_PREFIX     install prefix                (default: $HOME/.local/motif-wayland)
-#   NEDIT_SRC     NEdit source/build tree       (default: /tmp/opencode/src/nedit)
+#   MW_SRC        reference source trees        (default: ${TMPDIR:-/tmp}/xlib-wayland)
+#   NEDIT_SRC     NEdit source/build tree       (default: $MW_SRC/nedit)
 #   WAYLAND_DISPLAY  compositor to connect to   (default: whatever your session uses)
 #   MW_TRACE      set to 1 for shim tracing
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 MW_PREFIX="${MW_PREFIX:-$HOME/.local/motif-wayland}"
-NEDIT_SRC="${NEDIT_SRC:-/tmp/opencode/src/nedit}"
+MW_SRC="${MW_SRC:-${TMPDIR:-/tmp}/xlib-wayland}"
+NEDIT_SRC="${NEDIT_SRC:-$MW_SRC/nedit}"
 
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 

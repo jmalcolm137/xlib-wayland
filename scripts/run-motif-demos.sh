@@ -13,17 +13,19 @@
 #
 # ---------------------------------------------------------------------------
 # Environment:
-#   MOTIF_SRC   Motif source tree     (default: /tmp/opencode/src/motif)
+#   MW_SRC      reference source trees (default: ${TMPDIR:-/tmp}/xlib-wayland)
+#   MOTIF_SRC   Motif source tree      (default: $MW_SRC/motif)
 #   MW_PREFIX   installed stack       (default: $HOME/.local/motif-wayland)
 #   MW_BUILD    shim build directory  (default: <repo>/build)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-MOTIF_SRC="${MOTIF_SRC:-/tmp/opencode/src/motif}"
+MW_SRC="${MW_SRC:-${TMPDIR:-/tmp}/xlib-wayland}"
+MOTIF_SRC="${MOTIF_SRC:-$MW_SRC/motif}"
 MW_PREFIX="${MW_PREFIX:-$HOME/.local/motif-wayland}"
 BUILD="${MW_BUILD:-$ROOT/build}"
-RUNTIME="${MW_RUNTIME:-/tmp/opencode/mwrt}"
+RUNTIME="${MW_RUNTIME:-${TMPDIR:-/tmp}/xlib-wayland-runtime}"
 DEMOS="$MOTIF_SRC/demos/programs"
 
 [ -d "$DEMOS" ] || { echo "no demos at $DEMOS (set MOTIF_SRC)"; exit 1; }

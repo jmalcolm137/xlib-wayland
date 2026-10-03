@@ -40,7 +40,8 @@
 # Environment:
 #   MW_PREFIX          install prefix       (default: $HOME/.local/motif-wayland)
 #   JOBS               parallel build jobs  (default: nproc)
-#   NEDIT_SRC          path to NEdit source (default: /tmp/opencode/src/nedit)
+#   MW_SRC             reference source trees (default: ${TMPDIR:-/tmp}/xlib-wayland)
+#   NEDIT_SRC          path to NEdit source (default: $MW_SRC/nedit)
 #   NEDIT_MAKE_TARGET  make target           (default: linux; also: linux-static)
 #
 set -euo pipefail
@@ -49,7 +50,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 
 MW_PREFIX="${MW_PREFIX:-$HOME/.local/motif-wayland}"
-NEDIT_SRC="${NEDIT_SRC:-/tmp/opencode/src/nedit}"
+MW_SRC="${MW_SRC:-${TMPDIR:-/tmp}/xlib-wayland}"
+NEDIT_SRC="${NEDIT_SRC:-$MW_SRC/nedit}"
 NEDIT_MAKE_TARGET="${NEDIT_MAKE_TARGET:-linux}"
 
 if [ -n "${JOBS:-}" ]; then

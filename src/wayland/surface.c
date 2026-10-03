@@ -673,8 +673,12 @@ void mw_toplevel_render(MwToplevel *tl)
 
     static int dump_n;
     if (getenv("MW_DUMP") && !tl->is_popup) {
-        char p[160];
-        snprintf(p, sizeof p, "/tmp/opencode/mwroll-%02d.png", (dump_n++) % 16);
+        /* Debug frame dumps (MW_DUMP=1) go to $MW_DUMP_DIR, else $TMPDIR. */
+        const char *dir = getenv("MW_DUMP_DIR");
+        if (!dir || !*dir) dir = getenv("TMPDIR");
+        if (!dir || !*dir) dir = "/tmp";
+        char p[256];
+        snprintf(p, sizeof p, "%s/mwroll-%02d.png", dir, (dump_n++) % 16);
         mw_surface_write_png(tl->frame, p);
     }
     if (getenv("MW_TRACE"))

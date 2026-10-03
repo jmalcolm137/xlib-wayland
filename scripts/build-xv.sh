@@ -12,7 +12,8 @@
 # Environment:
 #   MW_PREFIX   install prefix          (default: $HOME/.local/motif-wayland)
 #   JOBS        parallel build jobs     (default: nproc)
-#   XV_SRC      path to XV source       (default: /tmp/opencode/src/xv)
+#   MW_SRC      reference source trees  (default: ${TMPDIR:-/tmp}/xlib-wayland)
+#   XV_SRC      path to XV source       (default: $MW_SRC/xv)
 #
 set -euo pipefail
 
@@ -20,7 +21,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 
 MW_PREFIX="${MW_PREFIX:-$HOME/.local/motif-wayland}"
-XV_SRC="${XV_SRC:-/tmp/opencode/src/xv}"
+MW_SRC="${MW_SRC:-${TMPDIR:-/tmp}/xlib-wayland}"
+XV_SRC="${XV_SRC:-$MW_SRC/xv}"
 
 if [ -n "${JOBS:-}" ]; then
     :
