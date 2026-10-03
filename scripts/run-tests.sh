@@ -794,4 +794,11 @@ sys.exit(0 if ok else 1)
 PY
 fi
 
+say "real X11 client matrix"
+# Running actual X11 programs is the most effective verification we have; see
+# scripts/run-x11-clients.sh for why a conformance suite does not apply here.
+# Known gaps (xterm/XKB, xdpyinfo/async, ...) are reported but do not fail.
+MW_BUILD="$BUILD" MW_PREFIX="$PREFIX" MW_RUNTIME="$RUNTIME" \
+    "$HERE/run-x11-clients.sh" || exit 1
+
 say "all tests passed"
