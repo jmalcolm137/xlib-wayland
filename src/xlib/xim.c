@@ -39,16 +39,31 @@ Status XCloseIM(XIM im) { free(im); return 1; }
 Display *XDisplayOfIM(XIM im) { return im ? im->display : NULL; }
 char *XLocaleOfIM(XIM im) { (void)im; return NULL; }
 
+/* XNQueryInputStyle hands ownership to the caller: the XIM spec says the
+ * client frees the returned XIMStyles with XFree(), and that is exactly what
+ * libXaw's text code does.  Returning a pointer to static storage therefore
+ * aborted every libXaw client (xmessage, xterm, ...) in free().  Allocate a
+ * fresh copy per call, and keep the style array in its own allocation so a
+ * caller that frees the array as well as the struct is still valid. */
 static XIMStyles *query_styles(void)
 {
-    static XIMStyle list[3];
-    static XIMStyles styles;
+    XIMStyle *list = malloc(3 * sizeof *list);
+    XIMStyles *styles = malloc(sizeof *styles);
+    if (!list || !styles) { free(list); free(styles); return NULL; }
     list[0] = XIMPreeditNothing | XIMStatusNothing;
     list[1] = XIMPreeditNone    | XIMStatusNone;
     list[2] = XIMPreeditNothing | XIMStatusNone;
-    styles.count_styles = 3;
-    styles.supported_styles = list;
-    return &styles;
+    styles->count_styles = 3;
+    styles->supported_styles = list;
+    return styles;
+}
+
+/* Same ownership rule for the value-name lists. */
+static XIMValuesList *query_values_list(void)
+{
+    XIMValuesList *vl = malloc(sizeof *vl);
+    if (vl) { vl->count_values = 0; vl->supported_values = NULL; }
+    return vl;
 }
 
 char *XGetIMValues(XIM im, ...)
@@ -62,13 +77,11 @@ char *XGetIMValues(XIM im, ...)
             XIMStyles **out = va_arg(ap, XIMStyles **);
             if (out) *out = query_styles();
         } else if (strcmp(key, XNQueryIMValuesList) == 0) {
-            static XIMValuesList vl = { 0, NULL };
             XIMValuesList **out = va_arg(ap, XIMValuesList **);
-            if (out) *out = &vl;
+            if (out) *out = query_values_list();
         } else if (strcmp(key, XNQueryICValuesList) == 0) {
-            static XIMValuesList vl = { 0, NULL };
             XIMValuesList **out = va_arg(ap, XIMValuesList **);
-            if (out) *out = &vl;
+            if (out) *out = query_values_list();
         } else {
             (void)va_arg(ap, void *);
         }
