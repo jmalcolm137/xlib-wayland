@@ -164,12 +164,18 @@ void mw_block_for_events(Display *d)
     mw_flush_damage_deferred(d);
     if (getenv("MW_TRACE")) fprintf(stderr, "MW: blocking for events\n");
 
+    /* A held key repeats on its own schedule: deliver any that is due, then
+     * wait at most until the next one so it fires even with nothing else
+     * happening. */
+    mw_kbd_repeat_pump(d);
+    int rtimeout = mw_kbd_repeat_timeout(d);
+
     /* Normally block on the Wayland connection exactly as before.  Only when a
-     * clipboard transfer is in flight is it worth also watching its pipe --
-     * otherwise a paste whose data arrives off the event loop would wait for
-     * an unrelated Wayland event. */
+     * clipboard transfer is in flight, or a key repeat is pending, is it worth
+     * also watching a timer -- otherwise a paste whose data arrives off the
+     * event loop, or a repeat, would wait for an unrelated Wayland event. */
     int cfd = mw_clipboard_poll_fd(d);
-    if (cfd < 0) {
+    if (cfd < 0 && rtimeout < 0) {
         if (wl_display_dispatch(dp->wl_display) < 0)
             mw_io_error(d, "Wayland connection closed");
         return;
@@ -188,7 +194,9 @@ void mw_block_for_events(Display *d)
     pfd[0].fd = dp->fd; pfd[0].events = POLLIN; pfd[0].revents = 0;
     pfd[1].fd = cfd;    pfd[1].events = POLLIN; pfd[1].revents = 0;
 
-    int r = poll(pfd, 2, 100);
+    int timeout = rtimeout >= 0 ? rtimeout : 100;
+    if (cfd >= 0 && timeout > 100) timeout = 100;
+    int r = poll(pfd, cfd >= 0 ? 2 : 1, timeout);
     if (r > 0 && pfd[0].revents) {
         if (wl_display_read_events(dp->wl_display) < 0) {
             mw_io_error(d, "Wayland connection closed");
@@ -200,6 +208,7 @@ void mw_block_for_events(Display *d)
     if (wl_display_dispatch_pending(dp->wl_display) < 0 && !dp->closed)
         mw_io_error(d, "Wayland connection error");
     mw_clipboard_handle_ready(d);
+    mw_kbd_repeat_pump(d);
 }
 
 void mw_process_events(Display *d, bool block)
@@ -216,6 +225,7 @@ void mw_process_events(Display *d, bool block)
      * deferred variant additionally caps an in-progress repaint to one frame
      * per refresh so a window resize does not composite per drawing step. */
     mw_flush_damage_deferred(d);
+    mw_kbd_repeat_pump(d);
 
     if (block && dp->qcount == 0) {
         mw_block_for_events(d);

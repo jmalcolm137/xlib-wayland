@@ -523,6 +523,13 @@ typedef struct _XDisplayImpl {
     bool                        kbd_grab_owner;
     int                         kbd_grab_mode;
 
+    /* Auto-repeat.  Wayland leaves it to the client: wl_keyboard.repeat_info
+     * carries the rate and delay, and the held key has to be repeated by us. */
+    int                         repeat_rate;      /* keys per second; 0 = off */
+    int                         repeat_delay;     /* ms before the first repeat */
+    KeyCode                     repeat_key;       /* key currently held, or 0 */
+    uint64_t                    repeat_next_ms;   /* when the next repeat is due */
+
     /* selections */
     MwSelection                 *selections;
 
@@ -659,6 +666,10 @@ void      mw_apply_gc(MwCanvas *c, Display *d, struct _XGC *gc);
 
 void mw_put_event(Display *d, XEvent *ev);
 void mw_process_events(Display *d, bool block);
+/* Keyboard auto-repeat: Wayland leaves it to the client, so a held key is
+ * repeated from the event pump (see input.c). */
+void mw_kbd_repeat_pump(Display *d);
+int  mw_kbd_repeat_timeout(Display *d);
 /* Block until at least one more Wayland event has been read and dispatched,
  * even when events are already queued.  mw_process_events(d, true) only blocks
  * on an empty queue, which is not enough for the mask-based event selectors

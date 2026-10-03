@@ -184,14 +184,11 @@ static void kbd_leave(void *data, struct wl_keyboard *kbd, uint32_t serial,
     }
 }
 
-static void kbd_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
-                    uint32_t time, uint32_t key, uint32_t state)
+/* Build one key event for `kc` and deliver it to the focused window (or to a
+ * passive grab that matches).  Shared by real key events and auto-repeat. */
+static void deliver_key(Display *d, KeyCode kc, int type)
 {
-    (void)kbd; (void)serial; (void)time;
-    Display *d = data;
     XDisplayImpl *dp = MWD(d);
-    KeyCode kc = (KeyCode)(key + 8);
-
     XKeyEvent ke;
     memset(&ke, 0, sizeof ke);
     ke.display = d;
@@ -205,7 +202,7 @@ static void kbd_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
     ke.same_screen = True;
     ke.keycode = kc;
     ke.state = current_mods(d);
-    ke.type = state == WL_KEYBOARD_KEY_STATE_PRESSED ? KeyPress : KeyRelease;
+    ke.type = type;
 
     MwWindow *focus = dp->kbd_focus ? dp->kbd_focus : dp->ptr_focus;
     MwWindow *target = dp->kbd_grab_window;   /* XGrabKeyboard in effect */
@@ -230,7 +227,7 @@ static void kbd_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
     }
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: kbd_key kc=%u %s target=%lx mask=%lx\n", kc,
-                state == WL_KEYBOARD_KEY_STATE_PRESSED ? "press" : "rel",
+                type == KeyPress ? "press" : "rel",
                 target ? target->id : 0UL, target ? target->event_mask : 0UL);
     if (target) {
         int wx, wy;
@@ -240,11 +237,81 @@ static void kbd_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
         ke.window = target->id;
         mw_put_event(d, (XEvent *)&ke);
     }
+}
 
-    if (dp->xkb_state) {
-        enum xkb_key_direction dir = state == WL_KEYBOARD_KEY_STATE_PRESSED
-                                     ? XKB_KEY_DOWN : XKB_KEY_UP;
-        xkb_state_update_key(dp->xkb_state, (xkb_keycode_t)kc, dir);
+/* Wayland leaves key repeat to the client: wl_keyboard.repeat_info supplies the
+ * rate and delay, and the repeat events while a key is held have to be generated
+ * here, from the event pump. */
+void mw_kbd_repeat_pump(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (!dp->repeat_key || dp->repeat_rate <= 0) return;
+    int period = 1000 / dp->repeat_rate;
+    if (period < 1) period = 1;
+    uint64_t now = mw_now();
+    if (now < dp->repeat_next_ms) return;
+    /* Deliver every repeat that has come due since the last visit.  libXt blocks
+     * on the connection fd itself, so the pump only runs when something else
+     * arrives on the Wayland connection and wakeups are irregular; the deadline
+     * is absolute, so catching up here keeps the *average* rate right instead of
+     * slipping a little on every wakeup.  Cap the burst so a long stall
+     * (debugger, suspend) does not fling a page of characters.  The
+     * release+press pair matches an X server with detectable autorepeat off,
+     * which is what Motif's text widgets and xterm handle. */
+    int burst = 0;
+    while (now >= dp->repeat_next_ms && burst < 8) {
+        deliver_key(d, dp->repeat_key, KeyRelease);
+        deliver_key(d, dp->repeat_key, KeyPress);
+        dp->repeat_next_ms += (uint64_t)period;
+        burst++;
+    }
+    if (now >= dp->repeat_next_ms)          /* long stall: resynchronise */
+        dp->repeat_next_ms = now + (uint64_t)period;
+}
+
+/* Milliseconds until the next repeat is due, or -1 when none is pending.  The
+ * event wait uses this as its timeout so a held key repeats while the client
+ * sits idle in XNextEvent. */
+int mw_kbd_repeat_timeout(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (!dp->repeat_key || dp->repeat_rate <= 0) return -1;
+    uint64_t now = mw_now();
+    if (dp->repeat_next_ms <= now) return 0;
+    uint64_t t = dp->repeat_next_ms - now;
+    return t > 1000 ? 1000 : (int)t;
+}
+
+static void kbd_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
+                    uint32_t time, uint32_t key, uint32_t state)
+{
+    (void)kbd; (void)serial; (void)time;
+    Display *d = data;
+    XDisplayImpl *dp = MWD(d);
+    KeyCode kc = (KeyCode)(key + 8);
+    /* Protocol v10 adds a "repeated" state so a compositor may drive repeat
+     * itself; that is still a press as far as X clients are concerned. */
+    bool pressed = state != WL_KEYBOARD_KEY_STATE_RELEASED;
+
+    deliver_key(d, kc, pressed ? KeyPress : KeyRelease);
+
+    if (dp->xkb_state)
+        xkb_state_update_key(dp->xkb_state, (xkb_keycode_t)kc,
+                             pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
+
+    /* Track the held key so the pump can repeat it.  Modifiers never repeat,
+     * and if the compositor already sent a repeat we must not add our own. */
+    if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+        if (!mw_keysym_to_modmask(d, mw_keycode_to_keysym(d, kc, 0))) {
+            dp->repeat_key = kc;
+            dp->repeat_next_ms = mw_now() + (uint64_t)dp->repeat_delay;
+        } else {
+            dp->repeat_key = 0;
+        }
+    } else if (state == WL_KEYBOARD_KEY_STATE_REPEATED) {
+        dp->repeat_key = 0;   /* compositor is repeating this key for us */
+    } else if (dp->repeat_key == kc) {
+        dp->repeat_key = 0;
     }
 }
 
@@ -259,7 +326,24 @@ static void kbd_modifiers(void *data, struct wl_keyboard *kbd, uint32_t serial,
 }
 
 static void kbd_repeat(void *data, struct wl_keyboard *kbd, int32_t rate, int32_t delay)
-{ (void)data; (void)kbd; (void)rate; (void)delay; }
+{
+    (void)kbd;
+    XDisplayImpl *dp = MWD((Display *)data);
+    int r  = rate  > 0 ? rate  : 0;
+    int dl = delay > 0 ? delay : 0;
+    /* Compositors tend to pick a longish initial delay (400-660ms), tuned for
+     * their own repeat implementation.  The repeat is synthesised here, so cap
+     * the delay to keep the first repeat prompt while still honouring shorter
+     * compositor values.  MW_REPEAT_DELAY / MW_REPEAT_RATE override both. */
+    if (dl > 200) dl = 200;
+    if (const char *e = getenv("MW_REPEAT_DELAY")) { int v = atoi(e); if (v >= 0) dl = v; }
+    if (const char *e = getenv("MW_REPEAT_RATE"))  { int v = atoi(e); if (v >  0) r  = v; }
+    dp->repeat_rate  = r;
+    dp->repeat_delay = dl;
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: repeat_info rate=%d delay=%d -> rate=%d delay=%d\n",
+                rate, delay, dp->repeat_rate, dp->repeat_delay);
+}
 
 static const struct wl_keyboard_listener keyboard_listener = {
     .keymap = kbd_keymap,
