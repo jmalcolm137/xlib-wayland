@@ -86,6 +86,62 @@ int Xutf8TextPropertyToTextList(Display *d, const XTextProperty *tp, char ***lis
                                    int *count)
 { return XmbTextPropertyToTextList(d, tp, list, count); }
 
+/* The STRING-encoding pair.  Unlike the Xmb... variants these take no
+ * Display, so STRING is the only encoding they can recognise -- exactly the
+ * limitation the reference implementation has.  xterm uses the pair to parse
+ * text it has just read back off a property. */
+Status XTextPropertyToStringList(XTextProperty *tp, char ***list_rtrn,
+                                 int *count_rtrn)
+{
+    if (!list_rtrn || !count_rtrn) return 0;
+    *list_rtrn = NULL;
+    *count_rtrn = 0;
+    if (!tp || tp->format != 8 || tp->encoding != XA_STRING || !tp->value)
+        return 0;
+    int count = 0;
+    for (unsigned long i = 0; i < tp->nitems; i++)
+        if (tp->value[i] == 0) count++;
+    char **v = calloc((size_t)count + 1, sizeof(char *));
+    if (!v) return 0;
+    int n = 0;
+    unsigned long start = 0;
+    for (unsigned long i = 0; i < tp->nitems; i++) {
+        if (tp->value[i] != 0) continue;
+        size_t len = i - start;
+        v[n] = malloc(len + 1);
+        if (!v[n]) { XFreeStringList(v); return 0; }
+        memcpy(v[n], tp->value + start, len);
+        v[n][len] = 0;
+        n++;
+        start = i + 1;
+    }
+    v[n] = NULL;
+    *list_rtrn = v;
+    *count_rtrn = n;
+    return Success;
+}
+
+Status XStringListToTextProperty(char **list, int count, XTextProperty *tp)
+{
+    size_t total = 0;
+    for (int i = 0; i < count; i++)
+        total += (list[i] ? strlen(list[i]) : 0) + 1;
+    unsigned char *buf = calloc(total + 1, 1);
+    if (!buf) return 0;
+    size_t o = 0;
+    for (int i = 0; i < count; i++) {
+        size_t n = list[i] ? strlen(list[i]) : 0;
+        if (n) memcpy(buf + o, list[i], n);
+        o += n;
+        buf[o++] = 0;
+    }
+    tp->value = buf;
+    tp->encoding = XA_STRING;
+    tp->format = 8;
+    tp->nitems = o;
+    return Success;
+}
+
 void XFreeStringList(char **list)
 {
     if (!list) return;
@@ -303,8 +359,14 @@ int XSetScreenSaver(Display *d, int timeout, int interval, int prefer_blank,
 
 int XGetScreenSaver(Display *d, int *timeout, int *interval, int *prefer_blank,
                     int *allow_exposures)
-{ (void)d; if (timeout)*timeout=600; if (interval)*interval=600;
-  if (prefer_blank)*prefer_blank=PreferBlanking; if (allow_exposures)*allow_exposures=AllowExposures; return 1; }
+{
+    (void)d;
+    if (timeout) *timeout = 600;
+    if (interval) *interval = 600;
+    if (prefer_blank) *prefer_blank = PreferBlanking;
+    if (allow_exposures) *allow_exposures = AllowExposures;
+    return 1;
+}
 
 int XForceScreenSaver(Display *d, int mode) { (void)d; (void)mode; return 1; }
 int XActivateScreenSaver(Display *d) { (void)d; return 1; }

@@ -55,7 +55,7 @@ xlib_sources = files(
   'src/xlib/font.c', 'src/xlib/geometry.c', 'src/xlib/image.c',
   'src/xlib/input.c', 'src/xlib/keymap.c', 'src/xlib/region.c',
   'src/xlib/resource.c', 'src/xlib/selection.c', 'src/xlib/window.c',
-  'src/xlib/xim.c', 'src/xlib/xmb.c', 'src/xlib/xtcompat.c', 'src/xlib/xlibint.c', 'src/xlib/xrandr.c',
+  'src/xlib/xim.c', 'src/xlib/xkb.c', 'src/xlib/xmb.c', 'src/xlib/xtcompat.c', 'src/xlib/xlibint.c', 'src/xlib/xrandr.c',
   'src/xlib/xresources.c',
   'src/xlib/xshape.c')
 

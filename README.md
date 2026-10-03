@@ -60,6 +60,39 @@ The test runner needs `python3`+Pillow for pixel verification; it builds the
 shim with meson, runs `test_core`, renders `test_draw` under the bundled
 `headless-compositor`, and asserts the captured frame pixel-for-pixel.
 
+## Verifying against real X11 programs
+
+There is no drop-in conformance suite for an in-process `libX11`: the X Test
+Suite exercises the X wire protocol (which this shim does not speak), and libX11
+ships no tests of its own. The effective substitute is to run real, widely used
+X clients and see what they need:
+
+```sh
+scripts/run-x11-clients.sh        # or a subset: ... xterm xclock
+```
+
+Each client runs under the bundled compositor with the shim first on the library
+path. `xmessage`, `xlogo`, `xload`, `xcalc`, `xclock` and `xterm` start and
+paint; clients that need an API the shim does not implement yet are reported as
+`gap` and name the missing symbol: `xdpyinfo` needs `_XGetAsyncData`, `xinput`
+needs the XInput2 event accessors, and `setxkbmap` needs its libxkbfile keyboard
+loader. A `crash` is always a regression. The matrix also runs as part of
+`scripts/run-tests.sh`.
+
+`xclock`, `xlogo`, `xload` and `xcalc` are the `xorg-xclock`, `xorg-xlogo`,
+`xorg-xload` and `xorg-xcalc` packages. Use them from the system, or unpack
+their binaries under `$MW_PREFIX` without root:
+
+```sh
+pacman -Sp --print-format '%l' xorg-xclock xorg-xlogo xorg-xload xorg-xcalc \
+    | xargs -n1 curl -fsLO
+d="$(mktemp -d)"; for f in *.pkg.tar.zst; do tar --zstd -xf "$f" -C "$d"; done
+mkdir -p "$MW_PREFIX/bin" "$MW_PREFIX/share/X11/app-defaults"
+cp "$d"/usr/bin/x{clock,logo,load,calc} "$MW_PREFIX/bin/"
+cp "$d"/usr/share/X11/app-defaults/X{Clock,Logo,Load,Calc}* \
+   "$MW_PREFIX/share/X11/app-defaults/"
+```
+
 ## Repository layout
 
 ```

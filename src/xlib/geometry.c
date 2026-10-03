@@ -46,6 +46,45 @@ int XParseGeometry(_Xconst char *string, int *x, int *y,
     return mask;
 }
 
+/* Return the pixel geometry a client should use, combining a user-specified
+ * geometry with a fully-qualified default.  This is the reference algorithm
+ * from Xlib's Geom.c: fwidth/fheight are the size of one position unit (1 for
+ * the pixel units every toolkit passes), and a negative offset is measured
+ * from the far edge of the screen. */
+int XGeometry(Display *dpy, int screen, _Xconst char *pos, _Xconst char *def,
+              unsigned int bwidth, unsigned int fwidth, unsigned int fheight,
+              int xadd, int yadd, int *x, int *y, int *width, int *height)
+{
+    int px = 0, py = 0, dx = 0, dy = 0;
+    unsigned int pwidth = 0, pheight = 0, dwidth = 0, dheight = 0;
+    int pmask = XParseGeometry(pos, &px, &py, &pwidth, &pheight);
+    int dmask = XParseGeometry(def, &dx, &dy, &dwidth, &dheight);
+
+    Screen *scr = (dpy && screen >= 0 && screen < ScreenCount(dpy))
+                  ? ScreenOfDisplay(dpy, screen) : NULL;
+    int sw = scr ? scr->width : MW_DEFAULT_W;
+    int sh = scr ? scr->height : MW_DEFAULT_H;
+
+    *x = (dmask & XNegative)
+         ? sw + dx - (int)(dwidth * fwidth) - 2 * (int)bwidth - xadd : dx;
+    *y = (dmask & YNegative)
+         ? sh + dy - (int)(dheight * fheight) - 2 * (int)bwidth - yadd : dy;
+    *width = (int)dwidth;
+    *height = (int)dheight;
+
+    if (pmask & WidthValue)  *width = (int)pwidth;
+    if (pmask & HeightValue) *height = (int)pheight;
+
+    if (pmask & XValue)
+        *x = (pmask & XNegative)
+             ? sw + px - *width * (int)fwidth - 2 * (int)bwidth - xadd : px;
+    if (pmask & YValue)
+        *y = (pmask & YNegative)
+             ? sh + py - *height * (int)fheight - 2 * (int)bwidth - yadd : py;
+
+    return pmask;
+}
+
 int XWMGeometry(Display *d, int screen, _Xconst char *user_geom,
                 _Xconst char *def_geom, unsigned int bwidth,
                 XSizeHints *hints, int *x_ret, int *y_ret,
