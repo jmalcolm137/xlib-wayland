@@ -58,11 +58,23 @@ static XIMStyles *query_styles(void)
     return styles;
 }
 
-/* Same ownership rule for the value-name lists. */
+/* The values this input method supports.  XNQueryIMValuesList/ICValuesList
+ * hand ownership to the caller (freed with XFree), so allocate per call; the
+ * list and the name array are separate blocks so a caller that frees either is
+ * still valid. */
 static XIMValuesList *query_values_list(void)
 {
+    static const char *names[] = {
+        XNInputStyle, XNClientWindow, XNFocusWindow, XNFilterEvents,
+        XNStatusAttributes, XNPreeditAttributes, XNResetState,
+    };
+    int n = (int)(sizeof names / sizeof names[0]);
+    char **vals = malloc((size_t)n * sizeof(char *));
     XIMValuesList *vl = malloc(sizeof *vl);
-    if (vl) { vl->count_values = 0; vl->supported_values = NULL; }
+    if (!vals || !vl) { free(vals); free(vl); return NULL; }
+    for (int i = 0; i < n; i++) vals[i] = (char *)names[i];
+    vl->count_values = (unsigned short)n;
+    vl->supported_values = vals;
     return vl;
 }
 
