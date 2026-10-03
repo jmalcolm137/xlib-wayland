@@ -257,6 +257,19 @@ char *XSetLocaleModifiers(_Xconst char *mods)
 }
 Bool XSupportsLocale(void) { return True; }
 
+/* Reference Xlib's XkbToControl(): fold a printable character into the
+ * control code a Ctrl-modified key produces. */
+static int mw_to_control(int c)
+{
+    if ((c >= '@' && c < 0x7f) || c == ' ')
+        return c & 0x1f;
+    if (c == '2') return 0x00;
+    if (c >= '3' && c <= '7') return c - ('3' - 0x1b);
+    if (c == '8') return 0x7f;
+    if (c == '/') return '_' & 0x1f;
+    return c;
+}
+
 int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
                   XComposeStatus *status)
 {
@@ -269,8 +282,28 @@ int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
         if (s2 != NoSymbol) ks = s2;
     }
     if (keysym) *keysym = ks;
+
+    /* Non-printable keys still yield a byte: Xlib collapses them to their low
+     * seven bits, exactly as the reference _XkbHandleSpecialSym() does.  This
+     * is what makes Return deliver '\r' -- without it a terminal emulator
+     * receives no bytes for Enter and a command is never submitted. */
+    int ch = -1;
+    if ((ks >= XK_BackSpace && ks <= XK_Clear) ||
+        ks == XK_Return || ks == XK_Escape ||
+        ks == XK_KP_Space || ks == XK_KP_Tab || ks == XK_KP_Enter ||
+        (ks >= XK_KP_Multiply && ks <= XK_KP_9) ||
+        ks == XK_KP_Equal || ks == XK_Delete) {
+        ch = (ks == XK_KP_Space) ? (XK_space & 0x7F) : (int)(ks & 0x7F);
+    } else if (ks >= 0x20 && ks < 0x100) {
+        ch = (int)ks;
+    }
+
     int n = 0;
-    if (dp->xkb_state && dp->xkb_keymap) {
+    if (ch >= 0) {
+        if (event->state & ControlMask) ch = mw_to_control(ch);
+        if (nbytes > 0) { buffer[0] = (char)ch; n = 1; }
+    } else if (dp->xkb_state && dp->xkb_keymap) {
+        /* A multi-byte character (composed or non-Latin-1); ask xkbcommon. */
         char buf[64];
         int r = xkb_state_key_get_utf8(dp->xkb_state,
                                        (xkb_keycode_t)event->keycode,
@@ -280,11 +313,7 @@ int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
             if (len > nbytes) len = nbytes;
             memcpy(buffer, buf, len);
             n = len;
-        } else if (ks >= 0x20 && ks < 0x100) {
-            if (nbytes > 0) { buffer[0] = (char)ks; n = 1; }
         }
-    } else if (ks >= 0x20 && ks < 0x100) {
-        if (nbytes > 0) { buffer[0] = (char)ks; n = 1; }
     }
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: XLookupString kc=%u ks=0x%lx n=%d\n",
