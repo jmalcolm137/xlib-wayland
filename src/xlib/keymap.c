@@ -239,7 +239,22 @@ void XConvertCase(KeySym sym, KeySym *lower, KeySym *upper)
 
 int XRefreshKeyboardMapping(XMappingEvent *e) { (void)e; return 1; }
 
-char *XSetLocaleModifiers(_Xconst char *mods) { (void)mods; return NULL; }
+/* Returns the effective X locale modifier list, or NULL only on failure.
+ *
+ * This used to return NULL unconditionally, which is the failure return: Xlib
+ * then prints "X locale modifiers not supported, using default", and callers
+ * that build a localised path from the result -- Motif's Mrm file lookup in the
+ * i18n demos, for instance -- lose the locale component.  We have no input
+ * method, so the honest answer is the empty string (or whatever was asked for,
+ * or $XMODIFIERS when asked to use the default). */
+char *XSetLocaleModifiers(_Xconst char *mods)
+{
+    static char *cur;
+    const char *want = mods ? mods : getenv("XMODIFIERS");
+    free(cur);
+    cur = strdup(want ? want : "");
+    return cur;
+}
 Bool XSupportsLocale(void) { return True; }
 
 int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,

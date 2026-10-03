@@ -594,6 +594,17 @@ static void dispatch_configure_notify(Display *d, MwWindow *win)
         mw_send_configure_notify(d, win);
 }
 
+int XReconfigureWMWindow(Display *d, Window w, int screen, unsigned int value_mask,
+                         XWindowChanges *changes)
+{
+    /* A client would normally ask the window manager to do this with a
+     * _NET_MOVERESIZE_WINDOW message.  Our windows are their own toplevels and
+     * the compositor positions them, so applying the change to the window
+     * directly is both correct and simpler. */
+    (void)screen;
+    return XConfigureWindow(d, w, value_mask, changes);
+}
+
 int XConfigureWindow(Display *d, Window w, unsigned int value_mask,
                      XWindowChanges *values)
 {

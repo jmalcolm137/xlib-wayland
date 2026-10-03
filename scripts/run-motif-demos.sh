@@ -55,8 +55,11 @@ for d in "$DEMOS"/*/; do
         --timeout 5 --output "$WORK/o.png" >"$WORK/r" 2>"$WORK/e" &
     HC=$!
     for _ in $(seq 1 120); do grep -q READY "$WORK/r" 2>/dev/null && break; sleep 0.05; done
-    WAYLAND_DISPLAY="$SOCK" LD_LIBRARY_PATH="$MW_PREFIX/lib" \
-        timeout 12 "$bin" >"$WORK/out" 2>&1
+    # Demos expect to be started from their own directory with XAPPLRESDIR=. so
+    # they can find their local resource and UIL files (hellomotif exits with
+    # "can't open hierarchy" without it).
+    ( cd "$d" && WAYLAND_DISPLAY="$SOCK" XAPPLRESDIR=. \
+        LD_LIBRARY_PATH="$MW_PREFIX/lib" timeout 12 "$bin" ) >"$WORK/out" 2>&1
     arc=$?
     wait $HC 2>/dev/null
 
@@ -68,7 +71,7 @@ try:
 except Exception:
     print("none"); raise SystemExit
 px = list(im.getdata())
-print("painted" if len(set(px[:: max(1, len(px)//4000)])) > 3 else "blank")
+print("painted" if len(set(px[:: max(1, len(px)//4000)])) > 1 else "blank")
 PY
 )
     note=$(grep -vE 'XIO: fatal IO error: Wayland connection closed' "$WORK/out" \

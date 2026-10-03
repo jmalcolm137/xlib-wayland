@@ -33,6 +33,12 @@ XIM XOpenIM(Display *d, XrmDatabase db, char *res_name, char *res_class)
 
 Status XCloseIM(XIM im) { free(im); return 1; }
 
+/* Accessors the toolkit layers need.  libXaw dereferences XDisplayOfIM()
+ * directly (via Xt), so its absence was a hard undefined-symbol failure for
+ * every libXaw client -- xterm included. */
+Display *XDisplayOfIM(XIM im) { return im ? im->display : NULL; }
+char *XLocaleOfIM(XIM im) { (void)im; return NULL; }
+
 static XIMStyles *query_styles(void)
 {
     static XIMStyle list[3];
