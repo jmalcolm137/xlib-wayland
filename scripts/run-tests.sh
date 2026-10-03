@@ -863,6 +863,28 @@ else
     echo "  (skipped: xinput not installed)"
 fi
 
+say "setxkbmap reads the layout names"
+# setxkbmap opens the display through XkbOpenDisplay and reads the layout from
+# the _XKB_RULES_NAMES root property, so it exercises both the XKB entry point
+# and the property the shim publishes there.
+SETXKB="$(command -v setxkbmap)"
+if [ -n "$SETXKB" ] && [ -x "$SETXKB" ]; then
+    run_headless setxkbmap mwskb 400x300 "$WORK/setxkbmap.png" "$SETXKB" -query
+    missing=
+    for line in "rules:" "model:" "layout:"; do
+        grep -q "$line" "$WORK/setxkbmap.client" || missing="$missing '$line'"
+    done
+    if [ -z "$missing" ]; then
+        echo "  ok   rules/model/layout read back from _XKB_RULES_NAMES"
+    else
+        echo "  FAIL: setxkbmap output lacked:$missing"
+        sed 's/^/  /' "$WORK/setxkbmap.client" | head
+        exit 1
+    fi
+else
+    echo "  (skipped: setxkbmap not installed)"
+fi
+
 say "real X11 client matrix"
 # Running actual X11 programs is the most effective verification we have; see
 # scripts/run-x11-clients.sh for why a conformance suite does not apply here.

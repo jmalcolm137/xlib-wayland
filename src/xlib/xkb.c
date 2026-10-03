@@ -1,11 +1,12 @@
 /* xkb.c — the XKB API surface that clients and libxkbfile resolve against.
  *
- * The shim has no XKB protocol.  Keycodes and keysyms come from the
- * compositor's xkbcommon keymap (see keymap.c); there is no server to carry
- * keymap, indicator, controls or geometry requests.  XkbQueryExtension()
- * therefore reports the extension as absent and clients fall back to core X11
- * -- a path every one of them already has.  Advertising an extension whose
- * requests go nowhere would be worse than not having it.
+ * Keycodes and keysyms come from the compositor's xkbcommon keymap (see
+ * keymap.c); there is no server to carry keymap, indicator, controls or
+ * geometry requests.  The extension is nevertheless reported present: the
+ * keymap is real, and clients that ask for XKB -- setxkbmap to read the
+ * layout, xterm for its keycode translation -- otherwise refuse to run at
+ * all.  Requests that would change the keymap are simply not carried, and the
+ * functions that would need a server report failure rather than pretending.
  *
  * The functions below still have to exist, because anything that links them
  * must resolve them at load time: xterm references the indicator and keysym
@@ -36,13 +37,55 @@ Bool XkbLibraryVersion(int *libMajorRtrn, int *libMinorRtrn)
 Bool XkbQueryExtension(Display *dpy, int *opcodeReturn, int *eventBaseReturn,
                        int *errorBaseReturn, int *majorRtrn, int *minorRtrn)
 {
+    /* The extension is reported present: keycodes and keysyms do come from a
+     * real xkbcommon keymap, and clients that ask for it -- setxkbmap to read
+     * the layout, xterm for its indicators -- otherwise refuse to run at all.
+     * The bases are in unused ranges so nothing is ever mistaken for an XKB
+     * event, and requests that would change the keymap are not carried. */
     (void)dpy;
-    if (opcodeReturn)    *opcodeReturn = 0;
-    if (eventBaseReturn) *eventBaseReturn = 0;
-    if (errorBaseReturn) *errorBaseReturn = 0;
+    if (opcodeReturn)    *opcodeReturn = 129;
+    if (eventBaseReturn) *eventBaseReturn = 110;
+    if (errorBaseReturn) *errorBaseReturn = 150;
     if (majorRtrn)       *majorRtrn = XkbMajorVersion;
     if (minorRtrn)       *minorRtrn = XkbMinorVersion;
-    return False;
+    return True;
+}
+
+Display *XkbOpenDisplay(_Xconst char *display_name, int *event_rtrn,
+                        int *error_rtrn, int *major_in_out, int *minor_in_out,
+                        int *reason_rtrn)
+{
+    int major = major_in_out ? *major_in_out : XkbMajorVersion;
+    int minor = minor_in_out ? *minor_in_out : XkbMinorVersion;
+    Display *dpy = XOpenDisplay(display_name);
+    if (!dpy) {
+        if (reason_rtrn) *reason_rtrn = XkbOD_ConnectionRefused;
+        return NULL;
+    }
+    if (!XkbLibraryVersion(&major, &minor)) {
+        if (reason_rtrn) *reason_rtrn = XkbOD_BadLibraryVersion;
+        XCloseDisplay(dpy);
+        return NULL;
+    }
+    if (!XkbQueryExtension(dpy, NULL, event_rtrn, error_rtrn, &major, &minor)) {
+        if (reason_rtrn) *reason_rtrn = XkbOD_NonXkbServer;
+        XCloseDisplay(dpy);
+        return NULL;
+    }
+    if (major_in_out) *major_in_out = major;
+    if (minor_in_out) *minor_in_out = minor;
+    if (reason_rtrn) *reason_rtrn = XkbOD_Success;
+    return dpy;
+}
+
+/* Loading a keyboard from the XKB configuration files and uploading it is not
+ * something an in-process shim can do; report failure rather than pretend. */
+XkbDescPtr XkbGetKeyboardByName(Display *dpy, unsigned int deviceSpec,
+                                XkbComponentNamesPtr names, unsigned int want,
+                                unsigned int need, Bool load)
+{
+    (void)dpy; (void)deviceSpec; (void)names; (void)want; (void)need; (void)load;
+    return NULL;
 }
 
 /* ------------------------------------------------------------- keysyms */

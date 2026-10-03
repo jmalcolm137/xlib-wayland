@@ -223,6 +223,15 @@ Display *XOpenDisplay(_Xconst char *display_name)
     mw_xrandr_init(d);
     mw_shape_init(d);
 
+    /* The keymap comes from the compositor, but keymap-aware clients read the
+     * layout names off the root window -- `setxkbmap -query` prints these. */
+    {
+        Atom xkbrules = XInternAtom(d, "_XKB_RULES_NAMES", False);
+        static const char rules[] = "evdev\0pc105\0us\0\0";
+        XChangeProperty(d, root->id, xkbrules, XA_STRING, 8, PropModeReplace,
+                        (const unsigned char *)rules, (int)sizeof rules);
+    }
+
     dp->error_handler = NULL;
     dp->io_error_handler = NULL;
     dp->ptr_x = sw / 2;

@@ -55,7 +55,7 @@ CLIENTS=(
     "xdpyinfo|ran|"
     "xterm|ok|-geometry 80x24"
     "xinput|ran|list"
-    "setxkbmap|gap|-query"
+    "setxkbmap|ran|-query"
 )
 
 [ -x "$BUILD/headless-compositor" ] || { echo "build the shim first ($BUILD)"; exit 1; }
