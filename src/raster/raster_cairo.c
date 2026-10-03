@@ -625,7 +625,11 @@ MwFont *mw_font_create(const char *pattern, int pixel_size_hint)
         FcPatternAddString(pat, FC_FAMILY, (const FcChar8 *)family);
     FcPatternAddDouble(pat, FC_PIXEL_SIZE, (double)px);
     FcPatternAddBool(pat, FC_SCALABLE, FcTrue);
-    return font_from_match(font_match(pat), px, 0);
+    /* Grayscale antialiasing for core fonts too.  It changes only the raster,
+     * not the advances (hinting stays off on both paths), so the widths we
+     * report through XTextWidth still match what we draw -- which is what the
+     * no-antialias rule was protecting.  Set MW_NO_AA=1 for the old flat look. */
+    return font_from_match(font_match(pat), px, getenv("MW_NO_AA") ? 0 : 1);
 }
 
 /* The Xft path: match the caller's own fontconfig pattern so weight, slant and
