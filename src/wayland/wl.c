@@ -108,7 +108,8 @@ int mw_wl_connect(XDisplayImpl *dp, const char *name)
     struct wl_display *disp = wl_display_connect(name);
     if (!disp) return -1;
     dp->wl_display = disp;
-    dp->fd = wl_display_get_fd(disp);
+    dp->wl_fd = wl_display_get_fd(disp);
+    dp->fd = dp->wl_fd;   /* replaced by the wakeup pipe once that starts */
 
     dp->wl_registry = wl_display_get_registry(disp);
     wl_registry_add_listener(dp->wl_registry, &registry_listener, (Display *)dp);
@@ -127,12 +128,17 @@ int mw_wl_connect(XDisplayImpl *dp, const char *name)
         wl_display_roundtrip(disp);
     }
 
+    /* Start the fd-wakeup helper now that the connection is live (no-op if it
+     * cannot be created; XConnectionNumber then falls back to the Wayland fd). */
+    mw_wakeup_start(dp);
+
     return 0;
 }
 
 void mw_wl_disconnect(XDisplayImpl *dp)
 {
     if (!dp->wl_display) return;
+    mw_wakeup_stop(dp);
     mw_clipboard_fini((Display *)dp);
     if (dp->wl_seat) mw_input_fini((Display *)dp);
     if (dp->data_device) wl_data_device_destroy(dp->data_device);
@@ -158,6 +164,7 @@ void mw_block_for_events(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
     if (!dp->wl_display || dp->closed) return;
+    mw_wakeup_drain(dp);
     /* The client is about to go idle: paint accumulated damage first, but no
      * more than once per display refresh -- the compositor's frame callback
      * re-renders anything that was deferred, so nothing is lost. */
@@ -191,7 +198,7 @@ void mw_block_for_events(Display *d)
     wl_display_flush(dp->wl_display);
 
     struct pollfd pfd[2];
-    pfd[0].fd = dp->fd; pfd[0].events = POLLIN; pfd[0].revents = 0;
+    pfd[0].fd = dp->wl_fd; pfd[0].events = POLLIN; pfd[0].revents = 0;
     pfd[1].fd = cfd;    pfd[1].events = POLLIN; pfd[1].revents = 0;
 
     int timeout = rtimeout >= 0 ? rtimeout : 100;
@@ -216,6 +223,8 @@ void mw_process_events(Display *d, bool block)
     XDisplayImpl *dp = MWD(d);
     if (!dp->wl_display || dp->closed) return;
 
+    mw_wakeup_drain(dp);
+
     /* Paint accumulated drawing damage only when the client is about to go
      * idle.  Rendering on every poll (XPending, XEventsQueued, ...) showed
      * half-finished repaints: Motif clears a text field and then redraws it in
@@ -237,7 +246,7 @@ void mw_process_events(Display *d, bool block)
         wl_display_flush(dp->wl_display);
         struct pollfd pfd[2];
         int n = 0;
-        pfd[n].fd = dp->fd; pfd[n].events = POLLIN; pfd[n].revents = 0; n++;
+        pfd[n].fd = dp->wl_fd; pfd[n].events = POLLIN; pfd[n].revents = 0; n++;
         int cfd = mw_clipboard_poll_fd(d);
         if (cfd >= 0) { pfd[n].fd = cfd; pfd[n].events = POLLIN; pfd[n].revents = 0; n++; }
         int r = poll(pfd, n, 0);

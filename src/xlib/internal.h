@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <time.h>
+#include <pthread.h>
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -537,6 +538,22 @@ typedef struct _XDisplayImpl {
     KeyCode                     repeat_key;       /* key currently held, or 0 */
     uint64_t                    repeat_next_ms;   /* when the next repeat is due */
 
+    /* Wakeup plumbing (see src/wayland/wakeup.c).  libXt waits in select() on
+     * the fd XConnectionNumber returns; if that is the Wayland socket the
+     * client only wakes when the compositor sends something, which is far too
+     * irregular to pace key repeat.  A helper thread watches the Wayland fd and
+     * the repeat deadline and signals a pipe instead.  That pipe *is* the
+     * public `fd' field (libXt reads it through the ConnectionNumber() macro,
+     * not XConnectionNumber()), so the Wayland socket is kept separately. */
+    int                         wl_fd;            /* the Wayland socket */
+    int                         wake_pipe[2];     /* [0] read end, [1] write end */
+    int                         wake_stop;        /* eventfd that stops the thread */
+    int                         wake_cmd;         /* eventfd: deadline changed */
+    pthread_t                   wake_thread;
+    bool                        wake_running;
+    int                         wake_active;      /* __atomic: a repeat is pending */
+    uint64_t                    wake_deadline;    /* __atomic: its deadline, ms */
+
     /* selections */
     MwSelection                 *selections;
 
@@ -677,6 +694,12 @@ void mw_process_events(Display *d, bool block);
  * repeated from the event pump (see input.c). */
 void mw_kbd_repeat_pump(Display *d);
 int  mw_kbd_repeat_timeout(Display *d);
+
+/* Wakeup plumbing: the fd handed out by XConnectionNumber (see wakeup.c). */
+int  mw_wakeup_start(XDisplayImpl *dp);
+void mw_wakeup_stop(XDisplayImpl *dp);
+void mw_wakeup_set(XDisplayImpl *dp, int active, uint64_t deadline_ms);
+void mw_wakeup_drain(XDisplayImpl *dp);
 /* Block until at least one more Wayland event has been read and dispatched,
  * even when events are already queued.  mw_process_events(d, true) only blocks
  * on an empty queue, which is not enough for the mask-based event selectors

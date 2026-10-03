@@ -48,7 +48,7 @@ inc = include_directories('src/xlib', 'src/raster', 'src/wayland', 'src/xft')
 
 raster_sources = files('src/raster/raster_cairo.c')
 wayland_sources = files('src/wayland/wl.c', 'src/wayland/surface.c',
-                        'src/wayland/clipboard.c')
+                        'src/wayland/clipboard.c', 'src/wayland/wakeup.c')
 xlib_sources = files(
   'src/xlib/aliases.c', 'src/xlib/atom.c', 'src/xlib/color.c', 'src/xlib/compat.c',
   'src/xlib/cursor.c', 'src/xlib/display.c', 'src/xlib/drawing.c', 'src/xlib/event.c',

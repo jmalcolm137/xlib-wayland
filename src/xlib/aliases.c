@@ -19,7 +19,15 @@ Colormap XDefaultColormap(Display *d, int scr) { (void)scr; return MWSCR(d)->cma
 int XDefaultDepth(Display *d, int scr) { (void)scr; return MWSCR(d)->root_depth; }
 unsigned long XBlackPixel(Display *d, int scr) { (void)scr; return MWSCR(d)->black_pixel; }
 unsigned long XWhitePixel(Display *d, int scr) { (void)scr; return MWSCR(d)->white_pixel; }
-int XConnectionNumber(Display *d) { return MWD(d)->fd; }
+/* The fd a client waits on: the public `fd' field, which the wakeup helper
+ * points at its pipe so a client blocked in select() wakes when the Wayland
+ * socket has data or a key repeat is due.  (libXt bypasses this function and
+ * reads the field through the ConnectionNumber() macro, so the field itself has
+ * to carry the pipe.) */
+int XConnectionNumber(Display *d)
+{
+    return MWD(d)->fd;
+}
 int XProtocolVersion(Display *d) { return MWD(d)->proto_major_version; }
 int XProtocolRevision(Display *d) { return MWD(d)->proto_minor_version; }
 int XVendorRelease(Display *d) { return MWD(d)->release; }

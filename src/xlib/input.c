@@ -239,6 +239,15 @@ static void deliver_key(Display *d, KeyCode kc, int type)
     }
 }
 
+/* Mirror the repeat deadline to the wakeup helper so it can wake the client's
+ * select() exactly when a repeat is due, rather than waiting for unrelated
+ * traffic on the Wayland connection (see src/wayland/wakeup.c). */
+static void repeat_notify(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    mw_wakeup_set(dp, dp->repeat_key && dp->repeat_rate > 0, dp->repeat_next_ms);
+}
+
 /* Wayland leaves key repeat to the client: wl_keyboard.repeat_info supplies the
  * rate and delay, and the repeat events while a key is held have to be generated
  * here, from the event pump. */
@@ -267,6 +276,7 @@ void mw_kbd_repeat_pump(Display *d)
     }
     if (now >= dp->repeat_next_ms)          /* long stall: resynchronise */
         dp->repeat_next_ms = now + (uint64_t)period;
+    repeat_notify(d);
 }
 
 /* Milliseconds until the next repeat is due, or -1 when none is pending.  The
@@ -313,6 +323,7 @@ static void kbd_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
     } else if (dp->repeat_key == kc) {
         dp->repeat_key = 0;
     }
+    repeat_notify(d);
 }
 
 static void kbd_modifiers(void *data, struct wl_keyboard *kbd, uint32_t serial,

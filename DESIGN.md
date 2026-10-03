@@ -250,8 +250,16 @@ XEventsQueued(dpy, QueuedAfterReading);
 
 Therefore:
 
-* **`ConnectionNumber(dpy)` = `wl_display_get_fd()`.** This single fact makes unmodified Xt
-  block on Wayland events exactly as it would block on X11 events.
+* **`ConnectionNumber(dpy)` = the wakeup pipe (normally), not the Wayland socket.**
+  libXt reads the fd through the `ConnectionNumber()` *macro*, which is just
+  `dpy->fd`, and blocks in `select()` on it. The Wayland socket only becomes
+  readable when the compositor sends something, which is too irregular to pace
+  key repeat, so `src/wayland/wakeup.c` runs a small helper thread that polls the
+  Wayland socket *and* the repeat deadline and makes a pipe readable for either.
+  The public `fd` field points at that pipe (the Wayland socket is kept in
+  `wl_fd`), so unmodified Xt blocks on the pipe exactly as it would block on an
+  X11 socket, and wakes at the repeat deadline as well as on input. `MW_NO_WAKEUP=1`
+  falls back to the Wayland fd.
 * `XFlush` → `wl_display_flush`; `XSync` → flush + `roundtrip` (or flush + read to quiescence).
 * `XPending`/`XEventsQueued` → the canonical Wayland nonblocking drain:
   `wl_display_dispatch_pending` → `wl_display_prepare_read` → `poll(fd,0)` →
@@ -563,7 +571,7 @@ xlib-wayland/
 |---|---|---|
 | Xlib surface larger than expected (clients call paths not in the 307) | link/run failures | ship the full Xorg Xlib header set; link-time `-Wl,--no-undefined` audit; run with `LD_BIND_NOW=1` + `RTLD_NOW` and stub loudly |
 | Semantics of child windows/Expose differ from X | blank or stale UI | always-on backing store; recomposite on damage; golden-image tests |
-| libXt blocks on the wrong fd / uses `_X` internals | event loop hangs | `ConnectionNumber` = wl fd is the contract; build libXt from source and test its `NextEvent` path early (M3) |
+| libXt blocks on the wrong fd / uses `_X` internals | event loop hangs | `ConnectionNumber` (the macro: `dpy->fd`) is the contract; point it at the wakeup pipe so clients wake on Wayland input *and* key-repeat deadlines; build libXt from source and test its `NextEvent` path early (M3) |
 | Motif's private Xt headers assume structures we don't control | build break | we use upstream Xt headers/structs verbatim; only Xlib is ours |
 | XIM insufficiency breaks text editing | keyboard dead in NEdit | local IM implements the client-visible contract; fall back further to `XLookupString` if `XCreateIC` fails |
 | Font mismatch (XLFD) | ugly or wrong metrics | fontconfig match + built-in fixed fallback; never fail `XLoadQueryFont` |

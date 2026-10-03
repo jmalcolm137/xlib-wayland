@@ -1,0 +1,8 @@
+# Key-repeat input for test_repeat.c: hold 'a' (evdev 30) for 1.5s.
+sleep 700
+motion 180 100
+sleep 200
+key press 30
+sleep 1500
+key release 30
+sleep 500

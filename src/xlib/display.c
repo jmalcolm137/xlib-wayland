@@ -135,6 +135,7 @@ Display *XOpenDisplay(_Xconst char *display_name)
     dp->next_id = MW_XID_BASE;
     dp->motion_buffer = 0;
     dp->fd = -1;
+    dp->wl_fd = -1;
     dp->display_name = strdup(display_name ? display_name :
                               (getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY")
                                                          : "wayland-0"));

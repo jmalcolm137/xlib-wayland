@@ -837,6 +837,25 @@ else
     exit 1
 fi
 
+say "key repeat is paced by the fd the client waits on"
+# libXt waits in select() on ConnectionNumber(dpy) -- the macro, which reads
+# dpy->fd -- and only then calls into Xlib.  The shim points dpy->fd at a pipe
+# its helper thread signals at each repeat deadline; without that a held key
+# only repeated when unrelated Wayland traffic arrived (2-9 repeats instead of
+# the ~33 a 25/s rate over the 1.5s hold implies).
+cc -o "$BUILD/test_repeat" "$ROOT/tests/test_repeat.c" \
+    -I"$PREFIX/include" -L"$PREFIX/lib" -lX11 \
+    -Wl,-rpath,"$PREFIX/lib" ${CFLAGS:-}
+INPUT="$ROOT/tests/repeat.input" HC_TIMEOUT=6 \
+    run_headless repeat mwrepeat 400x300 "$WORK/repeat.png" "$BUILD/test_repeat"
+if grep -q 'all checks passed' "$WORK/repeat.client"; then
+    echo "  ok   $(cat "$WORK/repeat.client")"
+else
+    echo "  FAIL: key repeat not paced"
+    sed 's/^/  /' "$WORK/repeat.client" | head
+    exit 1
+fi
+
 say "xdpyinfo queries the shim"
 # xdpyinfo drives the display/screen/visual and extension queries through
 # libX11 (and pulls in libXtst for XTest), so it is the broadest API query
