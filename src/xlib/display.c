@@ -341,6 +341,17 @@ VisualID XVisualIDFromVisual(Visual *v) { return v->visualid; }
 int XFlush(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
+    /* XFlush makes pending drawing visible, so commit accumulated damage
+     * before flushing the connection.  The commit is capped to one frame per
+     * refresh (and arms a frame callback when it defers), so a repaint built
+     * from many drawing calls still presents as a single frame.
+     *
+     * Without this, drawing triggered by a source that never reaches the
+     * shim's own event pump was never committed: xterm repaints in response to
+     * pty output and then calls XFlush "before waiting", so on a compositor
+     * that sends no further traffic the window stayed frozen even though the
+     * application was alive and still reading its pty. */
+    mw_flush_damage_deferred(d);
     if (dp->wl_display) wl_display_flush(dp->wl_display);
     return 1;
 }

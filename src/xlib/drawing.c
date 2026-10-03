@@ -497,6 +497,29 @@ int XFillPolygon(Display *d, Drawable dr, GC gc, XPoint *pts, int n,
     return 1;
 }
 
+/* X promises a NoExpose (or GraphicsExpose) event after a copy when the GC was
+ * created with graphics_exposures set, and clients use it to know the copy has
+ * finished.  xterm scrolls its screen with XCopyArea and then waits for one in
+ * CopyWait(); with no event it blocked forever the first time output scrolled
+ * off the bottom, and the terminal froze -- alive, still reading its pty, but
+ * no longer processing any events.  Our copies are synchronous and always
+ * complete, so the answer is always NoExpose.  The request codes are
+ * X_CopyArea/X_CopyPlane from Xproto.h. */
+#define MW_X_CopyArea   62
+#define MW_X_CopyPlane  63
+static void send_copy_exposures(Display *d, Drawable dst, GC gc, int major)
+{
+    if (!gc || !gc->graphics_exposures) return;
+    XNoExposeEvent ev;
+    memset(&ev, 0, sizeof ev);
+    ev.type = NoExpose;
+    ev.display = d;
+    ev.drawable = dst;
+    ev.major_code = major;
+    ev.minor_code = 0;
+    mw_put_event(d, (XEvent *)&ev);
+}
+
 int XCopyArea(Display *d, Drawable src, Drawable dst, GC gc,
               int sx, int sy, unsigned int w, unsigned int h, int dx, int dy)
 {
@@ -511,6 +534,7 @@ int XCopyArea(Display *d, Drawable src, Drawable dst, GC gc,
     mw_canvas_copy(c, ss, sx, sy, dx, dy, (int)w, (int)h);
     mw_canvas_end(c);
     after_draw(d, dst);
+    send_copy_exposures(d, dst, gc, MW_X_CopyArea);
     return 1;
 }
 
@@ -528,5 +552,6 @@ int XCopyPlane(Display *d, Drawable src, Drawable dst, GC gc,
                          plane == 1 ? 0 : 0);
     mw_canvas_end(c);
     after_draw(d, dst);
+    send_copy_exposures(d, dst, gc, MW_X_CopyPlane);
     return 1;
 }
