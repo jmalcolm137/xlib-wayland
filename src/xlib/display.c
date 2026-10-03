@@ -99,12 +99,18 @@ Display *XOpenDisplay(_Xconst char *display_name)
 {
     if (mw_raster_init() != 0) return NULL;
 
-    /* Resolve the name the same way the rest of the shim reports it, so that
-     * "wayland-0", NULL and an explicit Wayland socket all describe one
-     * display. */
+    /* Xlib reports an X display string ("host:display.screen") through
+     * XDisplayString() and through the Display's display_name field.  The
+     * name is informational here -- we always connect via WAYLAND_DISPLAY --
+     * but it must be X-shaped: clients parse it.  CDE's DtSvc, for example,
+     * splits it on ':' and dereferences the remainder, so exposing the raw
+     * Wayland socket name ("wayland-0") made it crash in GetDisplayName().
+     * Derive the name from XOpenDisplay's argument, then $DISPLAY, then a
+     * local ":0", and use it as the open-display key so repeated opens of the
+     * same display still return the same Display. */
+    const char *env = getenv("DISPLAY");
     const char *resolved = display_name && *display_name ? display_name
-                          : (getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY")
-                                                       : "wayland-0");
+                          : (env && *env ? env : ":0");
 
     pthread_mutex_lock(&display_list_lock);
     for (XDisplayImpl *e = open_displays; e; e = e->open_next) {
@@ -136,9 +142,7 @@ Display *XOpenDisplay(_Xconst char *display_name)
     dp->motion_buffer = 0;
     dp->fd = -1;
     dp->wl_fd = -1;
-    dp->display_name = strdup(display_name ? display_name :
-                              (getenv("WAYLAND_DISPLAY") ? getenv("WAYLAND_DISPLAY")
-                                                         : "wayland-0"));
+    dp->display_name = strdup(resolved);
 
     /* Bind to the compositor.  Xt passes the X DISPLAY name (":0") here; there
      * is no X server, so the name is informational only — we always connect
