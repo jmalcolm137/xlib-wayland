@@ -14,7 +14,7 @@ OpenMotif builds and runs without modification on libXt.
 
 NEdit builds and runs unmodified on OpenMotif.
 
-This is not the same as Xwayland. NEdit run this way is a real native Wayland app.
+This is not the same as Xwayland. NEdit run this way is a real native Wayland app. No X11 protocol is involved.
 
 ## Status
 
