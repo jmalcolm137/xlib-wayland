@@ -13,6 +13,8 @@ int XSelectInput(Display *d, Window w, long event_mask)
 {
     MwWindow *win = mw_window(d, w);
     if (!win) return 0;
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: XSelectInput 0x%lx mask=0x%lx\n", w, event_mask);
     win->event_mask = event_mask;
     win->all_event_masks |= event_mask;
     return 1;

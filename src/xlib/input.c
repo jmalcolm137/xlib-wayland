@@ -133,14 +133,18 @@ static void kbd_enter(void *data, struct wl_keyboard *kbd, uint32_t serial,
          * while a dialog has just been focused) it must NOT be reused:
          * Motif updates its internal focus from the FocusIn we deliver, so
          * sending FocusIn to the old window left typing going to the main
-         * window and dialog text fields could never be focused. */
+         * window and dialog text fields could never be focused.
+         *
+         * The focus is the surface's own window, never the deepest window
+         * under the pointer: the pointer may be resting on a child that takes
+         * no keyboard input at all (xterm's scrollbar), and X never moves the
+         * input focus just because the pointer is somewhere. */
         MwWindow *deep;
         if (dp->kbd_focus && same_toplevel(dp->kbd_focus, w)) {
             deep = dp->kbd_focus;
         } else {
             dp->focus_explicit = false;   /* that explicit focus was elsewhere */
-            deep = (dp->ptr_focus && same_toplevel(dp->ptr_focus, w))
-                 ? dp->ptr_focus : w;
+            deep = w;
         }
         if (!dp->focus_explicit)
             dp->kbd_focus = deep;
@@ -475,11 +479,27 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial,
         dp->ptr_grab_mask = 0;
     }
 
-    MwWindow *target;
+    long bit = pressed ? ButtonPressMask : ButtonReleaseMask;
+    MwWindow *target = NULL;
+    bool want = false;
+
     if (dp->ptr_grab_active) {
-        target = (dp->ptr_grab_owner && deep) ? deep : dp->ptr_grab_window;
+        /* An owner_events grab reports the event to the window under the
+         * pointer when that window selected it, and otherwise to the grab
+         * window through the grab's mask.  Xt registers its popup-menu action
+         * that way, and it is the path by which xterm's scrollbar child
+         * receives the press that drives it; checking only the grab's mask
+         * dropped the event before Xt could see it. */
+        if (dp->ptr_grab_owner && deep && (deep->event_mask & bit)) {
+            target = deep;
+            want = true;
+        } else {
+            target = dp->ptr_grab_window;
+            want = (dp->ptr_grab_mask & bit) != 0;
+        }
     } else if (dp->implicit_grab) {
         target = dp->implicit_grab;
+        want = true;
     } else {
         target = deep;
         if (pressed && deep) {
@@ -493,16 +513,23 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial,
                     dp->ptr_grab_mode = g->pointer_mode;
                     dp->ptr_grab_active = true;
                     dp->ptr_grab_temporary = true;
-                    target = gw;
+                    if (g->owner_events && (deep->event_mask & bit)) {
+                        target = deep;
+                        want = true;
+                    } else {
+                        target = gw;
+                        want = (g->event_mask & bit) != 0;
+                    }
                     if (getenv("MW_TRACE"))
                         fprintf(stderr, "MW: passive grab 0x%lx activated\n", gw->id);
                     break;
                 }
             }
         }
+        if (!dp->ptr_grab_active)
+            want = target && (target->event_mask & bit);
     }
     if (!target) return;
-    if (pressed && !dp->focus_explicit) dp->kbd_focus = target;
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: button %s -> target=0x%lx at %d,%d (deep ptr=%d,%d)\n",
                 pressed ? "press" : "release", target->id, rx, ry, dp->ptr_x, dp->ptr_y);
@@ -510,9 +537,6 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial,
     XEvent ev;
     pt_event(d, target, &ev, pressed ? ButtonPress : ButtonRelease, rx, ry,
              ev_state, (int)xbutton, NotifyNormal, 0);
-    long bit = pressed ? ButtonPressMask : ButtonReleaseMask;
-    bool want = dp->ptr_grab_active ? (dp->ptr_grab_mask & bit)
-                : (dp->implicit_grab ? true : (target->event_mask & bit));
     if (want) {
         ev.xbutton.window = target->id;
         mw_put_event(d, &ev);
