@@ -776,9 +776,21 @@ exists but is not built here, as libXm is not installed.
 
 ### 9.5 Remaining work (M5+)
 
-Xft/Render (so Motif can stop using `--disable-xft`), server-side decorations,
-a real preedit/IME, and the long tail of Xlib entry points not exercised by
-XV/NEdit.  `MW_TRACE=1` enables an operation trace (`src/xlib/window.c`,
+Server-side decorations are done.  Text is antialiased: the core font path
+enables grayscale smoothing (advances stay unhinted, so XTextWidth still
+matches what is drawn) and `src/xft/` provides an `libXft.so.2` built on the
+same font path, verified to render antialiased text on its own.
+
+Motif's *own* Xft render path is not selected yet.  With Motif built
+`--enable-xft` and NEdit on its XFT branch (both opt-in via `WITH_XFT=1`), Motif
+does load Xft fonts through the shim (`XftFontOpenPattern`, e.g. Noto Sans /
+Noto Sans Mono 9.4) but then draws every string through the core path with the
+fallback `fixed` font -- 40 core draws against 0 Xft draws in a trace -- so the
+requested face and size are lost.  Until that resolution is understood, Motif
+is built `--disable-xft` and the antialiasing comes from the core path.
+
+Still to do: a real preedit/IME, and the long tail of Xlib entry points not
+exercised by XV/NEdit.  `MW_TRACE=1` enables an operation trace (`src/xlib/window.c`,
 `src/wayland/surface.c`, `wl.c`) for debugging applications on the shim.
 
 

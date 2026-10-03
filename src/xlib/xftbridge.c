@@ -4,6 +4,8 @@
 
 #include "xftbridge.h"
 
+#include <stdlib.h>
+
 void *mw_xft_font_open(const void *fc_pattern, int pixel_size_hint, int antialias)
 { return mw_font_create_fc(fc_pattern, pixel_size_hint, antialias); }
 
@@ -39,6 +41,9 @@ void mw_xft_draw_utf8(Display *dpy, Drawable dr, void *font, int x, int y,
                       const char *utf8, int len, unsigned int argb,
                       const XRectangle *clip, int nclip)
 {
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: xft-draw %d bytes '%.*s'\n",
+                len, len > 12 ? 12 : len, utf8);
     MwCanvas *c = xft_canvas(dpy, dr, clip, nclip);
     if (!c) return;
     mw_set_source_argb(c, argb);

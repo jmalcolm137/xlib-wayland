@@ -33,7 +33,7 @@ Wayland compositor:
 | **NEdit 5.7 built unmodified and rendering** | ✅ **done** |
 | X resource database (`RESOURCE_MANAGER`, `~/.Xresources`, `$XENVIRONMENT`) | ✅ done |
 | Client-side decorations when the compositor has none | ✅ done |
-| M5 Xft/Render, full IME | ⏳ planned |
+| M5 Xft/Render, full IME | ⚠️ text antialiased; Motif's Xft render path and a real IME remain |
 
 Verified behaviour (see `scripts/run-tests.sh`): display/screen/visual setup,
 the X window tree, GCs and the drawing primitives, `XPutImage`/`XGetImage`

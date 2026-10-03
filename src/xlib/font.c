@@ -260,6 +260,9 @@ static int draw_glyphs(Display *d, Drawable dr, GC gc, int x, int y,
         mw_fill_path(c);
         mw_set_source_argb(c, 0xff000000u | (uint32_t)(gc->foreground & 0xffffff));
     }
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: core-draw %d bytes '%.*s'\n",
+                len, len > 12 ? 12 : len, (const char *)utf8);
     if (gc->xfont && gc->xfont->rfont)
         mw_show_utf8(c, gc->xfont->rfont, (const char *)utf8, len, x, y);
     mw_canvas_end(c);
