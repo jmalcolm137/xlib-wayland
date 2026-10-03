@@ -45,7 +45,7 @@ int _XSend(Display *d, _Xconst char *data, long size)
 
 char *_XGetRequest(Display *d, unsigned char type, size_t len)
 {
-    (void)d; (void)type;
+    (void)type;
     static char *buf;
     static size_t cap;
     if (len + 8 > cap) {
@@ -54,27 +54,40 @@ char *_XGetRequest(Display *d, unsigned char type, size_t len)
         buf = calloc(1, cap);
     }
     if (buf) memset(buf, 0, cap);
+    /* The caller fills this buffer with the request and _XReply then answers
+     * it; remember it so an extension request can be synthesised (xi2.c). */
+    mw_xi2_forget_request(d);
+    XDisplayImpl *dp = MWD(d);
+    dp->xi2_req = (unsigned char *)buf;
+    dp->xi2_req_len = (int)len;
     return buf;
 }
 
 int _XReply(Display *d, void *rep, int extra, Bool discard)
 {
-    (void)d; (void)extra; (void)discard;
-    if (rep) memset(rep, 0, sizeof(long) * 8);
+    (void)extra; (void)discard;
+    if (rep && mw_xi2_reply(d, rep)) return 1;
+    /* A reply is 32 bytes.  Zeroing sizeof(long)*8 (64) instead overwrote the
+     * caller's stack whenever it passed the usual `xReply rep;` -- latent until
+     * an extension library actually got to issue a request and read its reply. */
+    if (rep) memset(rep, 0, 32);
     return 1;
 }
 
 int _XRead(Display *d, char *data, long size)
 {
-    (void)d;
-    if (data && size > 0) memset(data, 0, (size_t)size);
+    if (data && size > 0) {
+        if (mw_xi2_read(d, data, (size_t)size) < 0) memset(data, 0, (size_t)size);
+    }
     return (int)size;
 }
 
 int _XRead32(Display *d, long *data, long len)
 {
-    (void)d;
-    if (data && len > 0) memset(data, 0, (size_t)len * sizeof(long));
+    if (data && len > 0) {
+        size_t bytes = (size_t)len * sizeof(long);
+        if (mw_xi2_read(d, (char *)data, bytes) < 0) memset(data, 0, bytes);
+    }
     return (int)len;
 }
 

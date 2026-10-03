@@ -54,7 +54,7 @@ CLIENTS=(
     "xev|ran|"
     "xdpyinfo|ran|"
     "xterm|ok|-geometry 80x24"
-    "xinput|gap|list"
+    "xinput|ran|list"
     "setxkbmap|gap|-query"
 )
 

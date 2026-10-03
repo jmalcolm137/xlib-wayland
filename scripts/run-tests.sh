@@ -845,6 +845,24 @@ else
     echo "  (skipped: xdpyinfo not installed)"
 fi
 
+say "xinput enumerates the (virtual) input devices"
+# xinput drives the XInput2 query path through libXi: extension version,
+# XIQueryVersion and XIQueryDevice.  The shim answers those from a synthetic
+# device set (a master pointer/keyboard pair plus XTEST slaves).
+XINPUT_BIN="$PREFIX/bin/xinput"; [ -x "$XINPUT_BIN" ] || XINPUT_BIN="$(command -v xinput)"
+if [ -n "$XINPUT_BIN" ] && [ -x "$XINPUT_BIN" ]; then
+    run_headless xinput mwxi 400x300 "$WORK/xinput.png" "$XINPUT_BIN" list
+    if grep -q 'Virtual core' "$WORK/xinput.client"; then
+        echo "  ok   XIQueryVersion/XIQueryDevice answered (devices listed)"
+    else
+        echo "  FAIL: xinput could not enumerate the devices"
+        sed 's/^/  /' "$WORK/xinput.client" | head -10
+        exit 1
+    fi
+else
+    echo "  (skipped: xinput not installed)"
+fi
+
 say "real X11 client matrix"
 # Running actual X11 programs is the most effective verification we have; see
 # scripts/run-x11-clients.sh for why a conformance suite does not apply here.

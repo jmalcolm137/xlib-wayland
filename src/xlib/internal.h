@@ -380,7 +380,27 @@ typedef struct _XDisplayImpl {
     XPointer        private17, private18;
     int             private19;
     char           *xdefaults;
-    /* ---- end public prefix; everything below is private to us ---- */
+    /* ---- end public prefix ---- */
+    /* The real Display continues past xdefaults, and libraries built with
+     * XTHREADS reach into it through Xlibint.h: LockDisplay() does
+     * `if (dpy->lock_fns) ...`, so the layout through the binary-compatibility
+     * boundary ("things above this line should not move") has to match or a
+     * library dereferences our data as a function pointer.  These fields are
+     * intentionally unused (the shim needs no event_vec/lock machinery) but
+     * must occupy the right offsets. */
+    char           *scratch_buffer;
+    unsigned long   scratch_length;
+    int             ext_number;
+    void           *ext_procs;
+    void           *event_vec[128];
+    void           *wire_vec[128];
+    KeySym          lock_meaning;
+    void           *lock;
+    void           *async_handlers;
+    unsigned long   bigreq_size;
+    void           *lock_fns;              /* must stay NULL: LockDisplay checks it */
+    void          (*idlist_alloc)(Display *, XID *, int);
+    /* ---- everything below is private to us ---- */
 
     struct wl_display          *wl_display;
     struct wl_registry         *wl_registry;
@@ -406,6 +426,15 @@ typedef struct _XDisplayImpl {
 
     int                         output_w, output_h;
     int                         seat_caps;
+
+    /* XInput2 emulation: the last request built through _XGetRequest (so
+     * _XReply can answer it) and any variable-length reply payload waiting to
+     * be served by _XRead. */
+    unsigned char              *xi2_req;
+    int                         xi2_req_len;
+    unsigned char              *xi2_data;
+    size_t                      xi2_data_len;
+    size_t                      xi2_data_off;
 
     Screen                     *screen;       /* == &screens[0] */
     Visual                      visual;
@@ -575,6 +604,14 @@ void      mw_flush_damage(Display *d);
  * used for the non-blocking poll paths.  Damage is never dropped, only
  * deferred -- the client blocking (or XSync) flushes unconditionally. */
 void      mw_flush_damage_deferred(Display *d);
+
+/* xi2.c — minimal XInput2 reply surface for libXi clients. */
+Bool       mw_xi2_query_extension(_Xconst char *name, int *major,
+                                  int *first_event, int *first_error);
+const char *mw_xi2_extension_name(void);
+Bool       mw_xi2_reply(Display *d, void *repbuf);
+int        mw_xi2_read(Display *d, char *data, size_t size);
+void       mw_xi2_forget_request(Display *d);
 
 /* Absolute (root) origin of a window's content. */
 void mw_window_origin(MwWindow *win, int *x, int *y);

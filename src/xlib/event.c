@@ -397,6 +397,26 @@ static int take_first(Display *d, Window w, long mask, int type, XEvent *out)
     return 0;
 }
 
+/* XInput2 delivers its events as "cookies": the event carries a small header
+ * and XGetEventData() fetches the detail, XFreeEventData() releases it.  The
+ * shim generates no generic events, so there is never anything to fetch, but
+ * libXi resolves both symbols at load time and every client calls them for the
+ * generic events it receives. */
+Bool XGetEventData(Display *d, XGenericEventCookie *cookie)
+{
+    (void)d;
+    if (!cookie || cookie->type != GenericEvent) return False;
+    return cookie->data != NULL;
+}
+
+void XFreeEventData(Display *d, XGenericEventCookie *cookie)
+{
+    (void)d;
+    if (!cookie) return;
+    free(cookie->data);
+    cookie->data = NULL;
+}
+
 int XWindowEvent(Display *d, Window w, long mask, XEvent *event)
 {
     for (;;) {

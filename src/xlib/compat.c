@@ -251,6 +251,10 @@ Bool XQueryExtension(Display *d, _Xconst char *name, int *major_opcode,
                      int *first_event, int *first_error)
 {
     (void)d;
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: XQueryExtension \"%s\"\n", name ? name : "(null)");
+    if (mw_xi2_query_extension(name, major_opcode, first_event, first_error))
+        return True;
     if (name && (strcmp(name, "SHAPE") == 0 || strcmp(name, "RANDR") == 0)) {
         if (major_opcode) *major_opcode = strcmp(name, "SHAPE") ? 140 : 139;
         if (first_event) *first_event = strcmp(name, "SHAPE") ? 90 : 64;
@@ -265,18 +269,32 @@ Bool XQueryExtension(Display *d, _Xconst char *name, int *major_opcode,
 
 XExtCodes *XInitExtension(Display *d, _Xconst char *name)
 {
-    (void)d; (void)name;
-    return NULL;
+    /* XextAddDisplay (libXext) calls this to learn an extension's codes, and a
+     * NULL return means "the server does not have this extension": libraries
+     * built on libXext -- libXi above all -- then refuse to run at all.  Report
+     * the codes of the extensions the shim does provide. */
+    int major, first_event, first_error;
+    if (!XQueryExtension(d, name, &major, &first_event, &first_error))
+        return NULL;
+    XExtCodes *e = calloc(1, sizeof *e);
+    if (!e) return NULL;
+    static int next_extension = 1;   /* XAddExtension uses 128 and up */
+    e->extension = next_extension++;
+    e->major_opcode = major;
+    e->first_event = first_event;
+    e->first_error = first_error;
+    return e;
 }
 
 char **XListExtensions(Display *d, int *nextensions)
 {
     (void)d;
-    char **e = calloc(3, sizeof(char *));
+    char **e = calloc(4, sizeof(char *));
     e[0] = strdup("SHAPE");
     e[1] = strdup("RANDR");
-    e[2] = NULL;
-    if (nextensions) *nextensions = 2;
+    e[2] = strdup(mw_xi2_extension_name());
+    e[3] = NULL;
+    if (nextensions) *nextensions = 3;
     return e;
 }
 
