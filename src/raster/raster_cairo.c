@@ -520,29 +520,21 @@ static void parse_xlfd(const char *pat, char *family, size_t famsz, int *px)
     }
 }
 
-static MwFont *font_from_pattern(const char *pattern, int px_hint)
+static FcPattern *font_match(FcPattern *pat)
 {
-    char family[256]; int px = 0;
-    parse_xlfd(pattern, family, sizeof family, &px);
-    if (px <= 0) px = px_hint > 0 ? px_hint : 14;
-    if (getenv("MW_TRACE"))
-        fprintf(stderr, "MW: font '%s' -> family='%s' px=%d\n",
-                pattern ? pattern : "(null)", family, px);
-
-    FcPattern *pat = FcPatternCreate();
-    if (family[0] && strcasecmp(family, "fixed") != 0)
-        FcPatternAddString(pat, FC_FAMILY, (const FcChar8 *)family);
-    if (family[0] && strcasecmp(family, "fixed") == 0)
-        FcPatternAddString(pat, FC_FAMILY, (const FcChar8 *)"monospace");
-    FcPatternAddDouble(pat, FC_PIXEL_SIZE, (double)px);
-    FcPatternAddBool(pat, FC_SCALABLE, FcTrue);
     FcConfigSubstitute(NULL, pat, FcMatchPattern);
     FcDefaultSubstitute(pat);
-
     FcResult res;
     FcPattern *match = FcFontMatch(NULL, pat, &res);
     FcPatternDestroy(pat);
+    return match;
+}
+
+/* Build the raster font from a matched fontconfig pattern. */
+static MwFont *font_from_match(FcPattern *match, int px_hint, int antialias)
+{
     if (!match) return NULL;
+    int px = px_hint > 0 ? px_hint : 14;
 
     FcChar8 *file = NULL;
     int index = 0;
@@ -586,7 +578,8 @@ static MwFont *font_from_pattern(const char *pattern, int px_hint)
     /* Hinting would change glyph advances away from the unhinted metrics we
      * report to the client, causing text to drift/overlap when the client
      * positions runs using XTextWidth.  Keep them consistent. */
-    cairo_font_options_set_antialias(opt, CAIRO_ANTIALIAS_NONE);
+    cairo_font_options_set_antialias(opt,
+        antialias ? CAIRO_ANTIALIAS_GRAY : CAIRO_ANTIALIAS_NONE);
     cairo_font_options_set_hint_style(opt, CAIRO_HINT_STYLE_NONE);
     cairo_font_options_set_hint_metrics(opt, CAIRO_HINT_METRICS_OFF);
     f->scaled = cairo_scaled_font_create(f->face, &fm, &ctm, opt);
@@ -619,7 +612,35 @@ static MwFont *font_from_pattern(const char *pattern, int px_hint)
 MwFont *mw_font_create(const char *pattern, int pixel_size_hint)
 {
     if (!g_ft_ready) mw_raster_init();
-    return font_from_pattern(pattern, pixel_size_hint);
+    char family[256]; int px = 0;
+    parse_xlfd(pattern, family, sizeof family, &px);
+    if (px <= 0) px = pixel_size_hint > 0 ? pixel_size_hint : 14;
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: font '%s' -> family='%s' px=%d\n",
+                pattern ? pattern : "(null)", family, px);
+    FcPattern *pat = FcPatternCreate();
+    if (family[0] && strcasecmp(family, "fixed") == 0)
+        FcPatternAddString(pat, FC_FAMILY, (const FcChar8 *)"monospace");
+    else if (family[0])
+        FcPatternAddString(pat, FC_FAMILY, (const FcChar8 *)family);
+    FcPatternAddDouble(pat, FC_PIXEL_SIZE, (double)px);
+    FcPatternAddBool(pat, FC_SCALABLE, FcTrue);
+    return font_from_match(font_match(pat), px, 0);
+}
+
+/* The Xft path: match the caller's own fontconfig pattern so weight, slant and
+ * family are honoured, and keep grayscale smoothing on. */
+MwFont *mw_font_create_fc(const void *fcpat, int pixel_size_hint, int antialias)
+{
+    if (!g_ft_ready) mw_raster_init();
+    FcPattern *pat = fcpat ? FcPatternDuplicate((FcPattern *)fcpat)
+                           : FcPatternCreate();
+    if (!pat) return NULL;
+    double have = 0;
+    if (FcPatternGetDouble(pat, FC_PIXEL_SIZE, 0, &have) != FcResultMatch &&
+        pixel_size_hint > 0)
+        FcPatternAddDouble(pat, FC_PIXEL_SIZE, (double)pixel_size_hint);
+    return font_from_match(font_match(pat), pixel_size_hint, antialias);
 }
 
 void mw_font_destroy(MwFont *f)
@@ -659,6 +680,15 @@ int mw_font_char_width(const MwFont *f, unsigned int ch)
     if (ch < 256) m->wcache[ch] = adv;
     return adv;
 }
+
+int mw_font_char_index(const MwFont *f, unsigned int ch)
+{
+    const MwFont *m = f;
+    if (!m || !m->ft_m) return 0;
+    return (int)FT_Get_Char_Index(m->ft_m, ch);
+}
+
+void *mw_font_ft_face(const MwFont *f) { return f ? (void *)f->ft_m : NULL; }
 
 int mw_font_char_lbearing(const MwFont *f, unsigned int ch)
 {

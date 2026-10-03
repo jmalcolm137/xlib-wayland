@@ -110,6 +110,10 @@ void mw_surface_get(MwSurface *s, int x, int y, int w, int h,
 
 /* Create a font from an XLFD/Fontconfig pattern (nullable => default). */
 MwFont *mw_font_create(const char *pattern, int pixel_size_hint);
+/* Create a font from a fontconfig pattern (the Xft path).  antialias enables
+ * grayscale smoothing; the X core-font path leaves it off so glyph advances
+ * stay consistent with the metrics reported through XTextWidth. */
+MwFont *mw_font_create_fc(const void *fc_pattern, int pixel_size_hint, int antialias);
 void    mw_font_destroy(MwFont *f);
 
 /* Metrics. */
@@ -119,6 +123,9 @@ int mw_font_max_width(const MwFont *f);
 int mw_font_char_width(const MwFont *f, unsigned int ch); /* ch is a UCS-4 code */
 int mw_font_char_lbearing(const MwFont *f, unsigned int ch);
 int mw_font_char_rbearing(const MwFont *f, unsigned int ch);
+/* FreeType glyph index for a UCS-4 code, and the underlying face (for Xft). */
+int mw_font_char_index(const MwFont *f, unsigned int ch);
+void *mw_font_ft_face(const MwFont *f);
 /* Advance for a UTF-8 buffer. */
 int mw_font_text_width_utf8(const MwFont *f, const char *s, int len);
 

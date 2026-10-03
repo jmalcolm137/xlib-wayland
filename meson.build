@@ -44,7 +44,7 @@ client_protos = [
     command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
 ]
 
-inc = include_directories('src/xlib', 'src/raster', 'src/wayland')
+inc = include_directories('src/xlib', 'src/raster', 'src/wayland', 'src/xft')
 
 raster_sources = files('src/raster/raster_cairo.c')
 wayland_sources = files('src/wayland/wl.c', 'src/wayland/surface.c',
@@ -56,7 +56,7 @@ xlib_sources = files(
   'src/xlib/input.c', 'src/xlib/keymap.c', 'src/xlib/region.c',
   'src/xlib/resource.c', 'src/xlib/selection.c', 'src/xlib/window.c',
   'src/xlib/xim.c', 'src/xlib/xi2.c', 'src/xlib/xkb.c', 'src/xlib/xmb.c', 'src/xlib/xtcompat.c', 'src/xlib/xlibint.c', 'src/xlib/xrandr.c',
-  'src/xlib/xresources.c',
+  'src/xlib/xresources.c', 'src/xlib/xftbridge.c',
   'src/xlib/xshape.c')
 
 # Installed as libX11.so.6 so that -lX11, dlopen("libX11.so.6") and the
@@ -75,6 +75,27 @@ pkg.generate(libx11,
   name: 'x11',
   filebase: 'x11',
   description: 'Xlib API implemented on Wayland (Motif/Wayland)',
+  subdirs: 'X11')
+
+# An Xft built on the shim's own raster/font path.  There is no Render
+# extension, and none is needed: the shim already rasterises text with
+# FreeType/fontconfig/cairo, so libXft.so.2 here draws through the mw_xft_*
+# bridge instead of uploading glyphs to a server.  Installed next to libX11 so
+# that -lXft resolves to it.
+libxft = shared_library('Xft',
+  'src/xft/xft.c',
+  include_directories: inc,
+  dependencies: [fc_dep, ft_dep, cairo_dep, m_dep],
+  link_with: libx11,
+  version: '2.0.0',
+  soversion: '2',
+  install: true)
+
+pkg.generate(libxft,
+  name: 'xft',
+  filebase: 'xft',
+  description: 'Xft over the Motif/Wayland raster font path',
+  requires: 'x11',
   subdirs: 'X11')
 
 # ---------------------------------------------------------------- tests/tools
