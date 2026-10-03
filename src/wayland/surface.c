@@ -107,6 +107,11 @@ static const struct wl_buffer_listener buffer_listener = {
     .release = buf_release,
 };
 
+/* Request one frame callback per toplevel: after a commit, and when damage has
+ * to wait for the next display refresh.  Requesting it without committing is
+ * valid Wayland and does not tear. */
+static void mw_toplevel_request_frame(MwToplevel *tl);
+
 /* wl_surface.frame: the compositor tells us when a new frame can be presented.
  * Without it the only thing pacing us is the client happening to block, and a
  * big repaint (which a resize triggers) made the client composite and upload a
@@ -117,12 +122,25 @@ static void frame_done(void *data, struct wl_callback *cb, uint32_t t)
     MwToplevel *tl = data;
     wl_callback_destroy(cb);
     tl->frame_cb = NULL;
-    if (tl->dirty && tl->win->d) mw_flush_damage_deferred(tl->win->d);
+    /* The compositor calls this at most once per refresh, so it is already the
+     * natural pace: flush even when the 16ms limiter would defer us.  Letting
+     * the limiter drop this one stranded the final frame -- xterm's scroll
+     * ended a frame short on a real compositor, while the headless test passed
+     * purely because its buffer-release timing did not hit the window. */
+    if (tl->dirty && tl->win->d) mw_flush_damage(tl->win->d);
 }
 
 static const struct wl_callback_listener frame_listener = {
     .done = frame_done,
 };
+
+static void mw_toplevel_request_frame(MwToplevel *tl)
+{
+    if (!tl || tl->frame_cb || !tl->surface) return;
+    tl->frame_cb = wl_surface_frame(tl->surface);
+    if (tl->frame_cb)
+        wl_callback_add_listener(tl->frame_cb, &frame_listener, tl);
+}
 
 /* --------------------------------------------------------------- buffers */
 
@@ -688,11 +706,7 @@ void mw_toplevel_render(MwToplevel *tl)
      * listener") and registers frame_done repeatedly, so a single compositor
      * frame triggered a cascade of extra composites -- which is what made the
      * window keep repainting for a second or two after a resize ended. */
-    if (!tl->frame_cb) {
-        tl->frame_cb = wl_surface_frame(tl->surface);
-        if (tl->frame_cb)
-            wl_callback_add_listener(tl->frame_cb, &frame_listener, tl);
-    }
+    mw_toplevel_request_frame(tl);
     wl_surface_attach(tl->surface, tl->bufs[idx].buffer, 0, 0);
     wl_surface_damage_buffer(tl->surface, 0, 0, w, h);
     wl_surface_commit(tl->surface);
@@ -728,7 +742,14 @@ void mw_flush_damage_deferred(Display *d)
     XDisplayImpl *dp = MWD(d);
     if (!dp->table) return;
     uint64_t now = (uint64_t)mw_now();
-    if (dp->last_flush_ms && now - dp->last_flush_ms < MW_FRAME_MS) return;
+    if (dp->last_flush_ms && now - dp->last_flush_ms < MW_FRAME_MS) {
+        /* Too soon to composite again.  Arm a frame callback on every dirty
+         * toplevel so the pending damage is presented at the next refresh
+         * instead of waiting for the client to happen to draw again. */
+        for (MwToplevel *tl = dp->dirty_toplevels; tl; tl = tl->dirty_next)
+            if (tl->dirty) mw_toplevel_request_frame(tl);
+        return;
+    }
 
     bool any = false;
     for (MwToplevel *tl = dp->dirty_toplevels; tl && !any; tl = tl->dirty_next)
