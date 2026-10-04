@@ -131,6 +131,66 @@ void mw_window_damage(MwWindow *win)
     if (w && w->tl) mw_toplevel_damage(w->tl);
 }
 
+/* --------------------------------------------------- synthetic WM window */
+
+/* Every client gets its own private X root, so a real window manager's window
+ * (and the workspace properties dtwm publishes on it) is invisible to other
+ * clients.  CDE's DtSvc reads those properties to answer
+ * DtWsmGetWorkspaceList()/DtWsmGetCurrentWorkspace(); with none present every
+ * query fails and clients stall (dtfile retries the workspace list for
+ * seconds).  Synthesize the minimum the queries look for:
+ *
+ *   root:   _MOTIF_WM_INFO      (type _MOTIF_WM_INFO, 32, {flags, wmWindow})
+ *   wmWin:  _DT_WORKSPACE_LIST  (XA_ATOM, 32, array of workspace-name atoms)
+ *           _DT_WORKSPACE_CURRENT (XA_ATOM, 32, the current workspace atom)
+ *
+ * _DtGetMwmWindow() requires the WM window to be a direct child of the root.
+ * The workspace set comes from CDE_WS_NAMES (comma separated) and
+ * CDE_WS_CURRENT, defaulting to One..Four with the first current. */
+void mw_init_wm_window(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    MwWindow *root = mw_window(d, MWSCR(d)->root);
+    if (!root) return;
+
+    const char *names_env = getenv("CDE_WS_NAMES");
+    char *names = strdup(names_env && *names_env ? names_env : "One,Two,Three,Four");
+    Atom ws[64];
+    int nws = 0;
+    for (char *tok = strtok(names, ","); tok && nws < 64; tok = strtok(NULL, ",")) {
+        while (*tok == ' ' || *tok == '\t') tok++;
+        if (*tok) ws[nws++] = mw_intern_atom(d, tok, False);
+    }
+    free(names);
+
+    int current = 0;
+    const char *cur_env = getenv("CDE_WS_CURRENT");
+    if (cur_env && *cur_env) current = atoi(cur_env);
+    if (current < 0 || current >= nws) current = 0;
+
+    MwWindow *wm = mw_create_window(d, root->id, 0, 0, 1, 1, 0, 24,
+                                    InputOutput, &dp->visual, 0, NULL);
+    if (!wm) return;
+
+    Atom mwm_info = mw_intern_atom(d, "_MOTIF_WM_INFO", False);
+    uint32_t info[2];
+    info[0] = 1;                  /* flags */
+    info[1] = (uint32_t)wm->id;   /* wmWindow */
+    mw_set_prop(d, root, mwm_info, mwm_info, 32, (const unsigned char *)info, 2);
+
+    if (nws > 0) {
+        uint32_t list[64];
+        for (int i = 0; i < nws; i++) list[i] = (uint32_t)ws[i];
+        Atom pl = mw_intern_atom(d, "_DT_WORKSPACE_LIST", False);
+        mw_set_prop(d, wm, pl, XA_ATOM, 32, (const unsigned char *)list,
+                    (unsigned long)nws);
+
+        uint32_t cur = (uint32_t)ws[current];
+        Atom pc = mw_intern_atom(d, "_DT_WORKSPACE_CURRENT", False);
+        mw_set_prop(d, wm, pc, XA_ATOM, 32, (const unsigned char *)&cur, 1);
+    }
+}
+
 /* ------------------------------------------------------------ creation */
 
 MwWindow *mw_create_window(Display *d, Window parent, int x, int y, int w, int h,

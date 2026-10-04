@@ -216,6 +216,9 @@ Display *XOpenDisplay(_Xconst char *display_name)
     scr->cmap = XCreateColormap(d, root->id, &dp->visual, AllocNone);
     scr->default_gc = XCreateGC(d, root->id, 0, NULL);
 
+    /* Synthetic WM window + workspace properties (CDE Workspace Manager). */
+    mw_init_wm_window(d);
+
     /* Resources, keymap, selections, cursors, IMs, extensions. */
     XrmInitialize();
     dp->xdefaults = NULL;

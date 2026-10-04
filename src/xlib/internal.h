@@ -721,6 +721,8 @@ void mw_pointer_motion(Display *d, int x, int y);
 void mw_pointer_button(Display *d, uint32_t button, uint32_t state);
 void mw_pointer_frame(Display *d);
 void mw_set_pointer_cursor(Display *d, Cursor c);
+/* Create the synthetic WM window + workspace properties CDE's DtSvc reads. */
+void mw_init_wm_window(Display *d);
 /* Apply the cursor of the window (or nearest ancestor) under the pointer.
  * Called as the pointer moves, like the server's cursor inheritance. */
 void mw_pointer_update_cursor(Display *d, MwWindow *w);
