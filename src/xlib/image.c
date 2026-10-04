@@ -164,13 +164,23 @@ int XPutImage(Display *d, Drawable dr, GC gc, XImage *img,
               unsigned int width, unsigned int height)
 {
     if (!img) return 0;
+    /* A 1-bit image (XYBitmap, or a depth-1 XImage) carries bit values, not
+     * pixels: the X server draws set bits in the GC foreground and clear bits
+     * in the GC background.  Treating the 0/1 values as pixels made every
+     * bitmap image (Motif/XPM depth-1 graphics, the help viewer's bitonal
+     * TIFF art, window icons, ...) come out solid black. */
+    int onebit = (img->bits_per_pixel == 1);
+    uint32_t fg = 0xff000000u | ((uint32_t)(gc ? gc->foreground : 0) & 0xffffff);
+    uint32_t bg = 0xff000000u | ((uint32_t)(gc ? gc->background : 0) & 0xffffff);
     MwSurface *tmp = mw_surface_create((int)width, (int)height);
     uint32_t *td = (uint32_t *)mw_surface_data(tmp);
     int tstride = mw_surface_stride(tmp) / 4;
     for (unsigned int j = 0; j < height; j++)
         for (unsigned int i = 0; i < width; i++) {
             unsigned long px = img_get_pixel(img, src_x + (int)i, src_y + (int)j);
-            td[(size_t)j * tstride + i] = 0xff000000u | ((uint32_t)px & 0xffffff);
+            td[(size_t)j * tstride + i] = onebit
+                ? (px ? fg : bg)
+                : (0xff000000u | ((uint32_t)px & 0xffffff));
         }
     mw_surface_mark_dirty(tmp);
     MwCanvas *c = mw_canvas_for_drawable(d, dr, gc, NULL, NULL);

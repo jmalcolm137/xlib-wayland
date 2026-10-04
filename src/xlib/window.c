@@ -26,7 +26,11 @@ static void effective_background(MwWindow *win, MwPixmap **pm_out,
         if (w->background_pixmap != None &&
             w->background_pixmap != ParentRelative) {
             MwPixmap *pm = mw_pixmap(w->d, w->background_pixmap);
-            if (pm && pm->surface && pm->w > 0 && pm->h > 0) {
+            /* Only tile a real (multi-plane) pixmap.  A 1-bit Bitmap
+             * background is a stipple whose bits are drawn with the window's
+             * foreground/background by Motif, not tiled as-is; tiling it here
+             * painted the whole area from the bitmap's dummy pixels. */
+            if (pm && pm->surface && pm->w > 0 && pm->h > 0 && pm->depth > 1) {
                 *pm_out = pm;
                 return;
             }
