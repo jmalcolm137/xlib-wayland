@@ -585,6 +585,7 @@ typedef struct _XDisplayImpl {
 
     struct wl_cursor_theme     *cursor_theme;
     int                         cursor_theme_size;
+    MwCursor                   *default_cursor;   /* left_ptr fallback */
 } XDisplayImpl;
 
 #define MWD(d)     ((XDisplayImpl *)(d))

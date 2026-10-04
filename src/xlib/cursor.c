@@ -42,6 +42,7 @@ void mw_cursor_init(Display *d)
     XDisplayImpl *dp = MWD(d);
     dp->cursor_theme = NULL;
     dp->cursor_theme_size = 24;
+    dp->default_cursor = NULL;
     if (!dp->wl_shm) return;
     dp->cursor_theme = wl_cursor_theme_load(NULL, dp->cursor_theme_size,
                                             dp->wl_shm);
@@ -115,6 +116,23 @@ static void apply_cursor(Display *d, MwCursor *c)
 {
     XDisplayImpl *dp = MWD(d);
     if (!dp->wl_pointer) return;
+    if ((!c || !c->wl) && dp->cursor_theme) {
+        /* A cursor the theme does not provide, or a pixmap cursor (which we
+         * cannot render), must not blank the pointer: fall back to the default
+         * arrow. */
+        if (!dp->default_cursor) {
+            struct wl_cursor *def = wl_cursor_theme_get_cursor(dp->cursor_theme,
+                                                               "left_ptr");
+            if (def) {
+                MwCursor *dc = calloc(1, sizeof *dc);
+                dc->id = mw_alloc_id(d);
+                dc->wl = def;
+                mw_register(d, dc->id, MW_OBJ_CURSOR, dc);
+                dp->default_cursor = dc;
+            }
+        }
+        if (dp->default_cursor) c = dp->default_cursor;
+    }
     if (!c || !c->wl) {
         wl_pointer_set_cursor(dp->wl_pointer, dp->ptr_enter_serial, NULL, 0, 0);
         return;
