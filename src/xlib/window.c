@@ -242,8 +242,21 @@ void mw_init_wm_window(Display *d)
     /* The panel (dtwm) must be able to claim the screen: it checks
      * _MOTIF_WM_INFO to see whether a window manager is already running, so
      * publishing a synthetic one here would make it stand down.  The session
-     * starts dtwm with this set. */
-    if (getenv("CDE_NO_WM_INFO")) return;
+     * starts dtwm with CDE_NO_WM_INFO set.
+     *
+     * The opt-out applies to dtwm *alone*, not to the applications it launches:
+     * dtwm passes its environment on, and a child that inherited the variable
+     * would never get the synthetic WM window, so its DtWsmGetWorkspaceList()
+     * would fail (dtfile, for one, then retries and stalls before mapping its
+     * window).  So consume the variable -- unset it in this process -- after
+     * honouring it once; what dtwm spawns from here on is unaffected. */
+    static int no_wm_info = -1;      /* -1 unknown, 0 no, 1 yes */
+    if (no_wm_info < 0) {
+        no_wm_info = getenv("CDE_NO_WM_INFO") ? 1 : 0;
+        if (no_wm_info)
+            unsetenv("CDE_NO_WM_INFO");
+    }
+    if (no_wm_info) return;
 
     MwWindow *wm = mw_create_window(d, root->id, 0, 0, 1, 1, 0, 24,
                                     InputOutput, &dp->visual, 0, NULL);
