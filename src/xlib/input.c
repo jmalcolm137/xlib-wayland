@@ -3,9 +3,12 @@
 #include "internal.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/file.h>
 
 /* ------------------------------------------------------------- utilities */
 
@@ -248,6 +251,70 @@ static void repeat_notify(Display *d)
     mw_wakeup_set(dp, dp->repeat_key && dp->repeat_rate > 0, dp->repeat_next_ms);
 }
 
+/* ---- shared auto-repeat state ---------------------------------------- */
+
+/* CDE's Style Manager (dtstyle, Keyboard module) turns auto-repeat on and off
+ * with XAutoRepeatOn/Off and XChangeKeyboardControl(KBAutoRepeatMode).  In CDE
+ * that is a property of the whole X server, so every client has to see it, but
+ * the shim gives each client its own server.  Share the setting through a file
+ * in the runtime directory, like the atom table, and read it live so a change
+ * made in the Style Manager reaches already-running clients.  A missing file
+ * (or no runtime directory) means the default, repeat on. */
+static const char *kbd_state_path(void)
+{
+    static char path[1024];
+    const char *p = getenv("XLIB_WAYLAND_KEYBOARD");
+    if (p && *p) return p;
+    const char *rt = getenv("XDG_RUNTIME_DIR");
+    if (!rt || !*rt) return NULL;
+    snprintf(path, sizeof path, "%s/xlib-wayland-keyboard", rt);
+    return path;
+}
+
+int mw_keyboard_autorepeat_mode(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    const char *path = kbd_state_path();
+    if (!path) return AutoRepeatModeOn;
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        /* No shared state yet: the default is repeat on. */
+        dp->auto_repeat = AutoRepeatModeOn;
+        return dp->auto_repeat;
+    }
+    char buf[16];
+    if (fgets(buf, sizeof buf, f))
+        dp->auto_repeat = strncmp(buf, "off", 3) == 0
+            ? AutoRepeatModeOff : AutoRepeatModeOn;
+    else
+        dp->auto_repeat = AutoRepeatModeOn;
+    fclose(f);
+    return dp->auto_repeat;
+}
+
+void mw_keyboard_set_autorepeat(Display *d, int mode)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (mode == AutoRepeatModeDefault)
+        mode = AutoRepeatModeOn;   /* there is no separate "server default" */
+    dp->auto_repeat = mode;
+
+    const char *path = kbd_state_path();
+    if (!path) return;
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return;
+    flock(fd, LOCK_EX);
+    const char *s = (mode == AutoRepeatModeOff) ? "off\n" : "on\n";
+    if (write(fd, s, strlen(s)) < 0) { /* best effort */ }
+    flock(fd, LOCK_UN);
+    close(fd);
+}
+
+bool mw_autorepeat_enabled(Display *d)
+{
+    return mw_keyboard_autorepeat_mode(d) != AutoRepeatModeOff;
+}
+
 /* Wayland leaves key repeat to the client: wl_keyboard.repeat_info supplies the
  * rate and delay, and the repeat events while a key is held have to be generated
  * here, from the event pump. */
@@ -255,6 +322,12 @@ void mw_kbd_repeat_pump(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
     if (!dp->repeat_key || dp->repeat_rate <= 0) return;
+    /* The Style Manager's auto-repeat toggle covers every client. */
+    if (!mw_autorepeat_enabled(d)) {
+        dp->repeat_key = 0;
+        repeat_notify(d);
+        return;
+    }
     int period = 1000 / dp->repeat_rate;
     if (period < 1) period = 1;
     uint64_t now = mw_now();
@@ -286,6 +359,7 @@ int mw_kbd_repeat_timeout(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
     if (!dp->repeat_key || dp->repeat_rate <= 0) return -1;
+    if (!mw_autorepeat_enabled(d)) return -1;
     uint64_t now = mw_now();
     if (dp->repeat_next_ms <= now) return 0;
     uint64_t t = dp->repeat_next_ms - now;
@@ -302,6 +376,15 @@ static void kbd_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
     /* Protocol v10 adds a "repeated" state so a compositor may drive repeat
      * itself; that is still a press as far as X clients are concerned. */
     bool pressed = state != WL_KEYBOARD_KEY_STATE_RELEASED;
+    bool ar = mw_autorepeat_enabled(d);
+
+    /* Drop repeats the compositor generated while the session has auto-repeat
+     * off (the Style Manager's Keyboard toggle). */
+    if (state == WL_KEYBOARD_KEY_STATE_REPEATED && !ar) {
+        dp->repeat_key = 0;
+        repeat_notify(d);
+        return;
+    }
 
     deliver_key(d, kc, pressed ? KeyPress : KeyRelease);
 
@@ -310,9 +393,10 @@ static void kbd_key(void *data, struct wl_keyboard *kbd, uint32_t serial,
                              pressed ? XKB_KEY_DOWN : XKB_KEY_UP);
 
     /* Track the held key so the pump can repeat it.  Modifiers never repeat,
-     * and if the compositor already sent a repeat we must not add our own. */
+     * if the session disabled auto-repeat we must not start one, and if the
+     * compositor already sent a repeat we must not add our own. */
     if (state == WL_KEYBOARD_KEY_STATE_PRESSED) {
-        if (!mw_keysym_to_modmask(d, mw_keycode_to_keysym(d, kc, 0))) {
+        if (ar && !mw_keysym_to_modmask(d, mw_keycode_to_keysym(d, kc, 0))) {
             dp->repeat_key = kc;
             dp->repeat_next_ms = mw_now() + (uint64_t)dp->repeat_delay;
         } else {

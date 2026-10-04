@@ -142,6 +142,7 @@ Display *XOpenDisplay(_Xconst char *display_name)
     dp->motion_buffer = 0;
     dp->fd = -1;
     dp->wl_fd = -1;
+    dp->auto_repeat = AutoRepeatModeOn;
     dp->display_name = strdup(resolved);
 
     /* Bind to the compositor.  Xt passes the X DISPLAY name (":0") here; there

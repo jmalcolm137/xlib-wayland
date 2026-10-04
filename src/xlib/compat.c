@@ -341,14 +341,19 @@ int (*XESetCloseDisplay(Display *d, int extension,
 /* ------------------------------------------------------- keyboard/pointer */
 
 int XChangeKeyboardControl(Display *d, unsigned long mask, XKeyboardControl *v)
-{ (void)d; (void)mask; (void)v; return 1; }
+{
+    /* Only auto-repeat has a meaning here; the rest (key click, bell, LEDs)
+     * has no Wayland equivalent, so accept it silently. */
+    if ((mask & KBAutoRepeatMode) && v)
+        mw_keyboard_set_autorepeat(d, v->auto_repeat_mode);
+    return 1;
+}
 
 int XGetKeyboardControl(Display *d, XKeyboardState *s)
 {
-    (void)d;
     memset(s, 0, sizeof *s);
     s->bell_percent = 50;
-    s->global_auto_repeat = AutoRepeatModeOn;
+    s->global_auto_repeat = mw_keyboard_autorepeat_mode(d);
     memset(s->auto_repeats, 0xff, sizeof s->auto_repeats);
     return 1;
 }
@@ -360,8 +365,8 @@ int XQueryKeymap(Display *d, char keys[32])
     return 1;
 }
 
-int XAutoRepeatOn(Display *d) { (void)d; return 1; }
-int XAutoRepeatOff(Display *d) { (void)d; return 1; }
+int XAutoRepeatOn(Display *d) { mw_keyboard_set_autorepeat(d, AutoRepeatModeOn); return 1; }
+int XAutoRepeatOff(Display *d) { mw_keyboard_set_autorepeat(d, AutoRepeatModeOff); return 1; }
 
 XTimeCoord *XGetMotionEvents(Display *d, Window w, Time start, Time stop,
                              int *nevents)

@@ -542,6 +542,8 @@ typedef struct _XDisplayImpl {
     int                         repeat_delay;     /* ms before the first repeat */
     KeyCode                     repeat_key;       /* key currently held, or 0 */
     uint64_t                    repeat_next_ms;   /* when the next repeat is due */
+    int                         auto_repeat;      /* AutoRepeatModeOn/Off, shared
+                                                   * with dtstyle's Keyboard panel */
 
     /* Wakeup plumbing (see src/wayland/wakeup.c).  libXt waits in select() on
      * the fd XConnectionNumber returns; if that is the Wayland socket the
@@ -704,6 +706,11 @@ void mw_process_events(Display *d, bool block);
  * repeated from the event pump (see input.c). */
 void mw_kbd_repeat_pump(Display *d);
 int  mw_kbd_repeat_timeout(Display *d);
+/* Session-wide auto-repeat state, shared with the Style Manager's Keyboard
+ * panel (auto_repeat is AutoRepeatModeOn/Off). */
+int  mw_keyboard_autorepeat_mode(Display *d);
+void mw_keyboard_set_autorepeat(Display *d, int mode);
+bool mw_autorepeat_enabled(Display *d);
 
 /* Wakeup plumbing: the fd handed out by XConnectionNumber (see wakeup.c). */
 int  mw_wakeup_start(XDisplayImpl *dp);
