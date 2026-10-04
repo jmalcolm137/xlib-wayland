@@ -12,9 +12,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <spawn.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <errno.h>
+
+extern char **environ;
 
 static uint32_t proxy_version(void *p) {
     return p ? wl_proxy_get_version((struct wl_proxy *)p) : 0;
@@ -335,6 +338,56 @@ static bool mw_motif_no_close(Display *d, Window id)
     return mw_motif_functions(d, id, &present) && !(present & MWM_FUNC_CLOSE);
 }
 
+/* _MOTIF_WM_HINTS says which window functions an X client allows, but it is an
+ * X property the compositor and window manager (CoW) never see.  CoW has no way
+ * to make a command refuse for a single window, but it *can* hide a titlebar
+ * button with a sparse decor profile, so ask it to hide the buttons for the
+ * functions the client dropped.  The session defines the profiles and points
+ * CDE_MOTIF_HELPER at a small retrying wrapper (cde-motif-apply); when that is
+ * unset this is a no-op, so the shim stays neutral for other users.
+ *
+ * A window is addressed by its title (CoW strips a trailing '/' and matches the
+ * rest as a substring), or by app_id when it has no title.  Button indices and
+ * glyphs live in the session's decor profiles (cde-func-min / cde-func-max). */
+void mw_apply_motif_functions(Display *d, MwWindow *win)
+{
+    if (!win || !win->tl || !win->tl->xdg_toplevel || win->override_redirect)
+        return;
+
+    const char *helper = getenv("CDE_MOTIF_HELPER");
+    if (!helper || !*helper)
+        return;
+
+    uint32_t present;
+    if (!mw_motif_functions(d, win->id, &present))
+        return;
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: apply_motif 0x%lx present=0x%x title=%s\n",
+                win->id, present, win->tl->title ? win->tl->title : "(none)");
+
+    char target[512];
+    if (win->tl->title && win->tl->title[0]) {
+        snprintf(target, sizeof target, "/%s", win->tl->title);
+    } else if (win->tl->app_id && win->tl->app_id[0]) {
+        snprintf(target, sizeof target, "%%%s", win->tl->app_id);
+    } else {
+        return;
+    }
+
+    const char *profiles[2];
+    int n = 0;
+    if (!(present & MWM_FUNC_MINIMIZE)) profiles[n++] = "cde-func-min";
+    if (!(present & MWM_FUNC_MAXIMIZE)) profiles[n++] = "cde-func-max";
+
+    for (int i = 0; i < n; i++) {
+        char *argv[] = { (char *)helper, "decor", "-a", (char *)profiles[i],
+                         "-t", target, NULL };
+        pid_t pid;
+        posix_spawnp(&pid, helper, NULL, NULL, argv, environ);
+    }
+    win->tl->motif_functions_sent = true;
+}
+
 static void deco_configure(void *data, struct zxdg_toplevel_decoration_v1 *d,
                            uint32_t mode)
 {
@@ -490,17 +543,19 @@ void mw_toplevel_create(MwWindow *win)
             }
         }
         xdg_toplevel_set_app_id(tl->xdg_toplevel, app_id);
+        free(tl->app_id);
+        tl->app_id = strdup(app_id);
         XFree(ch.res_name);
         XFree(ch.res_class);
 
         char *name = NULL;
-        if (XFetchName(d, win->id, &name) && name && name[0]) {
-            xdg_toplevel_set_title(tl->xdg_toplevel, name);
-            XFree(name);
-        } else {
-            XFree(name);
-            xdg_toplevel_set_title(tl->xdg_toplevel, "Motif");
-        }
+        const char *tname = "Motif";
+        if (XFetchName(d, win->id, &name) && name && name[0])
+            tname = name;
+        xdg_toplevel_set_title(tl->xdg_toplevel, tname);
+        free(tl->title);
+        tl->title = strdup(tname);
+        XFree(name);
     }
 
     /* Ask for server-side decorations.  That is what an X client expects:
@@ -600,6 +655,8 @@ void mw_toplevel_destroy(MwToplevel *tl)
     if (tl->xdg_toplevel) xdg_toplevel_destroy(tl->xdg_toplevel);
     if (tl->xdg_surface) xdg_surface_destroy(tl->xdg_surface);
     if (tl->surface) wl_surface_destroy(tl->surface);
+    free(tl->title);
+    free(tl->app_id);
     free(tl);
 }
 
@@ -944,6 +1001,10 @@ static void tl_configure(void *data, struct xdg_toplevel *t, int32_t w, int32_t 
     MwToplevel *tl = data;
     if (w > 0) tl->req_w = w;
     if (h > 0) tl->req_h = h;
+    /* The window is now managed, so relay _MOTIF_WM_HINTS.  The WM may not
+     * have registered the window's title yet; the helper retries briefly. */
+    if (!tl->motif_functions_sent && tl->win)
+        mw_apply_motif_functions(tl->win->d, tl->win);
     mw_toplevel_damage(tl);
 }
 

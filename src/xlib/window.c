@@ -1159,10 +1159,20 @@ void mw_window_props_changed(Display *d, MwWindow *win, Atom a)
     char *name = NULL;
     Atom wmname = mw_intern_atom(d, "WM_NAME", True);
     Atom netname = mw_intern_atom(d, "_NET_WM_NAME", True);
+    Atom motif = mw_intern_atom(d, "_MOTIF_WM_HINTS", True);
     if (a == wmname || a == netname) {
         MwProp *p = (a == wmname) ? mw_get_prop(d, win, wmname)
                                   : mw_get_prop(d, win, netname);
         if (p && p->data) name = (char *)p->data;
-        if (name && tl->xdg_toplevel) xdg_toplevel_set_title(tl->xdg_toplevel, name);
+        if (name && tl->xdg_toplevel) {
+            xdg_toplevel_set_title(tl->xdg_toplevel, name);
+            free(tl->title);
+            tl->title = strdup(name);
+            /* Re-address the window in case the title is what we match on. */
+            mw_apply_motif_functions(d, win);
+        }
+    } else if (a == motif) {
+        /* The client changed the functions it allows; update the buttons. */
+        mw_apply_motif_functions(d, win);
     }
 }
