@@ -617,6 +617,10 @@ static void req_add_glyphs(Display *d, const unsigned char *b, size_t len)
         if (p + need > end) break;
         glyphset_reserve(gs, (int)gid);
         if (gs->glyphs[gid]) { mw_surface_destroy(gs->glyphs[gid]); }
+        if (getenv("MW_TRACE_RENDER") && i == 0)
+            fprintf(stderr, "MW: addglyph gid=%u w=%u h=%u xOff=%d yOff=%d d0=%d\n",
+                    (unsigned)gid, info.width, info.height,
+                    (int)info.xOff, (int)info.yOff, p[0]);
         gs->glyphs[gid] = glyph_surface(p, need, info.width, info.height, depth1);
         gs->gw[gid] = info.width; gs->gh[gid] = info.height;
         gs->gx[gid] = info.xOff; gs->gy[gid] = info.yOff;
@@ -632,6 +636,11 @@ static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     if (gid < 0 || gid >= gs->cap || !gs->glyphs[gid]) return;
     MwSurface *mask = gs->glyphs[gid];
     int w = gs->gw[gid], h = gs->gh[gid];
+    if (getenv("MW_TRACE_RENDER"))
+        fprintf(stderr, "MW: drawglyph gid=%d at %d,%d w=%d h=%d off=%d,%d srckind=%d color=%04x%04x%04x%04x\n",
+                gid, x, y, w, h, gs->gx[gid], gs->gy[gid], src ? src->kind : -1,
+                src ? src->color.red : 0, src ? src->color.green : 0,
+                src ? src->color.blue : 0, src ? src->color.alpha : 0);
     /* Decode mask onto the destination directly (cairo mask pattern needs a
      * drawable; a glyph mask is an in-memory surface, so composite it here). */
     MwSurface *ds = pic_surface(d, dst);
@@ -673,6 +682,7 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
     const unsigned char *p = b + 28;   /* after the 28-byte fixed header */
     const unsigned char *end = b + len;
     int x = r->xSrc, y = r->ySrc;
+    int total = 0;
     while (p < end) {
         if (p + 8 > end) break;
         xGlyphElt elt;
@@ -686,6 +696,9 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
         }
         size_t need = (size_t)count * glyph_bytes;
         if (p + need > end) break;
+        if (getenv("MW_TRACE_RENDER"))
+            fprintf(stderr, "MW: glyph elt len=%d dx=%d dy=%d x=%d y=%d\n",
+                    count, (int)elt.deltax, (int)elt.deltay, x, y);
         int px = x;
         for (int i = 0; i < count; i++) {
             CARD32 gid = 0;
@@ -694,11 +707,14 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
             else { memcpy(&gid, p + i*4, 4); }
             draw_glyph(d, dst, src, r->op, gs, (int)gid, px, y);
             px += elt.deltax;
+            total++;
         }
         x += elt.deltax;
         y += elt.deltay;
         p += need;
     }
+    if (getenv("MW_TRACE_RENDER"))
+        fprintf(stderr, "MW: glyph run total=%d op=%d\n", total, r->op);
 }
 
 /* --------------------------------------------------- traps / triangles */
@@ -826,6 +842,11 @@ static void handle_request(Display *d, const unsigned char *b, size_t len)
 {
     if (len < 4) return;
     int minor = b[1];
+    if (getenv("MW_TRACE_RENDER") && minor == X_RenderCompositeGlyphs8) {
+        fprintf(stderr, "MW: compositeglyphs8 bytes:");
+        for (size_t i = 0; i < len && i < 48; i++) fprintf(stderr, " %02x", b[i]);
+        fprintf(stderr, "\n");
+    }
     XDisplayImpl *dp = MWD(d);
     dp->render_reply_pending = 0;
     if (dp->render_reply_data) { free(dp->render_reply_data);
@@ -878,9 +899,23 @@ void mw_render_drain(Display *d)
     if (!ptr || ptr <= buf) { dp->private13 = buf; return; }
     unsigned char *p = buf;
     long n = 0;
+    if (getenv("MW_TRACE_RENDER")) {
+        fprintf(stderr, "MW: drain used=%ld first:", (long)(ptr - buf));
+        for (long i = 0; i < 64 && buf + i < ptr; i++)
+            fprintf(stderr, " %02x", buf[i]);
+        fprintf(stderr, "\n");
+    }
     while (p + 4 <= ptr) {
         unsigned len = (unsigned)(p[2] | (p[3] << 8)) * 4;
-        if (len < 4 || p + len > ptr) break;
+        if (len < 4 || p + len > ptr) {
+            if (getenv("MW_TRACE_RENDER"))
+                fprintf(stderr, "MW: drain break @%ld len=%u\n",
+                        (long)(p - buf), len);
+            break;
+        }
+        if (getenv("MW_TRACE_RENDER"))
+            fprintf(stderr, "MW: drain req major=%d minor=%d len=%u\n",
+                    p[0], p[1], len);
         if (p[0] == (unsigned char)mw_render_opcode()) {
             handle_request(d, p, len);
             n++;

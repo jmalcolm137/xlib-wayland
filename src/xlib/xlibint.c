@@ -39,9 +39,32 @@ void _XFlushGCCache(Display *d, GC gc) { (void)d; (void)gc; }
 
 int _XSend(Display *d, _Xconst char *data, long size)
 {
-    (void)data; (void)size;
-    /* no wire protocol: dispatch whatever requests are buffered, then drop */
-    mw_render_drain(d);
+    XDisplayImpl *dp = MWD(d);
+    char *buffer = dp->private12;
+    if (!buffer) return 1;
+    if (data && (char *)data == buffer) {
+        /* Flushing the output buffer: dispatch its requests, then reset. */
+        mw_render_drain(d);
+        return 1;
+    }
+    if (!data || size <= 0) return 1;
+    /* An overflow append (Xlibint.h's Data()): the bytes belong to the request
+     * whose header is already in the buffer, so keep the stream contiguous
+     * instead of dropping them. */
+    char *bufptr = dp->private13;
+    char *bufmax = dp->private14;
+    if (bufptr + size > bufmax) {
+        size_t used = (size_t)(bufptr - buffer);
+        size_t ncap = used + (size_t)size + (1u << 16);
+        char *nb = realloc(buffer, ncap);
+        if (!nb) return 1;
+        buffer = nb; bufptr = buffer + used;
+        dp->private11 = buffer;   /* last_req */
+        dp->private12 = buffer;
+        dp->private14 = buffer + ncap;
+    }
+    memcpy(bufptr, data, (size_t)size);
+    dp->private13 = bufptr + size;
     return 1;
 }
 
@@ -193,7 +216,37 @@ void _XGetAsyncData(Display *d, char *data, char *buf, int len, int skip,
     if (datalen > n) memset(data + n, 0, (size_t)(datalen - n));
 }
 
-int _XData32(Display *d, void *src, long len) { (void)d; (void)src; (void)len; return 0; }
+int _XData32(Display *d, void *src, long len)
+{
+    /* This build of libXrender calls _XData32 with a byte count (its value
+     * lists are gathered into `long` slots, four significant bytes each), to
+     * complete a request whose header was reserved by _XGetRequest.  Append
+     * the low 32 bits of each value. */
+    XDisplayImpl *dp = MWD(d);
+    long nvals = len / 4;
+    if (!src || nvals <= 0) return 0;
+    char *buffer = dp->private12;
+    if (!buffer) return 0;
+    size_t bytes = (size_t)nvals * 4;
+    char *bufptr = dp->private13, *bufmax = dp->private14;
+    if (bufptr + bytes > bufmax) {
+        size_t used = (size_t)(bufptr - buffer);
+        size_t ncap = used + bytes + (1u << 16);
+        char *nb = realloc(buffer, ncap);
+        if (!nb) return 0;
+        buffer = nb; bufptr = buffer + used;
+        dp->private11 = buffer;
+        dp->private12 = buffer;
+        dp->private14 = buffer + ncap;
+    }
+    uint32_t *s = (uint32_t *)src;
+    for (long i = 0; i < nvals; i++) {
+        uint32_t v = s[i * 2];      /* low 32 bits of each (long) slot */
+        memcpy(bufptr + (size_t)i * 4, &v, 4);
+    }
+    dp->private13 = bufptr + bytes;
+    return 0;
+}
 int _XCopyToArg(void *src, void *dst, unsigned int n) { (void)src; (void)dst; (void)n; return 0; }
 unsigned long _XAllocID(Display *d) { return mw_alloc_id(d); }
 void _XAllocIDs(Display *d, XID *ids, int count)
