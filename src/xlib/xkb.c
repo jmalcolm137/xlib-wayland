@@ -129,6 +129,23 @@ Bool XkbBellEvent(Display *dpy, Window win, int percent, Atom name)
     return False;
 }
 
+Bool XkbForceDeviceBell(Display *dpy, int deviceSpec, int bellClass,
+                        int bellID, int percent)
+{ (void)deviceSpec; (void)bellClass; (void)bellID; XBell(dpy, percent); return True; }
+
+Bool XkbForceBell(Display *dpy, int percent)
+{ XBell(dpy, percent); return True; }
+
+Bool XkbDeviceBell(Display *dpy, Window win, int deviceSpec, int bellClass,
+                   int bellID, int percent, Atom name)
+{ (void)win; (void)deviceSpec; (void)bellClass; (void)bellID; (void)name;
+  XBell(dpy, percent); return True; }
+
+Bool XkbDeviceBellEvent(Display *dpy, Window win, int deviceSpec, int bellClass,
+                        int bellID, int percent, Atom name)
+{ (void)dpy; (void)win; (void)deviceSpec; (void)bellClass; (void)bellID;
+  (void)percent; (void)name; return False; }
+
 /* --------------------------------------------------------- indicators */
 
 Bool XkbGetNamedIndicator(Display *dpy, Atom name, int *pNdxRtrn,
@@ -621,3 +638,7 @@ Bool XkbLatchModifiers(Display *dpy, unsigned int deviceSpec,
 
 Bool XkbSetControls(Display *dpy, unsigned long which, XkbDescPtr desc)
 { (void)dpy; (void)which; (void)desc; return True; }
+
+Bool XkbChangeEnabledControls(Display *dpy, unsigned int deviceSpec,
+                              unsigned int affect, unsigned int values)
+{ (void)dpy; (void)deviceSpec; (void)affect; (void)values; return True; }

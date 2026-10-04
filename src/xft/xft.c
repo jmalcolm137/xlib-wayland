@@ -551,3 +551,36 @@ void XftDrawCharFontSpec(XftDraw *draw, _Xconst XftColor *color,
         draw_glyph_run(draw, color, pub, &g, &x, &y, 1);
     }
 }
+
+/* ---------------------------------------------------------------- init */
+int XftInit(_Xconst char *config) { (void)config; return 1; }
+FcBool XftInitFtLibrary(void) { return 1; }
+
+/* ------------------------------------------------ Render-level entry points
+ *
+ * These composite through Render Pictures.  There are no real Pictures behind
+ * this Xft (XftDrawPicture() returns None), and pangoxft only reaches them when
+ * a caller has explicitly installed a source Picture with
+ * pango_xft_renderer_set_source(); its normal path draws through the draw-level
+ * API above, which is implemented.  They exist so pangoxft (marco and
+ * mate-panel) links, and draw nothing if actually called.
+ */
+void XftGlyphSpecRender(Display *dpy, int op, Picture src, XftFont *pub,
+                        Picture dst, int srcx, int srcy,
+                        _Xconst XftGlyphSpec *glyphs, int nglyphs)
+{ (void)dpy; (void)op; (void)src; (void)pub; (void)dst; (void)srcx; (void)srcy; (void)glyphs; (void)nglyphs; }
+
+void XftCharSpecRender(Display *dpy, int op, Picture src, XftFont *pub,
+                       Picture dst, int srcx, int srcy,
+                       _Xconst XftCharSpec *chars, int len)
+{ (void)dpy; (void)op; (void)src; (void)pub; (void)dst; (void)srcx; (void)srcy; (void)chars; (void)len; }
+
+void XftGlyphFontSpecRender(Display *dpy, int op, Picture src, Picture dst,
+                            int srcx, int srcy,
+                            _Xconst XftGlyphFontSpec *glyphs, int nglyphs)
+{ (void)dpy; (void)op; (void)src; (void)dst; (void)srcx; (void)srcy; (void)glyphs; (void)nglyphs; }
+
+void XftCharFontSpecRender(Display *dpy, int op, Picture src, Picture dst,
+                           int srcx, int srcy,
+                           _Xconst XftCharFontSpec *chars, int len)
+{ (void)dpy; (void)op; (void)src; (void)dst; (void)srcx; (void)srcy; (void)chars; (void)len; }
