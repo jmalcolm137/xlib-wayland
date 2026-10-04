@@ -335,6 +335,8 @@ struct MwToplevel {
     bool                   closed;
     bool                   csd;              /* draw client-side decorations */
     int                    tb_h;             /* titlebar height when csd */
+    bool                   undecorated;      /* client asked for no decorations
+                                              * (_MOTIF_WM_HINTS decorations=0) */
 };
 
 /* ------------------------------------------------------------ display impl */

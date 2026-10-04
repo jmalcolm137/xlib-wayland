@@ -278,12 +278,33 @@ static const struct xdg_popup_listener popup_listener = {
 
 /* ------------------------------------------------------- decorations */
 
+/* True if the client asked for a window with no decorations via
+ * _MOTIF_WM_HINTS (flags bit MWM_HINTS_DECORATIONS set and decorations == 0).
+ * Motif wants such a window to be a bare content area -- neither the compositor
+ * nor the fallback titlebar may draw chrome on it. */
+#define MWM_HINTS_DECORATIONS (1u << 1)
+static bool mw_motif_undecorated(Display *d, Window id)
+{
+    MwProp *p = mw_get_prop(d, mw_window(d, id),
+                            mw_intern_atom(d, "_MOTIF_WM_HINTS", False));
+    if (!p || p->format != 32 || p->nitems < 3 || !p->data)
+        return false;
+    uint32_t flags, decorations;
+    memcpy(&flags, p->data, 4);
+    memcpy(&decorations, p->data + 8, 4);
+    return (flags & MWM_HINTS_DECORATIONS) && decorations == 0;
+}
+
 static void deco_configure(void *data, struct zxdg_toplevel_decoration_v1 *d,
                            uint32_t mode)
 {
     (void)d;
     MwToplevel *tl = data;
-    bool want_csd = (mode != ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: deco configure 0x%lx mode=%u (undecorated=%d)\n",
+                tl->win ? tl->win->id : 0, mode, tl->undecorated);
+    bool want_csd = (mode != ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE)
+                    && !tl->undecorated;
     if (want_csd != tl->csd) {
         tl->csd = want_csd;
         tl->tb_h = want_csd ? MW_TITLEBAR_H : 0;
@@ -424,12 +445,20 @@ void mw_toplevel_create(MwWindow *win)
      * decoration listener still runs, so if the compositor answers that it
      * only does client-side decorations we fall back to drawing one
      * ourselves. */
+    /* A Motif client that set _MOTIF_WM_HINTS decorations=0 wants no chrome at
+     * all; ask for client-side decorations so the compositor keeps its hands
+     * off, and mark the toplevel so the fallback titlebar is suppressed too. */
+    tl->undecorated = win->override_redirect || mw_motif_undecorated(d, win->id);
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: toplevel 0x%lx undecorated=%d deco_mgr=%p\n",
+                win->id, tl->undecorated, (void *)dp->deco_mgr);
     if (dp->deco_mgr) {
         tl->deco = zxdg_decoration_manager_v1_get_toplevel_decoration(dp->deco_mgr,
                                                                       tl->xdg_toplevel);
         zxdg_toplevel_decoration_v1_add_listener(tl->deco, &deco_listener, tl);
         zxdg_toplevel_decoration_v1_set_mode(tl->deco,
-            ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+            tl->undecorated ? ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+                            : ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
     }
     /* Assume the compositor will decorate us whenever it can; deco_configure()
      * corrects this if it turns out to be a client-side-decoration
@@ -437,7 +466,7 @@ void mw_toplevel_create(MwWindow *win)
      * managers do not manage them, and drawing chrome on one (Motif's 10x10
      * helper, say) put a spurious little window on screen beside the real
      * one. */
-    tl->csd = win->override_redirect ? false : (dp->deco_mgr == NULL);
+    tl->csd = tl->undecorated ? false : (dp->deco_mgr == NULL);
     tl->tb_h = tl->csd ? MW_TITLEBAR_H : 0;
 
     tl->req_w = w;
