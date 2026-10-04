@@ -580,7 +580,13 @@ void mw_toplevel_unmap(MwToplevel *tl)
      * rendered -- the X window was there and clicks reached it, but nothing
      * was ever painted, so no menu appeared to drop down.  Building a fresh
      * xdg_popup per posting, as GTK and Qt do, always gets a configure. */
-    if (tl->is_popup) tl->popup_dismissed = true;
+    /* River closes its river_window_v1 when a toplevel's surface is unmapped,
+     * so the same wl_surface cannot simply be re-mapped: the compositor would
+     * never announce a window again (this broke any X client that withdraws and
+     * re-maps a toplevel, dtwm sub-panels among them).  Mark it for rebuild so
+     * mw_toplevel_map() -- actually mw_map_window() -- makes a fresh
+     * xdg_toplevel on the next map.  Popups already worked this way. */
+    tl->popup_dismissed = true;
     tl->configured = false;
     tl->dirty = false;
     wl_surface_attach(tl->surface, NULL, 0, 0);
