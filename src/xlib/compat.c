@@ -71,6 +71,16 @@ int XmbTextPropertyToTextList(Display *d, const XTextProperty *tp, char ***list,
                                  int *count)
 {
     (void)d;
+    if (!tp || !list || !count) return 0;
+    /* A property that is absent (or malformed) has no value; return an empty
+     * list rather than dereferencing a NULL buffer. */
+    if (tp->nitems > 0 && !tp->value) {
+        char **v = calloc(1, sizeof(char *));
+        if (!v) return 0;
+        *list = v;
+        *count = 0;
+        return Success;
+    }
     int n = 0;
     for (unsigned long i = 0; i < tp->nitems; i++) if (tp->value[i] == 0) n++;
     if (n == 0) n = 1;

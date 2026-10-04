@@ -451,6 +451,17 @@ Atom *XListProperties(Display *d, Window w, int *num_prop_return)
 
 int XGetTextProperty(Display *d, Window w, XTextProperty *tp, Atom property)
 {
+    /* The reference implementation always leaves *tp in a safe state, even on
+     * failure: callers that only test `rc >= Success` (Success is 0, so a
+     * "not found" 0 passes) then hand *tp to XmbTextPropertyToTextList.  CDE's
+     * DtWsmGetWorkspaceInfo does exactly that, so without this it read a
+     * missing workspace-info property as uninitialised stack and crashed. */
+    if (tp) {
+        tp->value = NULL;
+        tp->encoding = None;
+        tp->format = 0;
+        tp->nitems = 0;
+    }
     Atom at; int af; unsigned long ni, ba; unsigned char *data = NULL;
     if (XGetWindowProperty(d, w, property, 0, 0x7fffffff, False,
                            AnyPropertyType, &at, &af, &ni, &ba, &data) != Success)
