@@ -87,6 +87,24 @@ void mw_load_resources(Display *d)
         append_file(&buf, &len, &cap, path);
     }
 
+    /* A session resource file that does not depend on the environment of the
+     * client.  Every client has its own private display/database here, so a
+     * process started without XENVIRONMENT (e.g. an action launched from a
+     * File Manager menu) would otherwise lose the session's defaults -- which
+     * is what made DtTerm fall back to a single core font and draw only a
+     * quarter of each multibyte string.  Applied last so the session wins over
+     * the user's generic files. */
+    append_file(&buf, &len, &cap, "/etc/xlib-wayland/Xresources");
+    append_dir(&buf, &len, &cap, "/usr/share/xlib-wayland/Xresources");
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    if (xdg && *xdg) {
+        snprintf(path, sizeof path, "%s/xlib-wayland/Xresources", xdg);
+        append_file(&buf, &len, &cap, path);
+    } else if (home) {
+        snprintf(path, sizeof path, "%s/.config/xlib-wayland/Xresources", home);
+        append_file(&buf, &len, &cap, path);
+    }
+
     if (!buf) { buf = strdup(""); len = 0; cap = 1; }
 
     free(dp->xdefaults);
