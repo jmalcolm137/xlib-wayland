@@ -653,17 +653,19 @@ static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_clip(cr);
     apply_dst_clip(cr, dst);
     set_source(d, cr, src, x, y, x, y);
-    cairo_pattern_t *mp = cairo_pattern_create_for_surface(mw_surface_native(mask));
-    if (mp) {
-        cairo_matrix_t mm;
-        cairo_matrix_init_translate(&mm, x - gs->gx[gid], y - gs->gy[gid]);
-        cairo_pattern_set_matrix(mp, &mm);
-        cairo_pattern_set_filter(mp, CAIRO_FILTER_BILINEAR);
-        cairo_mask(cr, mp);
-        cairo_pattern_destroy(mp);
-    }
+    cairo_mask_surface(cr, mw_surface_native(mask),
+                       x - gs->gx[gid], y - gs->gy[gid]);
     cairo_restore(cr);
     cairo_destroy(cr);
+    if (getenv("MW_TRACE_RENDER")) {
+        int sx = x - gs->gx[gid] + w / 2, sy = y - gs->gy[gid] + h / 2;
+        uint32_t *px = mw_surface_data(ds);
+        int st = mw_surface_stride(ds) / 4;
+        int dw = mw_surface_width(ds), dh = mw_surface_height(ds);
+        if (px && sx >= 0 && sy >= 0 && sx < dw && sy < dh)
+            fprintf(stderr, "MW: glyph pixel at %d,%d = %08x\n",
+                    sx, sy, px[(size_t)sy * st + sx]);
+    }
     mw_surface_mark_dirty(ds);
     MwWindow *win = pic_window(d, dst);
     if (win) mw_window_damage(win);
