@@ -65,3 +65,18 @@ void mw_xft_fill_rect(Display *dpy, Drawable dr, int x, int y,
     mw_canvas_end(c);
     xft_damage(dpy, dr);
 }
+
+void mw_xft_draw_glyphs(Display *dpy, Drawable dr, void *font,
+                        const unsigned int *glyphs, const int *xs,
+                        const int *ys, int n, unsigned int argb,
+                        const XRectangle *clip, int nclip)
+{
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: xft-draw-glyphs n=%d\n", n);
+    MwCanvas *c = xft_canvas(dpy, dr, clip, nclip);
+    if (!c) return;
+    mw_set_source_argb(c, argb);
+    mw_show_glyphs(c, font, glyphs, xs, ys, n);
+    mw_canvas_end(c);
+    xft_damage(dpy, dr);
+}

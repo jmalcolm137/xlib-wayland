@@ -31,6 +31,13 @@ void  mw_xft_draw_utf8(Display *dpy, Drawable dr, void *font, int x, int y,
                        const char *utf8, int len, unsigned int argb,
                        const XRectangle *clip, int nclip);
 
+/* Draw a run of FreeType glyph indices (from the same face as
+ * mw_xft_char_index) at explicit baselines xs/ys. */
+void  mw_xft_draw_glyphs(Display *dpy, Drawable dr, void *font,
+                         const unsigned int *glyphs, const int *xs,
+                         const int *ys, int n, unsigned int argb,
+                         const XRectangle *clip, int nclip);
+
 /* Fill a rectangle in the given ARGB colour, with the same clip handling. */
 void  mw_xft_fill_rect(Display *dpy, Drawable dr, int x, int y,
                        unsigned int w, unsigned int h, unsigned int argb,

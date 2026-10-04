@@ -430,3 +430,124 @@ void XftDrawCharSpec(XftDraw *draw, _Xconst XftColor *color, XftFont *pub,
 Picture XftDrawPicture(XftDraw *draw) { (void)draw; return None; }
 Picture XftDrawSrcPicture(XftDraw *draw, _Xconst XftColor *color)
 { (void)draw; (void)color; return None; }
+
+/* ---------------------------------------------------- glyph-level drawing
+ *
+ * Xft's glyph APIs come in two families.  The *draw-level* ones take an
+ * XftDraw, an XftFont and a colour, and composite straight onto a drawable:
+ * those are implemented here on the shim's cairo font path.  The *Render-level*
+ * ones (XftGlyphSpecRender, XftGlyphFontSpecRender, XftCharSpecRender, ...)
+ * take Render Pictures -- a source and a destination -- and are the way a
+ * Render-backed Xft uploads glyphs to a server.  The shim has no Render
+ * extension, so those cannot be implemented without one; a caller that needs
+ * them (Pango's legacy Xft renderer is the main one) needs the Render work
+ * tracked in the design document, not an Xft stub that would silently draw
+ * nothing.
+ */
+
+static int ft_glyph_advance(XftFont *pub, FT_UInt glyph)
+{
+    if (!pub || !glyph) return 0;
+    FT_Face face = (FT_Face)mw_xft_face(((MwXftFont *)pub)->raster);
+    if (!face) return 0;
+    if (FT_Load_Glyph(face, glyph, FT_LOAD_NO_HINTING | FT_LOAD_NO_BITMAP) != 0)
+        return 0;
+    return (int)((face->glyph->metrics.horiAdvance + 63) / 64);
+}
+
+Bool XftDefaultHasRender(Display *dpy)
+{
+    /* Xft uses this to decide whether it can upload glyphs through the Render
+     * extension.  The shim has no Render, but its Xft draws on its own font
+     * path, so callers that only need the draw-level API still work. */
+    (void)dpy;
+    return False;
+}
+
+void XftGlyphExtents(Display *dpy, XftFont *pub, _Xconst FT_UInt *glyphs,
+                     int nglyphs, XGlyphInfo *extents)
+{
+    (void)dpy;
+    if (!extents) return;
+    memset(extents, 0, sizeof *extents);
+    if (!pub || !glyphs || nglyphs <= 0) return;
+    int w = 0;
+    for (int i = 0; i < nglyphs; i++)
+        w += ft_glyph_advance(pub, glyphs[i]);
+    extents->width  = (unsigned short)(w < 0 ? 0 : w);
+    extents->height = (unsigned short)pub->height;
+    extents->x      = 0;
+    extents->y      = (short)pub->ascent;
+}
+
+static void draw_glyph_run(XftDraw *draw, _Xconst XftColor *color,
+                           XftFont *pub, const FT_UInt *glyphs,
+                           const int *xs, const int *ys, int n)
+{
+    if (!draw || !color || !pub || !glyphs || n <= 0) return;
+    mw_xft_draw_glyphs(draw->dpy, draw->drawable,
+                       ((MwXftFont *)pub)->raster, glyphs, xs, ys, n,
+                       xft_argb(color), draw->clip, draw->nclip);
+}
+
+void XftDrawGlyphs(XftDraw *draw, _Xconst XftColor *color, XftFont *pub,
+                   int x, int y, _Xconst FT_UInt *glyphs, int nglyphs)
+{
+    if (!draw || !color || !pub || !glyphs || nglyphs <= 0) return;
+    int *xs = malloc(sizeof(int) * (size_t)nglyphs);
+    int *ys = malloc(sizeof(int) * (size_t)nglyphs);
+    if (!xs || !ys) { free(xs); free(ys); return; }
+    int px = x;
+    for (int i = 0; i < nglyphs; i++) {
+        xs[i] = px;
+        ys[i] = y;
+        px += ft_glyph_advance(pub, glyphs[i]);
+    }
+    draw_glyph_run(draw, color, pub, glyphs, xs, ys, nglyphs);
+    free(xs);
+    free(ys);
+}
+
+void XftDrawGlyphSpec(XftDraw *draw, _Xconst XftColor *color, XftFont *pub,
+                      _Xconst XftGlyphSpec *glyphs, int len)
+{
+    if (!draw || !color || !pub || !glyphs || len <= 0) return;
+    unsigned int *gl = malloc(sizeof(unsigned int) * (size_t)len);
+    int *xs = malloc(sizeof(int) * (size_t)len);
+    int *ys = malloc(sizeof(int) * (size_t)len);
+    if (!gl || !xs || !ys) { free(gl); free(xs); free(ys); return; }
+    for (int i = 0; i < len; i++) {
+        gl[i] = glyphs[i].glyph;
+        xs[i] = glyphs[i].x;
+        ys[i] = glyphs[i].y;
+    }
+    draw_glyph_run(draw, color, pub, gl, xs, ys, len);
+    free(gl);
+    free(xs);
+    free(ys);
+}
+
+void XftDrawGlyphFontSpec(XftDraw *draw, _Xconst XftColor *color,
+                          _Xconst XftGlyphFontSpec *glyphs, int len)
+{
+    if (!draw || !color || !glyphs || len <= 0) return;
+    for (int i = 0; i < len; i++) {
+        unsigned int g = glyphs[i].glyph;
+        int x = glyphs[i].x;
+        int y = glyphs[i].y;
+        draw_glyph_run(draw, color, glyphs[i].font, &g, &x, &y, 1);
+    }
+}
+
+void XftDrawCharFontSpec(XftDraw *draw, _Xconst XftColor *color,
+                         _Xconst XftCharFontSpec *chars, int len)
+{
+    if (!draw || !color || !chars || len <= 0) return;
+    for (int i = 0; i < len; i++) {
+        XftFont *pub = chars[i].font;
+        unsigned int g = XftCharIndex(draw->dpy, pub, chars[i].ucs4);
+        int x = chars[i].x;
+        int y = chars[i].y;
+        draw_glyph_run(draw, color, pub, &g, &x, &y, 1);
+    }
+}

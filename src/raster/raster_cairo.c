@@ -796,3 +796,28 @@ void mw_show_utf8(MwCanvas *c, MwFont *f, const char *s, int len, int x, int y)
     if (ng) cairo_show_glyphs(c->cr, glyphs, ng);
     if (glyphs != stack_glyphs) free(glyphs);
 }
+
+void mw_show_glyphs(MwCanvas *c, MwFont *f, const unsigned int *glyphs,
+                    const int *xs, const int *ys, int n)
+{
+    if (!c || !f || !glyphs || n <= 0) return;
+    if (f->scaled) cairo_set_scaled_font(c->cr, f->scaled);
+    else { cairo_set_font_face(c->cr, f->face); cairo_set_font_size(c->cr, f->pixel_size); }
+
+    cairo_glyph_t stack_glyphs[256];
+    cairo_glyph_t *g = stack_glyphs;
+    if (n > (int)(sizeof stack_glyphs / sizeof stack_glyphs[0])) {
+        g = malloc(sizeof *g * (size_t)n);
+        if (!g) return;
+    }
+    int ng = 0;
+    for (int i = 0; i < n; i++) {
+        if (glyphs[i] == 0) continue;      /* glyph 0 is .notdef */
+        g[ng].index = glyphs[i];
+        g[ng].x = xs ? xs[i] : 0.0;
+        g[ng].y = ys ? ys[i] : 0.0;
+        ng++;
+    }
+    if (ng) cairo_show_glyphs(c->cr, g, ng);
+    if (g != stack_glyphs) free(g);
+}

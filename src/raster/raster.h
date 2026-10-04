@@ -133,6 +133,12 @@ void mw_set_font(MwCanvas *c, MwFont *f);
 /* Draw UTF-8 text at baseline (x,y). */
 void mw_show_utf8(MwCanvas *c, MwFont *f, const char *s, int len, int x, int y);
 
+/* Draw a run of FreeType glyph indices at explicit baselines.  `glyphs` are
+ * indices from the same face as mw_font_char_index(); `xs`/`ys` are length n.
+ * This is the glyph-level path Xft's XftDrawGlyphSpec and friends need. */
+void mw_show_glyphs(MwCanvas *c, MwFont *f, const unsigned int *glyphs,
+                    const int *xs, const int *ys, int n);
+
 /* Initialise/teardown any backend-global state. */
 int  mw_raster_init(void);
 void mw_raster_fini(void);
