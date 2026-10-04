@@ -147,6 +147,92 @@ void mw_window_damage(MwWindow *win)
  * _DtGetMwmWindow() requires the WM window to be a direct child of the root.
  * The workspace set comes from CDE_WS_NAMES (comma separated) and
  * CDE_WS_CURRENT, defaulting to One..Four with the first current. */
+/* Read the Workspace Manager state: workspace names (comma separated) and the
+ * current index.  Precedence is the runtime state file written by the WSM
+ * bridge, then the CDE_WS_* environment, then the CDE default of four
+ * workspaces. */
+static void mw_read_workspace_state(char *names, size_t namesz, int *current)
+{
+    snprintf(names, namesz, "ws0,ws1,ws2,ws3");
+    *current = 0;
+
+    const char *state = getenv("CDE_WSM_STATE");
+    char path[1024];
+    if (!state || !*state) {
+        const char *rt = getenv("XDG_RUNTIME_DIR");
+        snprintf(path, sizeof path, "%s/cde-wayland/workspace",
+                 (rt && *rt) ? rt : "/tmp");
+        state = path;
+    }
+    FILE *f = fopen(state, "r");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof line, f)) {
+            if (strncmp(line, "names=", 6) == 0) {
+                size_t n = strcspn(line + 6, "\r\n");
+                if (n >= namesz) n = namesz - 1;
+                memcpy(names, line + 6, n);
+                names[n] = 0;
+            } else if (strncmp(line, "current=", 8) == 0) {
+                *current = atoi(line + 8);
+            }
+        }
+        fclose(f);
+    }
+
+    const char *env = getenv("CDE_WS_NAMES");
+    if (env && *env) {
+        size_t n = strlen(env);
+        if (n >= namesz) n = namesz - 1;
+        memcpy(names, env, n);
+        names[n] = 0;
+    }
+    env = getenv("CDE_WS_CURRENT");
+    if (env && *env) *current = atoi(env);
+}
+
+/* Publish the workspace list and current workspace onto a synthetic WM
+ * window. */
+static void mw_set_workspace_props(Display *d, MwWindow *wm)
+{
+    char names_buf[512];
+    int current = 0;
+    mw_read_workspace_state(names_buf, sizeof names_buf, &current);
+
+    char *names = strdup(names_buf);
+    Atom ws[64];
+    int nws = 0;
+    for (char *tok = strtok(names, ","); tok && nws < 64; tok = strtok(NULL, ",")) {
+        while (*tok == ' ' || *tok == '\t') tok++;
+        if (*tok) ws[nws++] = mw_intern_atom(d, tok, False);
+    }
+    free(names);
+    if (current < 0 || current >= nws) current = 0;
+    if (nws <= 0) return;
+
+    uint32_t list[64];
+    for (int i = 0; i < nws; i++) list[i] = (uint32_t)ws[i];
+    Atom pl = mw_intern_atom(d, "_DT_WORKSPACE_LIST", False);
+    mw_set_prop(d, wm, pl, XA_ATOM, 32, (const unsigned char *)list,
+                (unsigned long)nws);
+
+    uint32_t cur = (uint32_t)ws[current];
+    Atom pc = mw_intern_atom(d, "_DT_WORKSPACE_CURRENT", False);
+    mw_set_prop(d, wm, pc, XA_ATOM, 32, (const unsigned char *)&cur, 1);
+}
+
+/* Refresh a synthetic WM window's workspace properties from the current WSM
+ * state.  A client's connection snapshots the state when it starts, but the
+ * workspace set/current changes while the session runs, so DtSvc's queries
+ * re-read it here.  Only a window carrying the synthetic list is the WM
+ * window. */
+void mw_refresh_workspace_props(Display *d, MwWindow *win)
+{
+    Atom pl = mw_intern_atom(d, "_DT_WORKSPACE_LIST", False);
+    if (mw_get_prop(d, win, pl))
+        mw_set_workspace_props(d, win);
+}
+
 void mw_init_wm_window(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
@@ -159,61 +245,6 @@ void mw_init_wm_window(Display *d)
      * starts dtwm with this set. */
     if (getenv("CDE_NO_WM_INFO")) return;
 
-    /* Workspace set and current index.  Precedence: the runtime state file
-     * written by the WSM bridge, then the CDE_WS_* environment, then the CDE
-     * default of four workspaces One..Four. */
-    char names_buf[512];
-    snprintf(names_buf, sizeof names_buf, "ws0,ws1,ws2,ws3");
-    int current = 0;
-
-    {
-        const char *state = getenv("CDE_WSM_STATE");
-        char path[1024];
-        if (!state || !*state) {
-            const char *rt = getenv("XDG_RUNTIME_DIR");
-            snprintf(path, sizeof path, "%s/cde-wayland/workspace",
-                     (rt && *rt) ? rt : "/tmp");
-            state = path;
-        }
-        FILE *f = fopen(state, "r");
-        if (f) {
-            char line[512];
-            while (fgets(line, sizeof line, f)) {
-                if (strncmp(line, "names=", 6) == 0) {
-                    size_t n = strcspn(line + 6, "\r\n");
-                    if (n >= sizeof names_buf) n = sizeof names_buf - 1;
-                    memcpy(names_buf, line + 6, n);
-                    names_buf[n] = 0;
-                } else if (strncmp(line, "current=", 8) == 0) {
-                    current = atoi(line + 8);
-                }
-            }
-            fclose(f);
-        }
-    }
-    {
-        const char *env = getenv("CDE_WS_NAMES");
-        if (env && *env) {
-            size_t n = strlen(env);
-            if (n >= sizeof names_buf) n = sizeof names_buf - 1;
-            memcpy(names_buf, env, n);
-            names_buf[n] = 0;
-        }
-        env = getenv("CDE_WS_CURRENT");
-        if (env && *env) current = atoi(env);
-    }
-
-    char *names = strdup(names_buf);
-    Atom ws[64];
-    int nws = 0;
-    for (char *tok = strtok(names, ","); tok && nws < 64; tok = strtok(NULL, ",")) {
-        while (*tok == ' ' || *tok == '\t') tok++;
-        if (*tok) ws[nws++] = mw_intern_atom(d, tok, False);
-    }
-    free(names);
-
-    if (current < 0 || current >= nws) current = 0;
-
     MwWindow *wm = mw_create_window(d, root->id, 0, 0, 1, 1, 0, 24,
                                     InputOutput, &dp->visual, 0, NULL);
     if (!wm) return;
@@ -224,17 +255,7 @@ void mw_init_wm_window(Display *d)
     info[1] = (uint32_t)wm->id;   /* wmWindow */
     mw_set_prop(d, root, mwm_info, mwm_info, 32, (const unsigned char *)info, 2);
 
-    if (nws > 0) {
-        uint32_t list[64];
-        for (int i = 0; i < nws; i++) list[i] = (uint32_t)ws[i];
-        Atom pl = mw_intern_atom(d, "_DT_WORKSPACE_LIST", False);
-        mw_set_prop(d, wm, pl, XA_ATOM, 32, (const unsigned char *)list,
-                    (unsigned long)nws);
-
-        uint32_t cur = (uint32_t)ws[current];
-        Atom pc = mw_intern_atom(d, "_DT_WORKSPACE_CURRENT", False);
-        mw_set_prop(d, wm, pc, XA_ATOM, 32, (const unsigned char *)&cur, 1);
-    }
+    mw_set_workspace_props(d, wm);
 }
 
 /* ------------------------------------------------------------ creation */

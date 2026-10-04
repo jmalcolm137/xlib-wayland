@@ -365,6 +365,13 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
 {
     MwWindow *win = mw_window(d, w);
     if (!win) return BadWindow;
+    /* The Workspace Manager's state does not live in this process: refresh the
+     * synthetic WM window's workspace properties from the WSM bridge's state
+     * file on every query, so a client that started earlier sees workspace
+     * changes too, instead of the snapshot taken when it connected. */
+    if (property == mw_intern_atom(d, "_DT_WORKSPACE_LIST", False) ||
+        property == mw_intern_atom(d, "_DT_WORKSPACE_CURRENT", False))
+        mw_refresh_workspace_props(d, win);
     MwProp *p = mw_get_prop(d, win, property);
     if (!p) {
         if (actual_type_return) *actual_type_return = None;

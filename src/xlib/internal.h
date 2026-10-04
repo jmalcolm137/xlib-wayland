@@ -723,6 +723,9 @@ void mw_pointer_frame(Display *d);
 void mw_set_pointer_cursor(Display *d, Cursor c);
 /* Create the synthetic WM window + workspace properties CDE's DtSvc reads. */
 void mw_init_wm_window(Display *d);
+/* Refresh a synthetic WM window's workspace properties from the live WSM
+ * state (called as DtSvc queries them, so long-running clients see changes). */
+void mw_refresh_workspace_props(Display *d, MwWindow *win);
 /* Apply the cursor of the window (or nearest ancestor) under the pointer.
  * Called as the pointer moves, like the server's cursor inheritance. */
 void mw_pointer_update_cursor(Display *d, MwWindow *w);
