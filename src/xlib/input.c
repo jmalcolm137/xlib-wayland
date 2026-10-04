@@ -275,21 +275,19 @@ int mw_keyboard_autorepeat_mode(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
     const char *path = kbd_state_path();
-    if (!path) return AutoRepeatModeOn;
-    FILE *f = fopen(path, "r");
-    if (!f) {
-        /* No shared state yet: the default is repeat on. */
-        dp->auto_repeat = AutoRepeatModeOn;
-        return dp->auto_repeat;
+    int mode = AutoRepeatModeOn;   /* default when there is no shared state */
+    if (path) {
+        FILE *f = fopen(path, "r");
+        if (f) {
+            char buf[16];
+            if (fgets(buf, sizeof buf, f))
+                mode = strncmp(buf, "off", 3) == 0
+                    ? AutoRepeatModeOff : AutoRepeatModeOn;
+            fclose(f);
+        }
     }
-    char buf[16];
-    if (fgets(buf, sizeof buf, f))
-        dp->auto_repeat = strncmp(buf, "off", 3) == 0
-            ? AutoRepeatModeOff : AutoRepeatModeOn;
-    else
-        dp->auto_repeat = AutoRepeatModeOn;
-    fclose(f);
-    return dp->auto_repeat;
+    dp->auto_repeat = mode;
+    return mode;
 }
 
 void mw_keyboard_set_autorepeat(Display *d, int mode)
