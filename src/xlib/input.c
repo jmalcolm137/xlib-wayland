@@ -50,6 +50,11 @@ static void deliver(Display *d, MwWindow *target, XEvent *ev, long mask)
 {
     for (MwWindow *w = target; w; w = w->parent) {
         if (w->event_mask & mask) {
+            if (getenv("MW_TRACE") &&
+                (ev->type == EnterNotify || ev->type == LeaveNotify))
+                fprintf(stderr, "MW: deliver crossing %s to 0x%lx mode=%d detail=%d\n",
+                        ev->type == EnterNotify ? "Enter" : "Leave", w->id,
+                        ev->xcrossing.mode, ev->xcrossing.detail);
             ev->xany.window = w->id;
             mw_put_event(d, ev);
             return;
@@ -490,6 +495,7 @@ static void ptr_leave(void *data, struct wl_pointer *p, uint32_t serial,
 {
     (void)p; (void)serial; (void)surface;
     Display *d = data;
+    if (getenv("MW_TRACE")) fprintf(stderr, "MW: ptr_leave (wl)\n");
     XDisplayImpl *dp = MWD(d);
     if (dp->ptr_focus) {
         XLeaveWindowEvent le;
@@ -544,6 +550,9 @@ static void crossing(Display *d, MwWindow *w, int type, int mode, int detail,
                      int rx, int ry)
 {
     if (!w) return;
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: crossing %s -> 0x%lx at %d,%d mode=%d detail=%d\n",
+                type == EnterNotify ? "Enter" : "Leave", w->id, rx, ry, mode, detail);
     XEvent ev;
     pt_event(d, w, &ev, type, rx, ry, current_mods(d), detail, mode, 0);
     ev.xcrossing.mode = mode;
@@ -723,8 +732,9 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial,
     }
     if (!target) return;
     if (getenv("MW_TRACE"))
-        fprintf(stderr, "MW: button %s -> target=0x%lx at %d,%d (deep ptr=%d,%d)\n",
-                pressed ? "press" : "release", target->id, rx, ry, dp->ptr_x, dp->ptr_y);
+        fprintf(stderr, "MW: button %s -> target=0x%lx mask=0x%lx want=%d at %d,%d (deep ptr=%d,%d)\n",
+                pressed ? "press" : "release", target->id, target->event_mask, want,
+                rx, ry, dp->ptr_x, dp->ptr_y);
 
     XEvent ev;
     pt_event(d, target, &ev, pressed ? ButtonPress : ButtonRelease, rx, ry,
@@ -1014,15 +1024,30 @@ Bool XQueryPointer(Display *d, Window w, Window *root, Window *child,
 {
     XDisplayImpl *dp = MWD(d);
     MwWindow *win = mw_window(d, w);
-    int wx = 0, wy = 0;
-    if (win) mw_window_origin(win, &wx, &wy);
+    /* Pointer position relative to `w` (dp->ptr_x/y are toplevel-relative). */
+    int ox = 0, oy = 0;
+    if (win) origin_rel(win, &ox, &oy);
+    int rx = dp->ptr_x - ox;
+    int ry = dp->ptr_y - oy;
     if (root) *root = MWSCR(d)->root;
-    if (child) *child = None;
     if (root_x) *root_x = dp->ptr_x;
     if (root_y) *root_y = dp->ptr_y;
-    if (win_x) *win_x = dp->ptr_x - wx;
-    if (win_y) *win_y = dp->ptr_y - wy;
+    if (win_x) *win_x = rx;
+    if (win_y) *win_y = ry;
     if (mask) *mask = dp->ptr_state | current_mods(d);
+    /* The child of `w` under the pointer, or None when the pointer is on `w`
+     * itself.  GDK uses this after an implicit grab ends to decide whether the
+     * pointer left the grab window; always reporting None made it synthesize a
+     * Leave and un-arm buttons. */
+    if (child) {
+        *child = None;
+        if (win) {
+            MwWindow *c = mw_child_at(win, rx, ry);
+            if (c) *child = c->id;
+        } else if (w == MWSCR(d)->root && dp->ptr_toplevel) {
+            *child = dp->ptr_toplevel->id;
+        }
+    }
     return True;
 }
 
