@@ -12,6 +12,68 @@ static bool is_root(Display *d, MwWindow *w)
     return w && w->id == MWSCR(d)->root;
 }
 
+/* Resolve a window's background to either a tiling pixmap (returned in
+ * *pm_out) or a solid pixel (*pix_out).  A window has one background: a
+ * pixmap or a pixel.  ParentRelative (and a window that never set a
+ * background) walks up the tree, matching X's CopyFromParent inheritance. */
+static void effective_background(MwWindow *win, MwPixmap **pm_out,
+                                 uint32_t *pix_out)
+{
+    uint32_t pix = MWSCR(win->d)->black_pixel;
+
+    *pm_out = NULL;
+    for (MwWindow *w = win; w; w = w->parent) {
+        if (w->background_pixmap != None &&
+            w->background_pixmap != ParentRelative) {
+            MwPixmap *pm = mw_pixmap(w->d, w->background_pixmap);
+            if (pm && pm->surface && pm->w > 0 && pm->h > 0) {
+                *pm_out = pm;
+                return;
+            }
+        } else if (w->background_pixmap == ParentRelative && w->parent) {
+            continue;           /* use the parent's background */
+        }
+        if (w->have_background) {
+            pix = (uint32_t)w->background_pixel;
+            break;
+        }
+        if (!w->parent)
+            break;
+    }
+    *pix_out = pix;
+}
+
+/* Fill (x,y,w,h) of a window's own surface with its background, honouring a
+ * tiling background pixmap (XSetWindowBackgroundPixmap / CWBackPixmap).  X
+ * tiles from the window origin, so the tile phase does not depend on the
+ * cleared rectangle.  Without this a window that only set a background
+ * pixmap (e.g. CDE's Front-Panel handles) was filled with the default black
+ * pixel instead of the pixmap. */
+static void paint_background(MwWindow *win, int x, int y, int w, int h)
+{
+    if (!win || !win->surface || w <= 0 || h <= 0) return;
+
+    MwPixmap *pm = NULL;
+    uint32_t pix = 0;
+    effective_background(win, &pm, &pix);
+
+    XRectangle r = { (short)x, (short)y, (unsigned short)w, (unsigned short)h };
+    MwCanvas *c = mw_canvas_begin(win->surface, NULL, 0, 0, 0);
+    mw_clip_rects(c, &r, 1, 0, 0);
+    mw_set_operator(c, GXcopy);
+
+    if (pm) {
+        int pw = pm->w, ph = pm->h;
+        for (int ty = (y / ph) * ph; ty < y + h; ty += ph)
+            for (int tx = (x / pw) * pw; tx < x + w; tx += pw)
+                mw_canvas_copy(c, pm->surface, 0, 0, tx, ty, pw, ph);
+    } else {
+        mw_set_source_argb(c, 0xff000000u | (pix & 0xffffff));
+        mw_paint(c);
+    }
+    mw_canvas_end(c);
+}
+
 void mw_window_ensure_surface(MwWindow *w)
 {
     if (w->w <= 0 || w->h <= 0) return;
@@ -19,9 +81,7 @@ void mw_window_ensure_surface(MwWindow *w)
     if (w->surface) mw_surface_destroy(w->surface);
     w->surface = mw_surface_create(w->w, w->h);
     w->surface_valid = true;
-    uint32_t bg = w->have_background ? (0xff000000u | (w->background_pixel & 0xffffff))
-                                     : 0xff000000u;
-    mw_surface_clear(w->surface, bg);
+    paint_background(w, 0, 0, w->w, w->h);
 }
 
 void mw_window_origin(MwWindow *win, int *x, int *y)
@@ -96,8 +156,11 @@ MwWindow *mw_create_window(Display *d, Window parent, int x, int y, int w, int h
     win->event_mask = 0;
 
     if (attr) {
-        if (valuemask & CWBackPixel)    { win->background_pixel = attr->background_pixel; win->have_background = true; }
-        if (valuemask & CWBackPixmap)   { win->background_pixmap = attr->background_pixmap; win->have_background = true; }
+        /* A window has a single background: a pixel or a pixmap.  A None
+         * background pixmap does not count as "having" a background, so the
+         * window still inherits its parent's (see effective_background). */
+        if (valuemask & CWBackPixel)    { win->background_pixel = attr->background_pixel; win->background_pixmap = None; win->have_background = true; }
+        if (valuemask & CWBackPixmap)   { win->background_pixmap = attr->background_pixmap; if (attr->background_pixmap != None) win->have_background = true; }
         if (valuemask & CWBorderPixel)  win->border_pixel = attr->border_pixel;
         if (valuemask & CWBorderPixmap) win->border_pixmap = attr->border_pixmap;
         if (valuemask & CWBitGravity)   win->bit_gravity = attr->bit_gravity;
@@ -703,14 +766,7 @@ int XReparentWindow(Display *d, Window w, Window parent, int x, int y)
 
 static void clear_win_rect(MwWindow *win, int x, int y, int w, int h)
 {
-    if (!win || !win->surface || w <= 0 || h <= 0) return;
-    XRectangle r = { (short)x, (short)y, (unsigned short)w, (unsigned short)h };
-    MwCanvas *c = mw_canvas_begin(win->surface, NULL, 0, 0, 0);
-    mw_clip_rects(c, &r, 1, 0, 0);
-    mw_set_operator(c, GXcopy);
-    mw_set_source_argb(c, 0xff000000u | (uint32_t)(win->background_pixel & 0xffffff));
-    mw_paint(c);
-    mw_canvas_end(c);
+    paint_background(win, x, y, w, h);
 }
 
 int XClearWindow(Display *d, Window w)
@@ -807,8 +863,8 @@ int XChangeWindowAttributes(Display *d, Window w, unsigned long mask,
 {
     MwWindow *win = mw_window(d, w);
     if (!win || !attr) return 0;
-    if (mask & CWBackPixel)    { win->background_pixel = attr->background_pixel; win->have_background = true; }
-    if (mask & CWBackPixmap)   { win->background_pixmap = attr->background_pixmap; win->have_background = true; }
+    if (mask & CWBackPixel)    { win->background_pixel = attr->background_pixel; win->background_pixmap = None; win->have_background = true; }
+    if (mask & CWBackPixmap)   { win->background_pixmap = attr->background_pixmap; if (attr->background_pixmap != None) win->have_background = true; }
     if (mask & CWBorderPixel)  win->border_pixel = attr->border_pixel;
     if (mask & CWBorderPixmap) win->border_pixmap = attr->border_pixmap;
     if (mask & CWBitGravity)   win->bit_gravity = attr->bit_gravity;
@@ -862,14 +918,23 @@ Bool XTranslateCoordinates(Display *d, Window src, Window dest,
 int XSetWindowBackground(Display *d, Window w, unsigned long pixel)
 {
     MwWindow *win = mw_window(d, w);
-    if (win) { win->background_pixel = pixel; win->have_background = true; }
+    if (win) {
+        win->background_pixel = pixel;
+        win->background_pixmap = None;
+        win->have_background = true;
+        if (win->surface) paint_background(win, 0, 0, win->w, win->h);
+    }
     return 1;
 }
 
 int XSetWindowBackgroundPixmap(Display *d, Window w, Pixmap pixmap)
 {
     MwWindow *win = mw_window(d, w);
-    if (win) { win->background_pixmap = pixmap; win->have_background = true; }
+    if (win) {
+        win->background_pixmap = pixmap;
+        win->have_background = (pixmap != None);
+        if (win->surface) paint_background(win, 0, 0, win->w, win->h);
+    }
     return 1;
 }
 
