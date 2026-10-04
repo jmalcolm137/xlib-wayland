@@ -295,13 +295,17 @@ static bool mw_motif_undecorated(Display *d, Window id)
     return (flags & MWM_HINTS_DECORATIONS) && decorations == 0;
 }
 
-/* True if the client disabled resizing through _MOTIF_WM_HINTS functions.
- * Motif's MWM_FUNC_ALL means the listed bits are the functions to *remove*;
- * without it the bits are the functions that are *present*. */
+/* Decode the functions the client allows, from _MOTIF_WM_HINTS.  Motif's
+ * MWM_FUNC_ALL means the listed bits are the functions to *remove*; without it
+ * the bits are the functions that are *present*.  Returns false when the
+ * property is absent or says nothing about functions. */
 #define MWM_HINTS_FUNCTIONS (1u << 0)
 #define MWM_FUNC_ALL        (1u << 0)
 #define MWM_FUNC_RESIZE     (1u << 1)
-static bool mw_motif_no_resize(Display *d, Window id)
+#define MWM_FUNC_MINIMIZE   (1u << 3)
+#define MWM_FUNC_MAXIMIZE   (1u << 4)
+#define MWM_FUNC_CLOSE      (1u << 5)
+static bool mw_motif_functions(Display *d, Window id, uint32_t *present)
 {
     MwProp *p = mw_get_prop(d, mw_window(d, id),
                             mw_intern_atom(d, "_MOTIF_WM_HINTS", False));
@@ -310,12 +314,25 @@ static bool mw_motif_no_resize(Display *d, Window id)
     uint32_t flags, functions;
     memcpy(&flags, p->data, 4);
     memcpy(&functions, p->data + 4, 4);
-    if (!(flags & MWM_HINTS_FUNCTIONS))
+    if (!(flags & MWM_HINTS_FUNCTIONS) || functions == 0)
         return false;
-    if (functions == 0)
-        return false;
-    uint32_t present = (functions & MWM_FUNC_ALL) ? ~functions : functions;
-    return (present & MWM_FUNC_RESIZE) == 0;
+    *present = (functions & MWM_FUNC_ALL) ? ~functions : functions;
+    return true;
+}
+
+static bool mw_motif_no_resize(Display *d, Window id)
+{
+    uint32_t present;
+    return mw_motif_functions(d, id, &present) && !(present & MWM_FUNC_RESIZE);
+}
+
+/* Close is the one function the client owns under Wayland: the compositor asks
+ * with xdg_toplevel.close and the client acts.  If the client disabled it, the
+ * window manager's close button must not close the window, so ignore it. */
+static bool mw_motif_no_close(Display *d, Window id)
+{
+    uint32_t present;
+    return mw_motif_functions(d, id, &present) && !(present & MWM_FUNC_CLOSE);
 }
 
 static void deco_configure(void *data, struct zxdg_toplevel_decoration_v1 *d,
@@ -933,7 +950,10 @@ static void tl_configure(void *data, struct xdg_toplevel *t, int32_t w, int32_t 
 static void tl_close(void *data, struct xdg_toplevel *t)
 {
     (void)t;
-    mw_toplevel_close((MwToplevel *)data);
+    MwToplevel *tl = (MwToplevel *)data;
+    if (tl && tl->win && mw_motif_no_close(tl->win->d, tl->win->id))
+        return;   /* the client disabled the close function */
+    mw_toplevel_close(tl);
 }
 
 static void tl_configure_bounds(void *data, struct xdg_toplevel *t,
