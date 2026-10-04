@@ -430,7 +430,11 @@ void mw_map_window(Display *d, MwWindow *win, bool raised)
          * appear as a stray window.  A legitimate override-redirect *panel* is
          * not override-redirect in this sense -- CDE's front panel window is a
          * normal root child and is promoted by the branch above. */
-        promotable = (mw_popup_anchor(win) != NULL);
+        /* A window that covers the whole screen is a root cover, not a popup:
+         * dtwm maps its per-workspace backdrop this way, and promoting it as a
+         * popup paints the desktop (and the panel) over. */
+        bool fullscreen = (win->w >= MWSCR(d)->width && win->h >= MWSCR(d)->height);
+        promotable = !fullscreen && (mw_popup_anchor(win) != NULL);
     } else {
         promotable = win->parent && is_root(d, win->parent);
     }
