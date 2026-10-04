@@ -153,8 +153,57 @@ void mw_init_wm_window(Display *d)
     MwWindow *root = mw_window(d, MWSCR(d)->root);
     if (!root) return;
 
-    const char *names_env = getenv("CDE_WS_NAMES");
-    char *names = strdup(names_env && *names_env ? names_env : "One,Two,Three,Four");
+    /* The panel (dtwm) must be able to claim the screen: it checks
+     * _MOTIF_WM_INFO to see whether a window manager is already running, so
+     * publishing a synthetic one here would make it stand down.  The session
+     * starts dtwm with this set. */
+    if (getenv("CDE_NO_WM_INFO")) return;
+
+    /* Workspace set and current index.  Precedence: the runtime state file
+     * written by the WSM bridge, then the CDE_WS_* environment, then the CDE
+     * default of four workspaces One..Four. */
+    char names_buf[512];
+    snprintf(names_buf, sizeof names_buf, "One,Two,Three,Four");
+    int current = 0;
+
+    {
+        const char *state = getenv("CDE_WSM_STATE");
+        char path[1024];
+        if (!state || !*state) {
+            const char *rt = getenv("XDG_RUNTIME_DIR");
+            snprintf(path, sizeof path, "%s/cde-wayland/workspace",
+                     (rt && *rt) ? rt : "/tmp");
+            state = path;
+        }
+        FILE *f = fopen(state, "r");
+        if (f) {
+            char line[512];
+            while (fgets(line, sizeof line, f)) {
+                if (strncmp(line, "names=", 6) == 0) {
+                    size_t n = strcspn(line + 6, "\r\n");
+                    if (n >= sizeof names_buf) n = sizeof names_buf - 1;
+                    memcpy(names_buf, line + 6, n);
+                    names_buf[n] = 0;
+                } else if (strncmp(line, "current=", 8) == 0) {
+                    current = atoi(line + 8);
+                }
+            }
+            fclose(f);
+        }
+    }
+    {
+        const char *env = getenv("CDE_WS_NAMES");
+        if (env && *env) {
+            size_t n = strlen(env);
+            if (n >= sizeof names_buf) n = sizeof names_buf - 1;
+            memcpy(names_buf, env, n);
+            names_buf[n] = 0;
+        }
+        env = getenv("CDE_WS_CURRENT");
+        if (env && *env) current = atoi(env);
+    }
+
+    char *names = strdup(names_buf);
     Atom ws[64];
     int nws = 0;
     for (char *tok = strtok(names, ","); tok && nws < 64; tok = strtok(NULL, ",")) {
@@ -163,9 +212,6 @@ void mw_init_wm_window(Display *d)
     }
     free(names);
 
-    int current = 0;
-    const char *cur_env = getenv("CDE_WS_CURRENT");
-    if (cur_env && *cur_env) current = atoi(cur_env);
     if (current < 0 || current >= nws) current = 0;
 
     MwWindow *wm = mw_create_window(d, root->id, 0, 0, 1, 1, 0, 24,
