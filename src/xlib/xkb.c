@@ -34,6 +34,16 @@ Bool XkbLibraryVersion(int *libMajorRtrn, int *libMinorRtrn)
     return True;
 }
 
+Bool XkbUseExtension(Display *dpy, int *major_rtrn, int *minor_rtrn)
+{
+    /* The client is asking whether the XKB extension is usable.  It is, to the
+     * extent the shim implements it; report our version. */
+    (void)dpy;
+    if (major_rtrn) *major_rtrn = XkbMajorVersion;
+    if (minor_rtrn) *minor_rtrn = XkbMinorVersion;
+    return True;
+}
+
 Bool XkbQueryExtension(Display *dpy, int *opcodeReturn, int *eventBaseReturn,
                        int *errorBaseReturn, int *majorRtrn, int *minorRtrn)
 {
