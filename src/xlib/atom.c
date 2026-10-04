@@ -412,7 +412,13 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
             }
             out = (unsigned char *)lout;
         } else {
-            out = malloc(nret * unit);
+            /* libX11 zero-pads the returned buffer to a 4-byte boundary, and
+             * string properties are set with their trailing NUL included (a
+             * window manager's _MOTIF_BINDINGS, for instance).  Allocate one
+             * extra unit and zero it so a client that treats an 8-bit property
+             * as a C string (Motif's _XmVirtKeysInitialize) cannot read past
+             * the buffer. */
+            out = calloc(1, nret * unit + unit);
             memcpy(out, p->data + start * unit, nret * unit);
         }
     }
