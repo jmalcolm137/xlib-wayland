@@ -163,7 +163,7 @@ void mw_init_wm_window(Display *d)
      * written by the WSM bridge, then the CDE_WS_* environment, then the CDE
      * default of four workspaces One..Four. */
     char names_buf[512];
-    snprintf(names_buf, sizeof names_buf, "One,Two,Three,Four");
+    snprintf(names_buf, sizeof names_buf, "ws0,ws1,ws2,ws3");
     int current = 0;
 
     {

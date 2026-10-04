@@ -4,6 +4,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/file.h>
 
 /* Predefined atoms 1..68, indexed by value (see X11/Xatom.h). */
 static const char *predef[] = {
@@ -24,6 +27,113 @@ static const char *predef[] = {
     "FAMILY_NAME", "FULL_NAME", "CAP_HEIGHT", "WM_CLASS", "WM_TRANSIENT_FOR"
 };
 
+/* Custom atoms must be stable across processes: the shim gives every client its
+ * own private server, so an atom id that a client receives (e.g. from a
+ * workspace list) then passes to another process (dtwm, say) has to mean the
+ * same name there.  A per-process sequential table makes "Three" 0x47 here and
+ * "Custom Data" there.  Share a name<->id table in the runtime directory so
+ * every client agrees. */
+static const char *atom_file_path(void)
+{
+    static char path[1024];
+    const char *p = getenv("XLIB_WAYLAND_ATOMS");
+    if (p && *p) return p;
+    const char *rt = getenv("XDG_RUNTIME_DIR");
+    if (!rt || !*rt) return NULL;
+    snprintf(path, sizeof path, "%s/xlib-wayland-atoms", rt);
+    return path;
+}
+
+static void atom_table_ensure(Display *d, int id)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (id < dp->atoms_cap) return;
+    int cap = dp->atoms_cap > 0 ? dp->atoms_cap : 512;
+    while (id >= cap) cap *= 2;
+    dp->atom_names = realloc(dp->atom_names, (size_t)cap * sizeof(char *));
+    for (int i = dp->atoms_cap; i < cap; i++) dp->atom_names[i] = NULL;
+    dp->atoms_cap = cap;
+}
+
+static void atom_file_load(Display *d)
+{
+    const char *path = atom_file_path();
+    if (!path) return;
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    XDisplayImpl *dp = MWD(d);
+    char line[1024];
+    while (fgets(line, sizeof line, f)) {
+        char *sp = strchr(line, ' ');
+        if (!sp) continue;
+        *sp = 0;
+        long id = atol(line);
+        char *nm = sp + 1;
+        nm[strcspn(nm, "\r\n")] = 0;
+        if (id <= XA_LAST_PREDEFINED || !*nm) continue;
+        atom_table_ensure(d, (int)id);
+        if (!dp->atom_names[id]) dp->atom_names[id] = strdup(nm);
+        if ((int)id >= dp->natoms) dp->natoms = (int)id + 1;
+    }
+    fclose(f);
+}
+
+/* Return the shared id for a name, or 0 if it has none.  */
+static int atom_file_lookup(const char *name)
+{
+    const char *path = atom_file_path();
+    if (!path) return 0;
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[1024];
+    int found = 0;
+    while (fgets(line, sizeof line, f)) {
+        char *sp = strchr(line, ' ');
+        if (!sp) continue;
+        *sp = 0;
+        long id = atol(line);
+        char *nm = sp + 1;
+        nm[strcspn(nm, "\r\n")] = 0;
+        if (strcmp(nm, name) == 0) { found = (int)id; break; }
+    }
+    fclose(f);
+    return found;
+}
+
+/* Allocate the shared id for a name (adding it if new).  Returns 0 on failure
+ * (e.g. no runtime dir), in which case the caller falls back to a local id. */
+static int atom_file_add(const char *name)
+{
+    const char *path = atom_file_path();
+    if (!path) return 0;
+    int fd = open(path, O_RDWR | O_CREAT, 0600);
+    if (fd < 0) return 0;
+    flock(fd, LOCK_EX);
+    FILE *f = fdopen(fd, "r+");
+    if (!f) { close(fd); return 0; }
+    char line[1024];
+    int maxid = XA_LAST_PREDEFINED, found = 0;
+    while (fgets(line, sizeof line, f)) {
+        char *sp = strchr(line, ' ');
+        if (!sp) continue;
+        *sp = 0;
+        long id = atol(line);
+        char *nm = sp + 1;
+        nm[strcspn(nm, "\r\n")] = 0;
+        if (id > maxid) maxid = (int)id;
+        if (strcmp(nm, name) == 0) { found = (int)id; break; }
+    }
+    if (!found) {
+        found = maxid + 1;
+        fseek(f, 0, SEEK_END);
+        fprintf(f, "%d %s\n", found, name);
+        fflush(f);
+        fsync(fileno(f));
+    }
+    fclose(f);   /* releases the flock */
+    return found;
+}
+
 void mw_init_atoms(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
@@ -32,6 +142,7 @@ void mw_init_atoms(Display *d)
     for (int i = 1; i <= XA_LAST_PREDEFINED; i++)
         dp->atom_names[i] = strdup(predef[i] ? predef[i] : "");
     dp->natoms = XA_LAST_PREDEFINED + 1;
+    atom_file_load(d);
 }
 
 Atom mw_intern_atom(Display *d, const char *name, Bool only_if_exists)
@@ -41,6 +152,18 @@ Atom mw_intern_atom(Display *d, const char *name, Bool only_if_exists)
     for (int i = 1; i < dp->natoms; i++)
         if (dp->atom_names[i] && strcmp(dp->atom_names[i], name) == 0)
             return (Atom)i;
+
+    /* Not known locally: consult the shared table so all clients agree. */
+    {
+        int gid = atom_file_lookup(name);
+        if (!gid && !only_if_exists) gid = atom_file_add(name);
+        if (gid) {
+            atom_table_ensure(d, gid);
+            if (!dp->atom_names[gid]) dp->atom_names[gid] = strdup(name);
+            if (gid >= dp->natoms) dp->natoms = gid + 1;
+            return (Atom)gid;
+        }
+    }
     if (only_if_exists) return None;
     if (dp->natoms >= dp->atoms_cap) {
         dp->atoms_cap *= 2;
@@ -52,11 +175,46 @@ Atom mw_intern_atom(Display *d, const char *name, Bool only_if_exists)
     return (Atom)id;
 }
 
+/* Resolve an id added by another process after this one loaded the table. */
+static char *atom_file_lookup_id(int id)
+{
+    const char *path = atom_file_path();
+    if (!path) return NULL;
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    char line[1024];
+    char *result = NULL;
+    while (fgets(line, sizeof line, f)) {
+        char *sp = strchr(line, ' ');
+        if (!sp) continue;
+        *sp = 0;
+        if (atoi(line) == id) {
+            char *nm = sp + 1;
+            nm[strcspn(nm, "\r\n")] = 0;
+            result = strdup(nm);
+            break;
+        }
+    }
+    fclose(f);
+    return result;
+}
+
 char *mw_atom_name(Display *d, Atom a)
 {
     XDisplayImpl *dp = MWD(d);
-    if (a <= 0 || a >= dp->natoms || !dp->atom_names[a]) return NULL;
-    return dp->atom_names[a];
+    if ((int)a <= 0) return NULL;
+    if ((int)a < dp->natoms && dp->atom_names[a]) return dp->atom_names[a];
+    if ((int)a > XA_LAST_PREDEFINED) {
+        char *nm = atom_file_lookup_id((int)a);
+        if (nm) {
+            atom_table_ensure(d, (int)a);
+            if (!dp->atom_names[a]) dp->atom_names[a] = nm;
+            else free(nm);
+            if ((int)a >= dp->natoms) dp->natoms = (int)a + 1;
+            return dp->atom_names[a];
+        }
+    }
+    return NULL;
 }
 
 Atom XInternAtom(Display *d, _Xconst char *name, Bool only_if_exists)
