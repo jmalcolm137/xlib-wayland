@@ -46,6 +46,10 @@ void mw_unregister(Display *d, XID id)
 {
     XDisplayImpl *dp = MWD(d);
     if (!dp->table) return;
+    /* A buffered Render request may still reference this object (cairo creates
+     * a pixmap, pictures it, and frees it -- all before the request reaches us),
+     * so dispatch pending requests before the id disappears. */
+    if (!dp->render_draining) mw_render_drain(d);
     /* Rebuild the probe table without this id.  A cluster-shifting delete is
      * error-prone (insertions can invalidate the scan and grow the table
      * mid-iteration), so we rehash cleanly. */

@@ -422,6 +422,17 @@ static void req_create_picture(Display *d, const unsigned char *b, size_t len)
     MwRenderPicture *p = new_picture(d, r->pid, (int)r->format, PK_DRAWABLE);
     if (!p) return;
     p->drawable = r->drawable;
+    if (getenv("MW_TRACE_RENDER"))
+        fprintf(stderr, "MW: createpicture pid=0x%lx drawable=0x%lx win=%p pm=%p gc=%p cmap=%p cur=%p font=%p pic=%p gs=%p\n",
+                (unsigned long)r->pid, (unsigned long)r->drawable,
+                (void *)mw_lookup(d, r->drawable, MW_OBJ_WINDOW),
+                (void *)mw_lookup(d, r->drawable, MW_OBJ_PIXMAP),
+                (void *)mw_lookup(d, r->drawable, MW_OBJ_GC),
+                (void *)mw_lookup(d, r->drawable, MW_OBJ_COLORMAP),
+                (void *)mw_lookup(d, r->drawable, MW_OBJ_CURSOR),
+                (void *)mw_lookup(d, r->drawable, MW_OBJ_FONT),
+                (void *)mw_lookup(d, r->drawable, MW_OBJ_PICTURE),
+                (void *)mw_lookup(d, r->drawable, MW_OBJ_GLYPHSET));
     apply_values(p, r->mask, (const CARD32 *)(b + sz_xRenderCreatePictureReq));
 }
 
@@ -637,6 +648,11 @@ static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     MwSurface *mask = gs->glyphs[gid];
     int w = gs->gw[gid], h = gs->gh[gid];
     if (getenv("MW_TRACE_RENDER"))
+        fprintf(stderr, "MW: glyphdst drawable=0x%lx kind=%d win=%p pm=%p\n",
+                (unsigned long)dst->drawable, dst->kind,
+                (void *)mw_window(d, dst->drawable),
+                (void *)mw_pixmap(d, dst->drawable));
+    if (getenv("MW_TRACE_RENDER"))
         fprintf(stderr, "MW: drawglyph gid=%d at %d,%d w=%d h=%d off=%d,%d srckind=%d color=%04x%04x%04x%04x\n",
                 gid, x, y, w, h, gs->gx[gid], gs->gy[gid], src ? src->kind : -1,
                 src ? src->color.red : 0, src ? src->color.green : 0,
@@ -649,14 +665,17 @@ static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_t *cr = cairo_create(dcs);
     cairo_save(cr);
     cairo_set_operator(cr, cairo_op(op));
-    cairo_rectangle(cr, x - gs->gx[gid], y - gs->gy[gid], w, h);
+    cairo_rectangle(cr, x, y, w, h);
     cairo_clip(cr);
     apply_dst_clip(cr, dst);
     set_source(d, cr, src, x, y, x, y);
-    cairo_mask_surface(cr, mw_surface_native(mask),
-                       x - gs->gx[gid], y - gs->gy[gid]);
+    cairo_mask_surface(cr, mw_surface_native(mask), x, y);
     cairo_restore(cr);
     cairo_destroy(cr);
+    if (getenv("MW_DUMP_GLYPH")) {
+        cairo_surface_flush(dcs);
+        mw_surface_write_png(ds, "/tmp/opencode/ds.png");
+    }
     if (getenv("MW_TRACE_RENDER")) {
         int sx = x - gs->gx[gid] + w / 2, sy = y - gs->gy[gid] + h / 2;
         uint32_t *px = mw_surface_data(ds);
@@ -708,7 +727,13 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
             else if (glyph_bytes == 2) { CARD16 v; memcpy(&v, p + i*2, 2); gid = v; }
             else { memcpy(&gid, p + i*4, 4); }
             draw_glyph(d, dst, src, r->op, gs, (int)gid, px, y);
-            px += elt.deltax;
+            /* The glyph's stored xOff/yOff is its advance (cairo/Xft). */
+            if (gid < (CARD32)gs->cap && gs->glyphs[gid]) {
+                px += gs->gx[gid];
+                if (gs->gy[gid]) y += gs->gy[gid];
+            } else {
+                px += elt.deltax;
+            }
             total++;
         }
         x += elt.deltax;
@@ -898,7 +923,9 @@ void mw_render_drain(Display *d)
     unsigned char *buf = (unsigned char *)dp->private12;   /* output buffer */
     unsigned char *ptr = (unsigned char *)dp->private13;   /* bufptr */
     if (!buf) return;
-    if (!ptr || ptr <= buf) { dp->private13 = buf; return; }
+    if (dp->render_draining) return;
+    dp->render_draining = 1;
+    if (!ptr || ptr <= buf) { dp->private13 = buf; dp->render_draining = 0; return; }
     unsigned char *p = buf;
     long n = 0;
     if (getenv("MW_TRACE_RENDER")) {
@@ -927,6 +954,7 @@ void mw_render_drain(Display *d)
     if (getenv("MW_TRACE_RENDER") && n)
         fprintf(stderr, "MW: render drained %ld requests\n", n);
     dp->private13 = buf;   /* bufptr = buffer */
+    dp->render_draining = 0;
 }
 
 void mw_render_finish(Display *d) { mw_render_drain(d); }

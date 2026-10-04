@@ -233,6 +233,10 @@ Pixmap XCreatePixmap(Display *d, Drawable dr, unsigned int width,
     pm->surface = mw_surface_create((int)width, (int)height);
     mw_surface_clear(pm->surface, 0x00000000);
     mw_register(d, pm->id, MW_OBJ_PIXMAP, pm);
+    if (getenv("MW_TRACE_RENDER"))
+        fprintf(stderr, "MW: XCreatePixmap id=0x%lx %ux%u depth=%u lookup=%p\n",
+                (unsigned long)pm->id, width, height, depth,
+                (void *)mw_pixmap(d, pm->id));
     return pm->id;
 }
 

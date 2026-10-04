@@ -459,6 +459,7 @@ typedef struct _XDisplayImpl {
     unsigned char              *render_reply_data;
     size_t                      render_reply_len;
     size_t                      render_reply_off;
+    int                         render_draining;   /* re-entrancy guard */
 
     /* registry */
     MwEntry                    *table;
