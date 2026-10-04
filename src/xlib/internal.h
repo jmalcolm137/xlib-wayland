@@ -62,6 +62,8 @@ typedef enum {
     MW_OBJ_COLORMAP,
     MW_OBJ_CURSOR,
     MW_OBJ_FONT,
+    MW_OBJ_PICTURE,
+    MW_OBJ_GLYPHSET,
     MW_OBJ_COUNT
 } MwObjKind;
 
@@ -447,6 +449,17 @@ typedef struct _XDisplayImpl {
     Depth                       depths[1];
     ScreenFormat                formats[1];
 
+    /* Render extension: the request built through _XGetRequest is dispatched
+     * when the next request is built, when a reply is awaited, or on flush. */
+    int                         render_req_pending;
+    int                         render_req_type;
+    size_t                      render_req_len;
+    unsigned char              *render_req;
+    int                         render_reply_pending;
+    unsigned char              *render_reply_data;
+    size_t                      render_reply_len;
+    size_t                      render_reply_off;
+
     /* registry */
     MwEntry                    *table;
     size_t                      table_cap;    /* power of two */
@@ -802,6 +815,15 @@ void      mw_xim_init(Display *d);
 /* xrandr (xrandr.c) / shape (xshape.c) */
 void      mw_xrandr_init(Display *d);
 void      mw_shape_init(Display *d);
+
+/* Render extension (render.c): intercepts libXrender's wire requests under the
+ * major opcode XQueryExtension("RENDER") returns. */
+int  mw_render_opcode(void);
+void mw_render_finish(Display *d);
+int  mw_render_reply(Display *d, void *rep);
+int  mw_render_read(Display *d, char *data, size_t size);
+void mw_render_drain(Display *d);
+void mw_render_init(Display *d);
 
 /* render marker for a window (surface.c) */
 void      mw_queue_render(Display *d);

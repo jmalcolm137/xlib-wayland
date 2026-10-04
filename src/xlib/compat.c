@@ -265,6 +265,17 @@ Bool XQueryExtension(Display *d, _Xconst char *name, int *major_opcode,
         fprintf(stderr, "MW: XQueryExtension \"%s\"\n", name ? name : "(null)");
     if (mw_xi2_query_extension(name, major_opcode, first_event, first_error))
         return True;
+    if (name && strcmp(name, "RENDER") == 0) {
+        /* Render is implemented (render.c) but still being completed; only
+         * advertise it when explicitly requested, so the default build keeps
+         * cairo's well-tested core-protocol fallback. */
+        if (!getenv("MW_RENDER"))
+            return False;
+        if (major_opcode) *major_opcode = mw_render_opcode();
+        if (first_event) *first_event = 0;
+        if (first_error) *first_error = 0;
+        return True;
+    }
     if (name && (strcmp(name, "SHAPE") == 0 || strcmp(name, "RANDR") == 0)) {
         if (major_opcode) *major_opcode = strcmp(name, "SHAPE") ? 140 : 139;
         if (first_event) *first_event = strcmp(name, "SHAPE") ? 90 : 64;
@@ -299,12 +310,13 @@ XExtCodes *XInitExtension(Display *d, _Xconst char *name)
 char **XListExtensions(Display *d, int *nextensions)
 {
     (void)d;
-    char **e = calloc(4, sizeof(char *));
+    char **e = calloc(5, sizeof(char *));
     e[0] = strdup("SHAPE");
     e[1] = strdup("RANDR");
-    e[2] = strdup(mw_xi2_extension_name());
-    e[3] = NULL;
-    if (nextensions) *nextensions = 3;
+    e[2] = strdup("RENDER");
+    e[3] = strdup(mw_xi2_extension_name());
+    e[4] = NULL;
+    if (nextensions) *nextensions = 4;
     return e;
 }
 

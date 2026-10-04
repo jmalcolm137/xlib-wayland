@@ -34,38 +34,71 @@ const char *xlocaledir = "/usr/share/X11/locale";
 
 /* --------------------------------------------------------- display I/O */
 
-int _XFlush(Display *d) { XFlush(d); return 1; }
+int _XFlush(Display *d) { mw_render_drain(d); XFlush(d); return 1; }
 void _XFlushGCCache(Display *d, GC gc) { (void)d; (void)gc; }
 
 int _XSend(Display *d, _Xconst char *data, long size)
 {
-    (void)d; (void)data; (void)size;
-    return 1;   /* no wire protocol: requests to unsupported extensions drop */
+    (void)data; (void)size;
+    /* no wire protocol: dispatch whatever requests are buffered, then drop */
+    mw_render_drain(d);
+    return 1;
 }
 
 char *_XGetRequest(Display *d, unsigned char type, size_t len)
 {
-    (void)type;
-    static char *buf;
-    static size_t cap;
-    if (len + 8 > cap) {
-        free(buf);
-        cap = len + 1024;
-        buf = calloc(1, cap);
+    XDisplayImpl *dp = MWD(d);
+    len = (len + 3) & ~(size_t)3;
+    char *buffer = dp->private12;        /* Xlib output buffer */
+    char *bufptr = dp->private13;
+    char *bufmax = dp->private14;
+    if (!buffer) return NULL;
+
+    if (bufptr + len > bufmax) {
+        /* Flush what is complete, then grow if a single request exceeds the
+         * buffer (libXrender builds the whole request, including variable data,
+         * inside the reservation). */
+        mw_render_drain(d);
+        bufptr = buffer;
+        size_t cap = (size_t)(bufmax - buffer);
+        if (len > cap) {
+            size_t ncap = len + (1u << 16);
+            char *nb = realloc(buffer, ncap);
+            if (!nb) return NULL;
+            buffer = nb; cap = ncap;
+            dp->private11 = buffer;          /* last_req */
+            dp->private12 = buffer;
+            dp->private14 = buffer + cap;
+            bufptr = buffer;
+        }
     }
-    if (buf) memset(buf, 0, cap);
+
+    char *req = bufptr;
+    dp->private13 = req + len;
+    dp->private11 = req;                 /* last_req */
+    memset(req, 0, len);
+    req[0] = (char)type;
+    unsigned int w = (unsigned int)(len >> 2);
+    req[2] = (char)(w & 0xff);
+    req[3] = (char)((w >> 8) & 0xff);
+
     /* The caller fills this buffer with the request and _XReply then answers
      * it; remember it so an extension request can be synthesised (xi2.c). */
     mw_xi2_forget_request(d);
-    XDisplayImpl *dp = MWD(d);
-    dp->xi2_req = (unsigned char *)buf;
+    dp->xi2_req = (unsigned char *)req;
     dp->xi2_req_len = (int)len;
-    return buf;
+    if (getenv("MW_TRACE_RENDER"))
+        fprintf(stderr, "MW: _XGetRequest type=%d len=%zu\n", type, len);
+    return req;
 }
 
 int _XReply(Display *d, void *rep, int extra, Bool discard)
 {
     (void)extra; (void)discard;
+    /* Dispatch the buffered request(s); the last, if it wants a reply, is
+     * answered here before falling back to the generic zero reply. */
+    mw_render_drain(d);
+    if (rep && mw_render_reply(d, rep)) return 1;
     if (rep && mw_xi2_reply(d, rep)) return 1;
     /* A reply is 32 bytes.  Zeroing sizeof(long)*8 (64) instead overwrote the
      * caller's stack whenever it passed the usual `xReply rep;` -- latent until
@@ -77,6 +110,7 @@ int _XReply(Display *d, void *rep, int extra, Bool discard)
 int _XRead(Display *d, char *data, long size)
 {
     if (data && size > 0) {
+        if (mw_render_read(d, data, (size_t)size) >= 0) return (int)size;
         if (mw_xi2_read(d, data, (size_t)size) < 0) memset(data, 0, (size_t)size);
     }
     return (int)size;

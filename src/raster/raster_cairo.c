@@ -95,6 +95,11 @@ void mw_surface_mark_dirty(MwSurface *s)
     if (s) cairo_surface_mark_dirty(s->cs);
 }
 
+void *mw_surface_native(MwSurface *s)
+{
+    return s ? (void *)s->cs : NULL;
+}
+
 /* ------------------------------------------------------------- canvas */
 
 struct MwCanvas {

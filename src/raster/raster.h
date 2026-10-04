@@ -143,4 +143,11 @@ void mw_show_glyphs(MwCanvas *c, MwFont *f, const unsigned int *glyphs,
 int  mw_raster_init(void);
 void mw_raster_fini(void);
 
+/* Backend escape hatch for the Render extension: the native (cairo) surface
+ * behind a MwSurface, as void*, or NULL when the backend is not cairo.  The
+ * Render extension is itself a rasteriser, so render.c translates Render's
+ * Composite/Fill/Glyph/Trap operations onto the active backend through this
+ * one accessor and the drawing helpers above. */
+void *mw_surface_native(MwSurface *s);
+
 #endif /* MW_RASTER_H */

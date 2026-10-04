@@ -95,6 +95,11 @@ MwCursor   *mw_cursor(Display *d, Cursor c)       { return mw_lookup(d, c, MW_OB
 static XDisplayImpl *open_displays;
 static pthread_mutex_t display_list_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* XAllocID is the macro (*dpy->resource_alloc)(dpy).  Ecosystem libraries --
+ * libXrender above all -- allocate their object ids through it, so the field
+ * must hold a real function or they call through NULL. */
+static XID mw_display_resource_alloc(Display *d) { return mw_alloc_id(d); }
+
 Display *XOpenDisplay(_Xconst char *display_name)
 {
     if (mw_raster_init() != 0) return NULL;
@@ -134,6 +139,19 @@ Display *XOpenDisplay(_Xconst char *display_name)
     dp->bitmap_pad = 32;
     dp->bitmap_bit_order = LSBFirst;
     dp->max_request_size = 65535;
+    dp->resource_alloc = mw_display_resource_alloc;
+    dp->idlist_alloc = NULL;
+    /* Output buffer.  The public prefix names these private11..private14, but
+     * they are Xlib's last_req/buffer/bufptr/bufmax: extension libraries
+     * (libXrender) build requests directly into this buffer through the
+     * Xlibint.h macros, so it must be real memory. */
+    {
+        char *ob = calloc(1, 1u << 20);
+        dp->private11 = ob;              /* last_req */
+        dp->private12 = ob;              /* buffer  */
+        dp->private13 = ob;              /* bufptr  */
+        dp->private14 = ob ? ob + (1u << 20) : NULL;   /* bufmax */
+    }
     dp->default_screen = 0;
     dp->nscreens = 1;
     dp->min_keycode = 8;
@@ -364,6 +382,8 @@ unsigned long XDisplayMotionBufferSize(Display *d) { return MWD(d)->motion_buffe
 int XFlush(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
+    /* Dispatch any buffered extension requests (Render) before the commit. */
+    mw_render_drain(d);
     /* XFlush makes pending drawing visible, so commit accumulated damage
      * before flushing the connection.  The commit is capped to one frame per
      * refresh (and arms a frame callback when it defers), so a repaint built
@@ -383,6 +403,7 @@ int XSync(Display *d, Bool discard)
 {
     XDisplayImpl *dp = MWD(d);
     (void)discard;
+    mw_render_drain(d);
     if (getenv("MW_TRACE")) fprintf(stderr, "MW: XSync\n");
     if (dp->wl_display) {
         wl_display_flush(dp->wl_display);
