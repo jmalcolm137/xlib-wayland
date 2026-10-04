@@ -759,6 +759,7 @@ Window XCreateSimpleWindow(Display *d, Window parent, int x, int y,
 
 int XDestroyWindow(Display *d, Window w)
 {
+    mw_render_drain(d);
     MwWindow *win = mw_window(d, w);
     if (win) mw_destroy_window(d, win);
     return 1;

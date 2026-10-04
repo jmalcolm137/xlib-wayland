@@ -9,6 +9,9 @@
 MwCanvas *mw_canvas_for_drawable(Display *d, Drawable dr, struct _XGC *gc,
                                  int *w, int *h)
 {
+    /* Core drawing must observe anything Render has drawn to the same drawable
+     * (Render requests are buffered and dispatched lazily). */
+    mw_render_drain(d);
     int sw = 0, sh = 0, depth = 0;
     MwSurface *surf = mw_drawable_surface(d, dr, &sw, &sh, &depth);
     if (w) *w = sw;

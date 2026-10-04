@@ -242,6 +242,9 @@ Pixmap XCreatePixmap(Display *d, Drawable dr, unsigned int width,
 
 int XFreePixmap(Display *d, Pixmap p)
 {
+    /* Dispatch buffered Render requests that may still target this pixmap
+     * while its surface is alive. */
+    mw_render_drain(d);
     MwPixmap *pm = mw_pixmap(d, p);
     if (pm) {
         if (pm->surface) mw_surface_destroy(pm->surface);

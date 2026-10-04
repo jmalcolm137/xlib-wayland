@@ -423,16 +423,10 @@ static void req_create_picture(Display *d, const unsigned char *b, size_t len)
     if (!p) return;
     p->drawable = r->drawable;
     if (getenv("MW_TRACE_RENDER"))
-        fprintf(stderr, "MW: createpicture pid=0x%lx drawable=0x%lx win=%p pm=%p gc=%p cmap=%p cur=%p font=%p pic=%p gs=%p\n",
+        fprintf(stderr, "MW: createpicture pid=0x%lx drawable=0x%lx win=%p pm=%p\n",
                 (unsigned long)r->pid, (unsigned long)r->drawable,
-                (void *)mw_lookup(d, r->drawable, MW_OBJ_WINDOW),
-                (void *)mw_lookup(d, r->drawable, MW_OBJ_PIXMAP),
-                (void *)mw_lookup(d, r->drawable, MW_OBJ_GC),
-                (void *)mw_lookup(d, r->drawable, MW_OBJ_COLORMAP),
-                (void *)mw_lookup(d, r->drawable, MW_OBJ_CURSOR),
-                (void *)mw_lookup(d, r->drawable, MW_OBJ_FONT),
-                (void *)mw_lookup(d, r->drawable, MW_OBJ_PICTURE),
-                (void *)mw_lookup(d, r->drawable, MW_OBJ_GLYPHSET));
+                (void *)mw_window(d, r->drawable),
+                (void *)mw_pixmap(d, r->drawable));
     apply_values(p, r->mask, (const CARD32 *)(b + sz_xRenderCreatePictureReq));
 }
 
@@ -702,7 +696,8 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
 
     const unsigned char *p = b + 28;   /* after the 28-byte fixed header */
     const unsigned char *end = b + len;
-    int x = r->xSrc, y = r->ySrc;
+    int pen_x = r->xSrc, pen_y = r->ySrc;
+    int first = 1;
     int total = 0;
     while (p < end) {
         if (p + 8 > end) break;
@@ -717,31 +712,38 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
         }
         size_t need = (size_t)count * glyph_bytes;
         if (p + need > end) break;
+        /* xSrc already includes the first element's deltax; later elements add
+         * theirs to the running pen position (cairo encodes kerning/space as a
+         * new element with a nonzero delta). */
+        int px = first ? pen_x : pen_x + elt.deltax;
+        int py = first ? pen_y : pen_y + elt.deltay;
+        first = 0;
         if (getenv("MW_TRACE_RENDER"))
-            fprintf(stderr, "MW: glyph elt len=%d dx=%d dy=%d x=%d y=%d\n",
-                    count, (int)elt.deltax, (int)elt.deltay, x, y);
-        int px = x;
+            fprintf(stderr, "MW: glyph elt len=%d dx=%d dy=%d start=%d,%d\n",
+                    count, (int)elt.deltax, (int)elt.deltay, px, py);
         for (int i = 0; i < count; i++) {
             CARD32 gid = 0;
             if (glyph_bytes == 1) gid = p[i];
             else if (glyph_bytes == 2) { CARD16 v; memcpy(&v, p + i*2, 2); gid = v; }
             else { memcpy(&gid, p + i*4, 4); }
-            draw_glyph(d, dst, src, r->op, gs, (int)gid, px, y);
-            /* The glyph's stored xOff/yOff is its advance (cairo/Xft). */
-            if (gid < (CARD32)gs->cap && gs->glyphs[gid]) {
+            draw_glyph(d, dst, src, r->op, gs, (int)gid, px, py);
+            /* The glyph's stored xOff/yOff is its advance (cairo/Xft); a
+             * zero-size glyph (space) has no surface but still advances. */
+            if (gid < (CARD32)gs->cap) {
                 px += gs->gx[gid];
-                if (gs->gy[gid]) y += gs->gy[gid];
+                py += gs->gy[gid];
             } else {
                 px += elt.deltax;
+                py += elt.deltay;
             }
             total++;
         }
-        x += elt.deltax;
-        y += elt.deltay;
+        pen_x = px;
+        pen_y = py;
         p += need;
     }
     if (getenv("MW_TRACE_RENDER"))
-        fprintf(stderr, "MW: glyph run total=%d op=%d\n", total, r->op);
+        fprintf(stderr, "MW: glyph run total=%d op=%d end=%d,%d\n", total, r->op, pen_x, pen_y);
 }
 
 /* --------------------------------------------------- traps / triangles */
@@ -818,19 +820,23 @@ static void build_pict_formats(Display *d,
     unsigned char *p = buf;
 
     xPictFormInfo fi;
-#define PUTFORM(fmt_id, dep, rm, gm, bm, am) do {                   \
+/* In xDirectFormat the component fields hold the bit shifts and the *Mask
+ * fields hold the component value masks (the X server's Mask() convention),
+ * e.g. ARGB32 is red=16,redMask=0xff; green=8,greenMask=0xff; ... Consumers
+ * such as cairo reconstruct a pixel mask as (mask << shift). */
+#define PUTFORM(fmt_id, dep, rs, rm, gs, gm, bs, bm, as, am) do {   \
         memset(&fi, 0, sizeof fi);                                  \
         fi.id = (fmt_id); fi.type = PictTypeDirect; fi.depth = (dep); \
-        fi.direct.red = fi.direct.green = fi.direct.blue =           \
-            fi.direct.alpha = 0;                                     \
-        fi.direct.redMask = (rm); fi.direct.greenMask = (gm);        \
-        fi.direct.blueMask = (bm); fi.direct.alphaMask = (am);       \
+        fi.direct.red = (rs); fi.direct.redMask = (rm);             \
+        fi.direct.green = (gs); fi.direct.greenMask = (gm);         \
+        fi.direct.blue = (bs); fi.direct.blueMask = (bm);           \
+        fi.direct.alpha = (as); fi.direct.alphaMask = (am);         \
         memcpy(p, &fi, sizeof fi); p += sz_xPictFormInfo;            \
     } while (0)
-    PUTFORM(FMT_ARGB32, 32, 0x00ff0000, 0x0000ff00, 0x000000ff, 0xff000000);
-    PUTFORM(FMT_RGB24,  24, 0x00ff0000, 0x0000ff00, 0x000000ff, 0);
-    PUTFORM(FMT_A8,      8, 0, 0, 0, 0xff);
-    PUTFORM(FMT_A1,      1, 0, 0, 0, 0x01);
+    PUTFORM(FMT_ARGB32, 32, 16, 0xff, 8, 0xff, 0, 0xff, 24, 0xff);
+    PUTFORM(FMT_RGB24,  24, 16, 0xff, 8, 0xff, 0, 0xff,  0, 0);
+    PUTFORM(FMT_A8,      8,  0, 0,    0, 0,    0, 0,     0, 0xff);
+    PUTFORM(FMT_A1,      1,  0, 0,    0, 0,    0, 0,     0, 0x01);
 #undef PUTFORM
 
     int vdepth = MWSCR(d)->root_depth ? MWSCR(d)->root_depth : 24;

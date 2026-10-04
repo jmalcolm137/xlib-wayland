@@ -266,10 +266,11 @@ Bool XQueryExtension(Display *d, _Xconst char *name, int *major_opcode,
     if (mw_xi2_query_extension(name, major_opcode, first_event, first_error))
         return True;
     if (name && strcmp(name, "RENDER") == 0) {
-        /* Render is implemented (render.c) but still being completed; only
-         * advertise it when explicitly requested, so the default build keeps
-         * cairo's well-tested core-protocol fallback. */
-        if (!getenv("MW_RENDER"))
+        /* Render is implemented in render.c and on by default.  Set
+         * MW_RENDER=0 to fall back to cairo's core-protocol path (useful for
+         * isolating Render bugs). */
+        const char *gate = getenv("MW_RENDER");
+        if (gate && (gate[0] == '0' || gate[0] == 'n' || gate[0] == 'N'))
             return False;
         if (major_opcode) *major_opcode = mw_render_opcode();
         if (first_event) *first_event = 0;
