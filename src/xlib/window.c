@@ -239,6 +239,24 @@ void mw_init_wm_window(Display *d)
     MwWindow *root = mw_window(d, MWSCR(d)->root);
     if (!root) return;
 
+    /* Advertise the ToolTalk session on the root window, as a real X server's
+     * session manager does.  ToolTalk clients discover the session either from
+     * the TT_SESSION environment or from these root properties: the Information
+     * Manager (dtinfo) uses tt_X_session(XDisplayString(display)), which reads
+     * _SUN_TT_SESSION / TT_SESSION, and without them it fails with
+     * TT_ERR_NOMP.  tt_XATOM_NAME and tt_CDE_XATOM_NAME in libtt. */
+    {
+        const char *tt = getenv("TT_SESSION");
+        if (tt && *tt) {
+            Atom a1 = mw_intern_atom(d, "_SUN_TT_SESSION", False);
+            Atom a2 = mw_intern_atom(d, "TT_SESSION", False);
+            mw_set_prop(d, root, a1, XA_STRING, 8,
+                        (const unsigned char *)tt, strlen(tt));
+            mw_set_prop(d, root, a2, XA_STRING, 8,
+                        (const unsigned char *)tt, strlen(tt));
+        }
+    }
+
     /* The panel (dtwm) must be able to claim the screen: it checks
      * _MOTIF_WM_INFO to see whether a window manager is already running, so
      * publishing a synthetic one here would make it stand down.  The session
