@@ -556,3 +556,68 @@ void XkbFreeKeyboard(XkbDescPtr xkb, unsigned int which, Bool freeDesc)
     free(xkb->geom);
     if (freeDesc) free(xkb);
 }
+
+/* ------------------------------------------------ keymap control / queries
+ *
+ * The broader slice of XKB that libmatekbd (through libxklavier) uses.  Getters
+ * answer from the real keymap; requests that would change server state are
+ * accepted and not carried, matching the rest of the XKB surface. */
+
+XkbDescPtr XkbGetKeyboard(Display *dpy, unsigned int which, unsigned int deviceSpec)
+{
+    return XkbGetMap(dpy, which, deviceSpec);
+}
+
+unsigned int XkbKeysymToModifiers(Display *dpy, KeySym ks)
+{
+    /* No modifier-key mapping is modelled; callers fall back to the core
+     * modifier map. */
+    (void)dpy; (void)ks;
+    return 0;
+}
+
+Bool XkbTranslateKeyCode(XkbDescPtr xkb, KeyCode keycode, unsigned int modifiers,
+                         unsigned int *modifiers_return, KeySym *keysym_return)
+{
+    if (modifiers_return) *modifiers_return = modifiers;
+    if (!xkb || !XkbKeycodeInRange(xkb, keycode)) {
+        if (keysym_return) *keysym_return = NoSymbol;
+        return False;
+    }
+    int ng = XkbKeyNumGroups(xkb, keycode);
+    if (ng < 1) { if (keysym_return) *keysym_return = NoSymbol; return False; }
+    int width = XkbKeyGroupsWidth(xkb, keycode);
+    if (width < 1) width = 1;
+    int group = XkbGroupForCoreState(modifiers);
+    if (group >= ng) group %= ng;
+    int level = (modifiers & ShiftMask) ? 1 : 0;   /* core shift -> level 1 */
+    if (level >= width) level = 0;
+    KeySym ks = XkbKeySymEntry(xkb, keycode, level, group);
+    if (keysym_return) *keysym_return = ks;
+    return ks != NoSymbol;
+}
+
+Status XkbGetIndicatorState(Display *dpy, unsigned int deviceSpec,
+                            unsigned int *pStateRtrn)
+{
+    (void)dpy; (void)deviceSpec;
+    if (pStateRtrn) *pStateRtrn = 0;
+    return Success;
+}
+
+Bool XkbLockGroup(Display *dpy, unsigned int deviceSpec, unsigned int group)
+{ (void)dpy; (void)deviceSpec; (void)group; return True; }
+
+Bool XkbLatchGroup(Display *dpy, unsigned int deviceSpec, unsigned int group)
+{ (void)dpy; (void)deviceSpec; (void)group; return True; }
+
+Bool XkbLockModifiers(Display *dpy, unsigned int deviceSpec,
+                      unsigned int affect, unsigned int values)
+{ (void)dpy; (void)deviceSpec; (void)affect; (void)values; return True; }
+
+Bool XkbLatchModifiers(Display *dpy, unsigned int deviceSpec,
+                       unsigned int affect, unsigned int values)
+{ (void)dpy; (void)deviceSpec; (void)affect; (void)values; return True; }
+
+Bool XkbSetControls(Display *dpy, unsigned long which, XkbDescPtr desc)
+{ (void)dpy; (void)which; (void)desc; return True; }
