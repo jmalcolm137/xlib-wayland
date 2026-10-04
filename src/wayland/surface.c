@@ -425,6 +425,30 @@ void mw_toplevel_create(MwWindow *win)
             else if (ch.res_class && ch.res_class[0])
                 app_id = ch.res_class;
         }
+        /* dtwm (the Front Panel) creates the panel and each sub-panel as a
+         * separate toplevel, all with WM_CLASS class "Dtwm" but a per-window
+         * instance (the panel itself is "FrontPanel", a sub-panel is its
+         * label).  Report them as "FrontPanel" and "FrontPanelSubpanel" so the
+         * window manager can treat sub-panels as part of the panel --
+         * undecorated and docked above it -- rather than as ordinary windows. */
+        if (ch.res_class && strcmp(ch.res_class, "Dtwm") == 0) {
+            if (ch.res_name && strcmp(ch.res_name, "FrontPanel") == 0) {
+                app_id = "FrontPanel";
+            } else {
+                /* A sub-panel: encode its label into the app_id (spaces to
+                 * '-') so the window manager can style and place each one,
+                 * e.g. "FrontPanelSubpanel-Personal-Applications".  app_id is
+                 * set before the toplevel is placed and the title may not have
+                 * arrived yet, so a title selector would miss it. */
+                static char sub_id[160];
+                snprintf(sub_id, sizeof sub_id, "FrontPanelSubpanel-%s",
+                         (ch.res_name && ch.res_name[0]) ? ch.res_name : "sub");
+                for (char *p = sub_id; *p; p++)
+                    if (*p == ' ' || *p == '\t')
+                        *p = '-';
+                app_id = sub_id;
+            }
+        }
         xdg_toplevel_set_app_id(tl->xdg_toplevel, app_id);
         XFree(ch.res_name);
         XFree(ch.res_class);
