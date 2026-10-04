@@ -469,6 +469,38 @@ void mw_toplevel_create(MwWindow *win)
      * decoration listener still runs, so if the compositor answers that it
      * only does client-side decorations we fall back to drawing one
      * ourselves. */
+    /* Tell the compositor the dialog's parent (WM_TRANSIENT_FOR), so the window
+     * manager can keep a dialog above its parent and place it there, as
+     * CDE/MWM does.  Only same-process toplevels have a Wayland parent here;
+     * the transient target may be a child, so walk up to its toplevel. */
+    {
+        Window tf = None;
+        if (XGetTransientForHint(d, win->id, &tf) && tf != None) {
+            MwWindow *pw = mw_window(d, tf);
+            while (pw && !pw->tl && pw->parent) pw = pw->parent;
+            if (pw && pw->tl && pw->tl->xdg_toplevel)
+                xdg_toplevel_set_parent(tl->xdg_toplevel, pw->tl->xdg_toplevel);
+        }
+    }
+
+    /* Forward the ICCCM size constraints (WM_NORMAL_HINTS) so the compositor
+     * enforces the same limits the client asked for -- fixed-size CDE dialogs,
+     * a terminal's min/max rows, and so on.  Without this every window could be
+     * resized to anything the user dragged. */
+    {
+        XSizeHints h;
+        memset(&h, 0, sizeof h);
+        long supplied = 0;
+        if (XGetWMNormalHints(d, win->id, &h, &supplied)) {
+            if (h.flags & PMinSize)
+                xdg_toplevel_set_min_size(tl->xdg_toplevel, h.min_width,
+                                          h.min_height);
+            if (h.flags & PMaxSize)
+                xdg_toplevel_set_max_size(tl->xdg_toplevel, h.max_width,
+                                          h.max_height);
+        }
+    }
+
     /* A Motif client that set _MOTIF_WM_HINTS decorations=0 wants no chrome at
      * all; ask for client-side decorations so the compositor keeps its hands
      * off, and mark the toplevel so the fallback titlebar is suppressed too. */
