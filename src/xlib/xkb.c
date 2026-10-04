@@ -243,19 +243,137 @@ XkbShapePtr     XkbAddGeomShape(XkbGeometryPtr geom, Atom name, int sz_outlines)
 
 /* ----------------------------------------------------- map / names I/O */
 
+/* Build a valid client/server/names description from the compositor's
+ * xkbcommon keymap.  There is no XKB wire protocol, so a client that asks for
+ * the map (GDK's keyboard handling is the demanding one) would otherwise get a
+ * descriptor whose map/server/names are NULL and crash dereferencing them.
+ * The keysyms are real: they come from the same keymap XkbKeycodeToKeysym()
+ * reads.  Modifier maps (server->vmods, names->vmods) are left zeroed, which
+ * the core modifier state does not depend on. */
+static Status xkb_build_map(Display *dpy, XkbDescPtr xkb, unsigned int deviceSpec)
+{
+    XDisplayImpl *dp = MWD(dpy);
+    struct xkb_keymap *km = dp ? dp->xkb_keymap : NULL;
+
+    KeyCode min = 8, max = 255;
+    if (km) {
+        KeyCode kmin = (KeyCode)xkb_keymap_min_keycode(km);
+        KeyCode kmax = (KeyCode)xkb_keymap_max_keycode(km);
+        if (kmin >= 8) min = kmin;
+        if (kmax <= 255 && kmax >= min) max = kmax;
+    }
+
+    xkb->dpy = dpy;
+    xkb->device_spec = (unsigned short)deviceSpec;
+    xkb->min_key_code = min;
+    xkb->max_key_code = max;
+
+    /* Size the per-key arrays to the full X keycode range (0..255), not just
+     * up to the xkbcommon keymap's maximum: clients iterate to the range
+     * XDisplayKeycodes() reports, which can exceed it, and would read past the
+     * end of a shorter array.  Keycodes outside [min,max] simply have a zeroed
+     * entry (no groups, no symbols) and are skipped. */
+    int nkeys = 256;
+
+    XkbClientMapRec *map = calloc(1, sizeof *map);
+    if (!map) return BadAlloc;
+    xkb->map = map;
+    map->key_sym_map = calloc((size_t)nkeys, sizeof(XkbSymMapRec));
+    map->modmap      = calloc((size_t)nkeys, 1);
+    map->size_types  = 1;
+    map->num_types   = 1;
+    map->types       = calloc(1, sizeof(XkbKeyTypeRec));
+    if (!map->key_sym_map || !map->modmap || !map->types) return BadAlloc;
+    /* One key type, no modifier-map entries: clients fall back to the plain
+     * "symbol at (group,level)" lookup, which is what our keysyms model. */
+    map->types[0].num_levels = XkbNumKbdGroups;
+    map->types[0].map = NULL;
+    map->types[0].map_count = 0;
+
+    size_t nsyms = 0;
+    for (KeyCode k = min; k <= max; k++) {
+        int ng = 1, width = 1;
+        if (km) {
+            ng = xkb_keymap_num_layouts_for_key(km, k);
+            if (ng < 1) ng = 1;
+            if (ng > XkbNumKbdGroups) ng = XkbNumKbdGroups;
+            for (int g = 0; g < ng; g++) {
+                int nl = xkb_keymap_num_levels_for_key(km, k, g);
+                if (nl > width) width = nl;
+            }
+        }
+        if (width < 1) width = 1;
+        if (width > 4) width = 4;
+        nsyms += (size_t)ng * (size_t)width;
+    }
+    if (nsyms < 1) nsyms = 1;
+    map->syms = calloc(nsyms, sizeof(KeySym));
+    if (!map->syms) return BadAlloc;
+    map->size_syms = map->num_syms = (unsigned short)nsyms;
+
+    size_t off = 0;
+    for (KeyCode k = min; k <= max; k++) {
+        int ng = 1, width = 1;
+        if (km) {
+            ng = xkb_keymap_num_layouts_for_key(km, k);
+            if (ng < 1) ng = 1;
+            if (ng > XkbNumKbdGroups) ng = XkbNumKbdGroups;
+            for (int g = 0; g < ng; g++) {
+                int nl = xkb_keymap_num_levels_for_key(km, k, g);
+                if (nl > width) width = nl;
+            }
+        }
+        if (width < 1) width = 1;
+        if (width > 4) width = 4;
+
+        map->key_sym_map[k].width = (unsigned char)width;
+        map->key_sym_map[k].group_info =
+            (unsigned char)(((width & 0x03) << 4) | (ng & 0x0f));
+        map->key_sym_map[k].offset = (unsigned short)off;
+        for (int g = 0; g < XkbNumKbdGroups; g++)
+            map->key_sym_map[k].kt_index[g] = 0;
+
+        if (km) {
+            for (int g = 0; g < ng; g++) {
+                for (int l = 0; l < width; l++) {
+                    const xkb_keysym_t *syms = NULL;
+                    int n = xkb_keymap_key_get_syms_by_level(km, k, g, l, &syms);
+                    map->syms[off + (size_t)g * width + l] =
+                        (n > 0 && syms) ? (KeySym)syms[0] : NoSymbol;
+                }
+            }
+        }
+        off += (size_t)ng * (size_t)width;
+    }
+
+    if (!xkb->server) xkb->server = calloc(1, sizeof(XkbServerMapRec));
+    if (!xkb->server) return BadAlloc;
+    xkb->server->vmodmap = calloc((size_t)nkeys, sizeof(unsigned short));
+
+    if (!xkb->names) xkb->names = calloc(1, sizeof(XkbNamesRec));
+    if (!xkb->names) return BadAlloc;
+
+    return Success;
+}
+
 XkbDescPtr XkbGetMap(Display *dpy, unsigned int which, unsigned int deviceSpec)
 {
-    (void)dpy; (void)which;
+    (void)which;
     XkbDescPtr xkb = XkbAllocKeyboard();
-    if (xkb) xkb->device_spec = (unsigned short)deviceSpec;
+    if (!xkb) return NULL;
+    if (xkb_build_map(dpy, xkb, deviceSpec) != Success) {
+        XkbFreeKeyboard(xkb, XkbAllComponentsMask, True);
+        return NULL;
+    }
     return xkb;
 }
 
 Status XkbGetUpdatedMap(Display *dpy, unsigned int which, XkbDescPtr desc)
 {
-    (void)dpy; (void)which;
+    (void)which;
     if (!desc) return BadAlloc;
-    return XkbAllocClientMap(desc, 0, 0);
+    if (desc->map && desc->server && desc->names) return Success;
+    return xkb_build_map(dpy, desc, desc->device_spec);
 }
 
 Status XkbGetNames(Display *dpy, unsigned int which, XkbDescPtr desc)
@@ -308,3 +426,133 @@ KeySym *XkbResizeKeySyms(XkbDescPtr desc, int forKey, int symsNeeded)
 
 XkbAction *XkbResizeKeyActions(XkbDescPtr desc, int forKey, int actsNeeded)
 { (void)desc; (void)forKey; (void)actsNeeded; return NULL; }
+
+/* ----------------------------------------------------------- state / controls
+ *
+ * GDK's X11 backend drives its keyboard handling through XKB: it registers for
+ * state/map notifications with XkbSelectEvents, reads the current modifier and
+ * group state with XkbGetState, reads the autorepeat controls with
+ * XkbGetControls, and toggles detectable autorepeat with
+ * XkbSetDetectableAutoRepeat.  These four were missing from the shim's XKB
+ * surface; anything linking libgdk-x11-2.0 therefore failed to resolve them
+ * (the first was gtk-query-immodules-2.0).
+ *
+ * There is no XKB wire protocol here, but the keymap is real (xkbcommon; see
+ * keymap.c), so the state and controls have honest local answers.  Event
+ * registration is accepted and not carried: XKB state/map *events* are not
+ * synthesised, but every key event still carries its core modifier state, so a
+ * client that falls back to reading XKeyEvent.state behaves correctly.
+ */
+
+Status XkbGetState(Display *dpy, unsigned int deviceSpec, XkbStatePtr rtrn)
+{
+    (void)deviceSpec;
+    if (!rtrn) return BadValue;
+    memset(rtrn, 0, sizeof *rtrn);
+
+    XDisplayImpl *dp = MWD(dpy);
+    if (dp && dp->xkb_state) {
+        struct xkb_state *st = dp->xkb_state;
+
+        xkb_mod_mask_t eff = xkb_state_serialize_mods(st, XKB_STATE_MODS_EFFECTIVE);
+        xkb_mod_mask_t dep = xkb_state_serialize_mods(st, XKB_STATE_MODS_DEPRESSED);
+        xkb_mod_mask_t lat = xkb_state_serialize_mods(st, XKB_STATE_MODS_LATCHED);
+        xkb_mod_mask_t lck = xkb_state_serialize_mods(st, XKB_STATE_MODS_LOCKED);
+        xkb_layout_index_t grp  =
+            xkb_state_serialize_layout(st, XKB_STATE_LAYOUT_EFFECTIVE);
+        xkb_layout_index_t lgrp =
+            xkb_state_serialize_layout(st, XKB_STATE_LAYOUT_LOCKED);
+
+        rtrn->group             = (unsigned char)grp;
+        rtrn->base_group        = (unsigned short)grp;
+        rtrn->locked_group      = (unsigned char)lgrp;
+        rtrn->mods              = (unsigned char)eff;
+        rtrn->base_mods         = (unsigned char)dep;
+        rtrn->latched_mods      = (unsigned char)lat;
+        rtrn->locked_mods       = (unsigned char)lck;
+        rtrn->compat_state      = (unsigned char)eff;
+        rtrn->grab_mods         = (unsigned char)eff;
+        rtrn->compat_grab_mods  = (unsigned char)eff;
+        rtrn->lookup_mods       = (unsigned char)eff;
+        rtrn->compat_lookup_mods= (unsigned char)eff;
+    }
+    return Success;
+}
+
+Status XkbGetControls(Display *dpy, unsigned long which, XkbDescPtr desc)
+{
+    (void)dpy; (void)which;
+    if (!desc) return BadAlloc;
+    if (!desc->ctrls) {
+        desc->ctrls = calloc(1, sizeof(XkbControlsRec));
+        if (!desc->ctrls) return BadAlloc;
+    }
+    /* Keyboard autorepeat is handled by the shim itself (it synthesises
+     * KeyRelease events on the repeat deadline and already honours the CDE
+     * Style Manager's toggle).  Report it enabled so GDK does not install a
+     * competing repeat timer. */
+    desc->ctrls->enabled_ctrls   = XkbRepeatKeysMask;
+    desc->ctrls->repeat_delay    = 660;
+    desc->ctrls->repeat_interval = 25;
+    desc->ctrls->num_groups      = 1;
+    return Success;
+}
+
+Bool XkbSelectEvents(Display *dpy, unsigned int deviceSpec,
+                     unsigned int affect, unsigned int values)
+{
+    (void)dpy; (void)deviceSpec; (void)affect; (void)values;
+    /* Accepted.  XKB notifications are not synthesised; core key events carry
+     * the modifier state. */
+    return True;
+}
+
+Bool XkbSelectEventDetails(Display *dpy, unsigned int deviceSpec,
+                           unsigned int eventType, unsigned long affect,
+                           unsigned long details)
+{
+    (void)dpy; (void)deviceSpec; (void)eventType; (void)affect; (void)details;
+    return True;
+}
+
+Bool XkbSetDetectableAutoRepeat(Display *dpy, Bool detectable,
+                                Bool *supported_rtrn)
+{
+    (void)dpy; (void)detectable;
+    /* The shim already reports press/release pairs and do/do-not-repeat via
+     * the core protocol, so detectable autorepeat is supported. */
+    if (supported_rtrn) *supported_rtrn = True;
+    return True;
+}
+
+void XkbFreeKeyboard(XkbDescPtr xkb, unsigned int which, Bool freeDesc)
+{
+    (void)which;
+    if (!xkb) return;
+    if (xkb->map) {
+        free(xkb->map->types);
+        free(xkb->map->syms);
+        free(xkb->map->key_sym_map);
+        free(xkb->map->modmap);
+        free(xkb->map);
+    }
+    if (xkb->server) {
+        free(xkb->server->acts);
+        free(xkb->server->behaviors);
+        free(xkb->server->key_acts);
+        free(xkb->server->explicit);
+        free(xkb->server->vmodmap);
+        free(xkb->server);
+    }
+    if (xkb->names) {
+        free(xkb->names->keys);
+        free(xkb->names->key_aliases);
+        free(xkb->names->radio_groups);
+        free(xkb->names);
+    }
+    free(xkb->compat);
+    free(xkb->indicators);
+    free(xkb->ctrls);
+    free(xkb->geom);
+    if (freeDesc) free(xkb);
+}

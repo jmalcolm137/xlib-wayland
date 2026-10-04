@@ -159,6 +159,31 @@ XImage *XGetImage(Display *d, Drawable dr, int x, int y,
     return img;
 }
 
+/* XGetSubImage is XGetImage blitted into a caller-supplied XImage at
+ * (dest_x,dest_y): any part that falls outside the destination is clipped, and
+ * the destination image is returned.  GDK reaches it through its image path. */
+XImage *XGetSubImage(Display *d, Drawable dr, int x, int y,
+                     unsigned int width, unsigned int height,
+                     unsigned long plane_mask, int format,
+                     XImage *dest_image, int dest_x, int dest_y)
+{
+    if (!dest_image) return NULL;
+    XImage *src = XGetImage(d, dr, x, y, width, height, plane_mask, format);
+    if (!src) return NULL;
+    for (unsigned int j = 0; j < height; j++) {
+        for (unsigned int i = 0; i < width; i++) {
+            int dx = dest_x + (int)i;
+            int dy = dest_y + (int)j;
+            if (dx < 0 || dy < 0 ||
+                dx >= dest_image->width || dy >= dest_image->height)
+                continue;
+            img_put_pixel(dest_image, dx, dy, img_get_pixel(src, (int)i, (int)j));
+        }
+    }
+    XDestroyImage(src);
+    return dest_image;
+}
+
 int XPutImage(Display *d, Drawable dr, GC gc, XImage *img,
               int src_x, int src_y, int dest_x, int dest_y,
               unsigned int width, unsigned int height)

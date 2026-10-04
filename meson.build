@@ -71,9 +71,15 @@ libx11 = shared_library('X11',
   install: true)
 
 pkg = import('pkgconfig')
+# The .pc versions are what consumers' configure scripts compare against.
+# Xlib's real ABI/version is 1.x; many builds require `x11` and check nothing
+# more, but reporting the project version (0.1.0) misleads version-gated checks
+# and tools that display it.  Report the Xlib version we are ABI-compatible
+# with.
 pkg.generate(libx11,
   name: 'x11',
   filebase: 'x11',
+  version: '1.8.13',
   description: 'Xlib API implemented on Wayland (Motif/Wayland)',
   subdirs: 'X11')
 
@@ -91,9 +97,12 @@ libxft = shared_library('Xft',
   soversion: '2',
   install: true)
 
+# libXft's real version line is 2.3.x; GTK2 requires `xft >= 2.0.0`, so a
+# .pc version of 0.1.0 (the project version) fails its configure outright.
 pkg.generate(libxft,
   name: 'xft',
   filebase: 'xft',
+  version: '2.3.6',
   description: 'Xft over the Motif/Wayland raster font path',
   requires: 'x11',
   subdirs: 'X11')
