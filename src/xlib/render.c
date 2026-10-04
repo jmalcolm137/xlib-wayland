@@ -72,7 +72,8 @@ typedef struct {
     XID        id;
     int        format;
     MwSurface **glyphs;          /* by glyph id */
-    int        *gw, *gh, *gx, *gy;   /* bitmap size + xOff/yOff */
+    int        *gw, *gh, *gx, *gy;   /* bitmap size + xOff/yOff (advance) */
+    int        *gox, *goy;           /* xGlyphInfo.x/y: pen-to-bitmap bearing */
     int         cap;
 } MwGlyphSet;
 
@@ -208,7 +209,9 @@ static void set_source(Display *d, cairo_t *cr, MwRenderPicture *src,
     cairo_pattern_t *pat = cairo_pattern_create_for_surface(cs);
     if (!pat) return;
     cairo_matrix_t m;
-    cairo_matrix_init_translate(&m, dx - xs, dy - ys);
+    /* Place source pixel (xs,ys) at destination (dx,dy): the pattern matrix
+     * maps user space to pattern space, so it translates by (xs-dx, ys-dy). */
+    cairo_matrix_init_translate(&m, xs - dx, ys - dy);
     if (src->have_transform) {
         cairo_matrix_t t;
         xf_matrix(&t, &src->xf);
@@ -241,6 +244,12 @@ static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
                          int xd, int yd, int w, int h)
 {
     if (!dst || w <= 0 || h <= 0) return;
+    if (getenv("MW_TRACE_RENDER"))
+        fprintf(stderr, "MW: composite op=%d src=0x%lx(k%d drw=0x%lx fmt=%d) mask=%s op=%d "
+                        "src=%d,%d mask=%d,%d dst=%d,%d %dx%d\n",
+                op, src ? src->id : 0, src ? src->kind : -1,
+                src ? (unsigned long)src->drawable : 0, src ? src->format : -1,
+                mask ? "yes" : "no", op, xs, ys, xm, ym, xd, yd, w, h);
     MwSurface *ds = pic_surface(d, dst);
     cairo_surface_t *dcs = ds ? mw_surface_native(ds) : NULL;
     if (!dcs) return;
@@ -263,7 +272,7 @@ static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
             cairo_pattern_t *mp = cairo_pattern_create_for_surface(mcs);
             if (mp) {
                 cairo_matrix_t mm;
-                cairo_matrix_init_translate(&mm, xd - xm, yd - ym);
+                cairo_matrix_init_translate(&mm, xm - xd, ym - yd);
                 cairo_pattern_set_matrix(mp, &mm);
                 cairo_pattern_set_extend(mp, cairo_extend(mask->repeat));
                 cairo_pattern_set_filter(mp, cairo_filter(mask->filter));
@@ -362,8 +371,11 @@ static void glyphset_reserve(MwGlyphSet *gs, int gid)
     gs->gh = realloc(gs->gh, sizeof(int) * ncap);
     gs->gx = realloc(gs->gx, sizeof(int) * ncap);
     gs->gy = realloc(gs->gy, sizeof(int) * ncap);
+    gs->gox = realloc(gs->gox, sizeof(int) * ncap);
+    gs->goy = realloc(gs->goy, sizeof(int) * ncap);
     for (int i = gs->cap; i < ncap; i++) {
-        gs->glyphs[i] = NULL; gs->gw[i] = gs->gh[i] = gs->gx[i] = gs->gy[i] = 0;
+        gs->glyphs[i] = NULL; gs->gw[i] = gs->gh[i] = 0;
+        gs->gx[i] = gs->gy[i] = gs->gox[i] = gs->goy[i] = 0;
     }
     gs->cap = ncap;
 }
@@ -390,6 +402,12 @@ static MwSurface *glyph_surface(const unsigned char *data, size_t avail,
         }
     }
     mw_surface_mark_dirty(s);
+    if (getenv("MW_DUMP_GLYPHS")) {
+        static int n = 0;
+        char path[128];
+        snprintf(path, sizeof path, "/tmp/opencode/glyphs/g-%dx%d-%03d.png", w, h, n++);
+        mw_surface_write_png(s, path);
+    }
     return s;
 }
 
@@ -398,7 +416,8 @@ static void free_glyphset(Display *d, MwGlyphSet *gs)
     if (!gs) return;
     for (int i = 0; i < gs->cap; i++)
         if (gs->glyphs[i]) mw_surface_destroy(gs->glyphs[i]);
-    free(gs->glyphs); free(gs->gw); free(gs->gh); free(gs->gx); free(gs->gy);
+    free(gs->glyphs); free(gs->gw); free(gs->gh);
+    free(gs->gx); free(gs->gy); free(gs->gox); free(gs->goy);
     mw_unregister(d, gs->id);
     free(gs);
 }
@@ -623,12 +642,14 @@ static void req_add_glyphs(Display *d, const unsigned char *b, size_t len)
         glyphset_reserve(gs, (int)gid);
         if (gs->glyphs[gid]) { mw_surface_destroy(gs->glyphs[gid]); }
         if (getenv("MW_TRACE_RENDER") && i == 0)
-            fprintf(stderr, "MW: addglyph gid=%u w=%u h=%u xOff=%d yOff=%d d0=%d\n",
+            fprintf(stderr, "MW: addglyph gid=%u w=%u h=%u x=%d y=%d xOff=%d yOff=%d d0=%d\n",
                     (unsigned)gid, info.width, info.height,
+                    (int)info.x, (int)info.y,
                     (int)info.xOff, (int)info.yOff, p[0]);
         gs->glyphs[gid] = glyph_surface(p, need, info.width, info.height, depth1);
         gs->gw[gid] = info.width; gs->gh[gid] = info.height;
-        gs->gx[gid] = info.xOff; gs->gy[gid] = info.yOff;
+        gs->gx[gid] = info.xOff; gs->gy[gid] = info.yOff;   /* advance */
+        gs->gox[gid] = info.x; gs->goy[gid] = info.y;       /* bearing */
         p += need;
     }
 }
@@ -641,16 +662,11 @@ static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     if (gid < 0 || gid >= gs->cap || !gs->glyphs[gid]) return;
     MwSurface *mask = gs->glyphs[gid];
     int w = gs->gw[gid], h = gs->gh[gid];
-    if (getenv("MW_TRACE_RENDER"))
-        fprintf(stderr, "MW: glyphdst drawable=0x%lx kind=%d win=%p pm=%p\n",
-                (unsigned long)dst->drawable, dst->kind,
-                (void *)mw_window(d, dst->drawable),
-                (void *)mw_pixmap(d, dst->drawable));
-    if (getenv("MW_TRACE_RENDER"))
-        fprintf(stderr, "MW: drawglyph gid=%d at %d,%d w=%d h=%d off=%d,%d srckind=%d color=%04x%04x%04x%04x\n",
-                gid, x, y, w, h, gs->gx[gid], gs->gy[gid], src ? src->kind : -1,
-                src ? src->color.red : 0, src ? src->color.green : 0,
-                src ? src->color.blue : 0, src ? src->color.alpha : 0);
+    /* The pen (x,y) is the glyph origin; the bitmap's top-left sits at the
+     * glyph's stored bearing (xGlyphInfo.x/y), exactly as the X server
+     * composites it (destination = pen - info). */
+    int bx = x - gs->gox[gid];
+    int by = y - gs->goy[gid];
     /* Decode mask onto the destination directly (cairo mask pattern needs a
      * drawable; a glyph mask is an in-memory surface, so composite it here). */
     MwSurface *ds = pic_surface(d, dst);
@@ -659,26 +675,13 @@ static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_t *cr = cairo_create(dcs);
     cairo_save(cr);
     cairo_set_operator(cr, cairo_op(op));
-    cairo_rectangle(cr, x, y, w, h);
+    cairo_rectangle(cr, bx, by, w, h);
     cairo_clip(cr);
     apply_dst_clip(cr, dst);
-    set_source(d, cr, src, x, y, x, y);
-    cairo_mask_surface(cr, mw_surface_native(mask), x, y);
+    set_source(d, cr, src, bx, by, bx, by);
+    cairo_mask_surface(cr, mw_surface_native(mask), bx, by);
     cairo_restore(cr);
     cairo_destroy(cr);
-    if (getenv("MW_DUMP_GLYPH")) {
-        cairo_surface_flush(dcs);
-        mw_surface_write_png(ds, "/tmp/opencode/ds.png");
-    }
-    if (getenv("MW_TRACE_RENDER")) {
-        int sx = x - gs->gx[gid] + w / 2, sy = y - gs->gy[gid] + h / 2;
-        uint32_t *px = mw_surface_data(ds);
-        int st = mw_surface_stride(ds) / 4;
-        int dw = mw_surface_width(ds), dh = mw_surface_height(ds);
-        if (px && sx >= 0 && sy >= 0 && sx < dw && sy < dh)
-            fprintf(stderr, "MW: glyph pixel at %d,%d = %08x\n",
-                    sx, sy, px[(size_t)sy * st + sx]);
-    }
     mw_surface_mark_dirty(ds);
     MwWindow *win = pic_window(d, dst);
     if (win) mw_window_damage(win);
@@ -694,30 +697,33 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
     MwGlyphSet *gs = glyphset(d, r->glyphset);
     if (!dst || !src || !gs) return;
 
-    const unsigned char *p = b + 28;   /* after the 28-byte fixed header */
+    const unsigned char *p = b + sz_xRenderCompositeGlyphs8Req;   /* 28-byte header */
     const unsigned char *end = b + len;
-    int pen_x = r->xSrc, pen_y = r->ySrc;
-    int first = 1;
+    /* The X server accumulates the pen from the picture origin: each element
+     * adds its (deltax,deltay), then each glyph adds its stored advance; each
+     * element's glyph data is padded to a 4-byte boundary. */
+    int pen_x = 0, pen_y = 0;
     int total = 0;
-    while (p < end) {
-        if (p + 8 > end) break;
+    while (p + sz_xGlyphElt <= end) {
         xGlyphElt elt;
-        memcpy(&elt, p, 8);
-        p += 8;
-        int count = elt.len;
-        if (count == 255) {
+        memcpy(&elt, p, sz_xGlyphElt);
+        p += sz_xGlyphElt;
+        if (elt.len == 0xff) {
+            /* glyphset-change marker: a 4-byte glyphset id follows, no glyphs */
             if (p + 4 > end) break;
-            memcpy(&count, p, 4);
+            XID ng = 0;
+            memcpy(&ng, p, 4);
             p += 4;
+            MwGlyphSet *ngs = glyphset(d, ng);
+            if (ngs) gs = ngs;
+            continue;
         }
+        int count = elt.len;
         size_t need = (size_t)count * glyph_bytes;
+        size_t padded = (need + 3) & ~(size_t)3;
         if (p + need > end) break;
-        /* xSrc already includes the first element's deltax; later elements add
-         * theirs to the running pen position (cairo encodes kerning/space as a
-         * new element with a nonzero delta). */
-        int px = first ? pen_x : pen_x + elt.deltax;
-        int py = first ? pen_y : pen_y + elt.deltay;
-        first = 0;
+        int px = pen_x + elt.deltax;
+        int py = pen_y + elt.deltay;
         if (getenv("MW_TRACE_RENDER"))
             fprintf(stderr, "MW: glyph elt len=%d dx=%d dy=%d start=%d,%d\n",
                     count, (int)elt.deltax, (int)elt.deltay, px, py);
@@ -732,15 +738,12 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
             if (gid < (CARD32)gs->cap) {
                 px += gs->gx[gid];
                 py += gs->gy[gid];
-            } else {
-                px += elt.deltax;
-                py += elt.deltay;
             }
             total++;
         }
         pen_x = px;
         pen_y = py;
-        p += need;
+        p += padded;
     }
     if (getenv("MW_TRACE_RENDER"))
         fprintf(stderr, "MW: glyph run total=%d op=%d end=%d,%d\n", total, r->op, pen_x, pen_y);
