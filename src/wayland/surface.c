@@ -295,6 +295,29 @@ static bool mw_motif_undecorated(Display *d, Window id)
     return (flags & MWM_HINTS_DECORATIONS) && decorations == 0;
 }
 
+/* True if the client disabled resizing through _MOTIF_WM_HINTS functions.
+ * Motif's MWM_FUNC_ALL means the listed bits are the functions to *remove*;
+ * without it the bits are the functions that are *present*. */
+#define MWM_HINTS_FUNCTIONS (1u << 0)
+#define MWM_FUNC_ALL        (1u << 0)
+#define MWM_FUNC_RESIZE     (1u << 1)
+static bool mw_motif_no_resize(Display *d, Window id)
+{
+    MwProp *p = mw_get_prop(d, mw_window(d, id),
+                            mw_intern_atom(d, "_MOTIF_WM_HINTS", False));
+    if (!p || p->format != 32 || p->nitems < 2 || !p->data)
+        return false;
+    uint32_t flags, functions;
+    memcpy(&flags, p->data, 4);
+    memcpy(&functions, p->data + 4, 4);
+    if (!(flags & MWM_HINTS_FUNCTIONS))
+        return false;
+    if (functions == 0)
+        return false;
+    uint32_t present = (functions & MWM_FUNC_ALL) ? ~functions : functions;
+    return (present & MWM_FUNC_RESIZE) == 0;
+}
+
 static void deco_configure(void *data, struct zxdg_toplevel_decoration_v1 *d,
                            uint32_t mode)
 {
@@ -499,6 +522,13 @@ void mw_toplevel_create(MwWindow *win)
                 xdg_toplevel_set_max_size(tl->xdg_toplevel, h.max_width,
                                           h.max_height);
         }
+    }
+
+    /* A window whose _MOTIF_WM_HINTS functions drop RESIZE is fixed-size even
+     * if it supplied no size hints; pin min == max to its current size. */
+    if (mw_motif_no_resize(d, win->id)) {
+        xdg_toplevel_set_min_size(tl->xdg_toplevel, w, h);
+        xdg_toplevel_set_max_size(tl->xdg_toplevel, w, h);
     }
 
     /* A Motif client that set _MOTIF_WM_HINTS decorations=0 wants no chrome at
