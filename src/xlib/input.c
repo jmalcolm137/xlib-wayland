@@ -400,6 +400,7 @@ static void ptr_enter(void *data, struct wl_pointer *p, uint32_t serial,
         en.mode = NotifyNormal; en.detail = NotifyAncestor;
         deliver(d, deep, (XEvent *)&en, EnterWindowMask);
     }
+    mw_pointer_update_cursor(d, deep);
 }
 
 static void ptr_leave(void *data, struct wl_pointer *p, uint32_t serial,
@@ -490,6 +491,7 @@ static void ptr_motion(void *data, struct wl_pointer *p, uint32_t time,
      * button and motion events, handled below.)  Note ptr_focus was updated
      * unconditionally further down regardless of grab state, so deriving the
      * crossing events the same way keeps the two consistent. */
+    bool hover_changed = (deep != dp->ptr_focus);
     if (deep && deep != dp->ptr_focus) {
         if (dp->ptr_focus)
             crossing(d, dp->ptr_focus, LeaveNotify, NotifyNormal, NotifyNonlinear, rx, ry);
@@ -497,6 +499,8 @@ static void ptr_motion(void *data, struct wl_pointer *p, uint32_t time,
         crossing(d, deep, EnterNotify, NotifyNormal, NotifyNonlinear, rx, ry);
     }
     if (deep) dp->ptr_focus = deep;
+    /* Cursor inheritance follows the window under the pointer. */
+    if (hover_changed) mw_pointer_update_cursor(d, deep);
 
     /* A grab whose window has gone away is no grab at all; without this the
      * events would be dropped and the client would look frozen. */

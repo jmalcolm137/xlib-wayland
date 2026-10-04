@@ -720,6 +720,9 @@ void mw_pointer_motion(Display *d, int x, int y);
 void mw_pointer_button(Display *d, uint32_t button, uint32_t state);
 void mw_pointer_frame(Display *d);
 void mw_set_pointer_cursor(Display *d, Cursor c);
+/* Apply the cursor of the window (or nearest ancestor) under the pointer.
+ * Called as the pointer moves, like the server's cursor inheritance. */
+void mw_pointer_update_cursor(Display *d, MwWindow *w);
 void mw_pointer_enter(Display *d, MwWindow *top, int x, int y);
 void mw_pointer_leave(Display *d, MwWindow *top);
 

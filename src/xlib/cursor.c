@@ -170,3 +170,17 @@ void mw_set_pointer_cursor(Display *d, Cursor cursor)
 {
     apply_cursor(d, mw_cursor(d, cursor));
 }
+
+/* Apply the cursor of the window under the pointer, or of its nearest ancestor
+ * that has one.  X applies a window's cursor whenever the pointer is inside it,
+ * so this has to be re-evaluated as the pointer moves; the shim previously only
+ * applied a cursor when the client called XDefineCursor, so a pointer moving
+ * from one widget to another kept the first widget's cursor. */
+void mw_pointer_update_cursor(Display *d, MwWindow *w)
+{
+    MwCursor *c = NULL;
+    for (MwWindow *n = w; n; n = n->parent) {
+        if (n->cursor != None) { c = mw_cursor(d, n->cursor); break; }
+    }
+    apply_cursor(d, c);
+}

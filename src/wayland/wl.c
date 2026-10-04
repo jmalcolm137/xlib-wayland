@@ -113,7 +113,14 @@ int mw_wl_connect(XDisplayImpl *dp, const char *name)
 
     dp->wl_registry = wl_display_get_registry(disp);
     wl_registry_add_listener(dp->wl_registry, &registry_listener, (Display *)dp);
-    wl_display_roundtrip(disp);
+    wl_display_roundtrip(disp);   /* discover globals; queue the binds */
+
+    /* Attach the output listener before the roundtrip that flushes the binds:
+     * the compositor sends the geometry/mode events in response to the bind,
+     * and adding the listener afterwards would miss them, leaving the screen
+     * size at the default (so windows were sized for the wrong display). */
+    if (dp->wl_output)
+        wl_output_add_listener(dp->wl_output, &output_listener, (Display *)dp);
     wl_display_roundtrip(disp);   /* second pass for output modes etc. */
 
     if (!dp->wl_compositor || !dp->wl_shm || !dp->wm_base) {
@@ -122,11 +129,6 @@ int mw_wl_connect(XDisplayImpl *dp, const char *name)
         return -1;
     }
     xdg_wm_base_add_listener(dp->wm_base, &wm_base_listener, (Display *)dp);
-
-    if (dp->wl_output) {
-        wl_output_add_listener(dp->wl_output, &output_listener, (Display *)dp);
-        wl_display_roundtrip(disp);
-    }
 
     /* Start the fd-wakeup helper now that the connection is live (no-op if it
      * cannot be created; XConnectionNumber then falls back to the Wayland fd). */
