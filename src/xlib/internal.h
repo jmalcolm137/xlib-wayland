@@ -208,9 +208,11 @@ typedef struct MwWlSource {
 
 /* An in-flight transfer of clipboard data *from* Wayland *to* an X client:
  * the offer's data arrives asynchronously on a pipe and becomes a
- * SelectionNotify once complete. */
+ * SelectionNotify once complete.  The same machinery carries a drag's dropped
+ * bytes (is_dnd), which are handed to the Motif DnD bridge instead. */
 typedef struct MwClipFetch {
     bool           active;
+    bool           is_dnd;       /* a drag drop rather than a clipboard paste */
     int            fd;           /* read end of the pipe, -1 when none */
     unsigned char *data;
     size_t         len, cap;
@@ -452,6 +454,21 @@ typedef struct _XDisplayImpl {
     Window                       sm_window;       /* proxy for the SM window */
     MwClipFetch                  clip_fetch;
     MwClipServe                  clip_serve;
+
+    /* Wayland drag-and-drop transport (clipboard.c).  A drag is not a
+     * selection: the compositor delivers it with data_offer + enter/motion/leave
+     * /drop, so it is tracked separately from the clipboard. */
+    MwWlOffer                   *drag_offer;     /* offer for an incoming drag */
+    struct wl_surface           *drag_surface;   /* surface the drag is over */
+    double                       drag_x, drag_y; /* position within that surface */
+    bool                         drag_active;    /* a drag is over one of ours */
+    uint32_t                     drag_serial;    /* serial of the enter */
+    Window                       drag_window;    /* X toplevel it is over */
+    struct wl_data_source       *dnd_src;        /* our active drag source, or NULL */
+    Atom                         dnd_src_sel;    /* X selection it is serving */
+
+    /* Motif DnD bridge (xlib/dnd.c); opaque here. */
+    struct MwDnd                *dnd;
 
     int                         output_w, output_h;   /* logical size, pixels */
     int                         output_pw, output_ph; /* physical size, mm */
@@ -900,6 +917,39 @@ bool      mw_smprop_lookup(Display *d, Atom prop, Atom *type, int *format,
 bool      mw_smprop_is_shared(Display *d, Atom prop);
 /* Hidden local window standing in for the session manager's window. */
 Window    mw_smprop_proxy_window(Display *d);
+
+
+/* ---------------------------------------------------------- Motif DnD bridge
+ *
+ * Motif drag-and-drop is an X protocol: drop sites advertise
+ * `_MOTIF_DRAG_RECEIVER_INFO`, the initiator and receiver exchange
+ * `_MOTIF_DRAG_AND_DROP_MESSAGE` ClientMessages, and the data moves over a
+ * dynamically-named selection (the initiator's "icc handle", `_MOTIF_ATOM_n`).
+ * None of that crosses between shim processes, so xlib/dnd.c bridges it onto
+ * the Wayland data device: the compositor routes the drag (it alone knows the
+ * pointer and the surfaces) and the bridge speaks the Motif half in each
+ * process.  See dnd.c. */
+void      mw_dnd_init(Display *d);
+void      mw_dnd_fini(Display *d);
+/* Wayland: a drag entered / moved over / left one of our surfaces. */
+void      mw_dnd_wl_enter(Display *d, struct wl_surface *s, double x, double y,
+                          const char *mime);
+void      mw_dnd_wl_motion(Display *d, double x, double y);
+void      mw_dnd_wl_leave(Display *d);
+/* The dropped bytes arrived; deliver them to the drop site under the drag. */
+void      mw_dnd_wl_drop(Display *d, const unsigned char *data, size_t len);
+/* Answer a convert for the synthetic initiator selection we own. */
+bool      mw_dnd_xconvert(Display *d, Atom selection, Atom target, Atom property,
+                          Window requestor, Time time);
+/* An X client wrote _MOTIF_DRAG_INITIATOR_INFO: a Motif drag has started. */
+void      mw_dnd_initiator_info(Display *d, Window src, Atom icc, int format,
+                                const unsigned char *data, unsigned long nitems);
+/* Whether `w` is a window this bridge created (so XSendEvent etc. treat it as
+ * internal). */
+bool      mw_dnd_owns_window(Display *d, Window w);
+/* Produce the bytes a Wayland drag source asked for, by converting the X
+ * selection of the in-progress Motif drag.  Returns true if queued. */
+bool      mw_dnd_source_send(Display *d, const char *mime, int fd);
 
 
 /* cursor (cursor.c) */

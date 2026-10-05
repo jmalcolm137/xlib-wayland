@@ -32,6 +32,21 @@
 #define CLIP_FETCH_TIMEOUT_MS 3000
 #define CLIP_SERVE_TIMEOUT_MS 5000
 
+/* The X toplevel whose surface this is, or NULL.  (There is no reverse map on
+ * the toplevel; the object table is small enough to scan.) */
+static MwWindow *drag_window_for_surface(Display *d, struct wl_surface *s)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (!dp->table || !s) return NULL;
+    for (size_t i = 0; i < dp->table_cap; i++) {
+        if (dp->table[i].id && dp->table[i].kind == MW_OBJ_WINDOW) {
+            MwWindow *w = dp->table[i].obj;
+            if (w && w->tl && w->tl->surface == s) return w;
+        }
+    }
+    return NULL;
+}
+
 /* CLIPBOARD is not one of the predefined atoms (those stop at WM_TRANSIENT_FOR),
  * so it has to be interned like any other name. */
 static Atom clipboard_atom(Display *d)
@@ -162,9 +177,26 @@ static void offer_mime(void *data, struct wl_data_offer *offer, const char *mime
     }
 }
 
+static void dnd_offer_source_actions(void *data, struct wl_data_offer *offer,
+                                     uint32_t actions)
+{
+    (void)data; (void)offer; (void)actions;
+    /* The source's allowed actions (v3).  We accept whatever it offers. */
+}
+
+static void dnd_offer_action(void *data, struct wl_data_offer *offer,
+                             uint32_t action)
+{
+    (void)data; (void)offer; (void)action;
+    /* The action the compositor selected; only copy matters to us. */
+}
+
 static const struct wl_data_offer_listener offer_listener = {
     .offer = offer_mime,
-    /* v3 source/dnd actions: not used for clipboard. */
+    /* v3 handlers must exist or libwayland aborts the client when a drag
+     * offer arrives (River sends source_actions). */
+    .source_actions = dnd_offer_source_actions,
+    .action = dnd_offer_action,
 };
 
 /* ------------------------------------------------------------- wl source */
@@ -318,14 +350,118 @@ static void dd_selection(void *data, struct wl_data_device *dd, struct wl_data_o
 static void dd_enter(void *data, struct wl_data_device *dd, uint32_t serial,
                      struct wl_surface *s, wl_fixed_t x, wl_fixed_t y,
                      struct wl_data_offer *offer)
-{ (void)data;(void)dd;(void)serial;(void)s;(void)x;(void)y;(void)offer; }
+{
+    Display *d = data;
+    XDisplayImpl *dp = MWD(d);
+    (void)dd;
+
+    /* A drag (not a clipboard selection) entered one of our surfaces.  The
+     * compositor sends data_offer first, so claim it from pending_offer. */
+    MwWlOffer *o = NULL;
+    if (dp->pending_offer && dp->pending_offer->offer == offer) {
+        o = dp->pending_offer;
+        dp->pending_offer = NULL;
+    } else {
+        o = calloc(1, sizeof *o);
+        o->offer = offer;
+        o->d = d;
+        wl_data_offer_add_listener(offer, &offer_listener, o);
+    }
+    offer_free(dp->drag_offer);
+    dp->drag_offer = o;
+    dp->drag_serial = serial;
+    dp->drag_surface = s;
+    dp->drag_x = wl_fixed_to_double(x);
+    dp->drag_y = wl_fixed_to_double(y);
+    dp->drag_active = true;
+    MwWindow *w = drag_window_for_surface(d, s);
+    dp->drag_window = w ? w->id : None;
+
+    /* Tell the compositor which type we would take and that we are a copy
+     * target, so it keeps sending motion and a drop. */
+    if (o->mime) wl_data_offer_accept(offer, serial, o->mime);
+    if (wl_proxy_get_version((struct wl_proxy *)offer) >= 3)
+        wl_data_offer_set_actions(offer,
+            WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
+            WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE,
+            WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+    wl_display_flush(dp->wl_display);
+
+    mw_dnd_wl_enter(d, s, wl_fixed_to_double(x), wl_fixed_to_double(y),
+                    o->mime);
+}
+
 static void dd_leave(void *data, struct wl_data_device *dd)
-{ (void)data;(void)dd; }
-static void dd_motion(void *data, struct wl_data_device *dd, uint32_t t,
+{
+    (void)dd;
+    Display *d = data;
+    XDisplayImpl *dp = MWD(d);
+    if (!dp->drag_active) return;
+    dp->drag_active = false;
+    dp->drag_surface = NULL;
+    dp->drag_window = None;
+    offer_free(dp->drag_offer);
+    dp->drag_offer = NULL;
+    /* The compositor sends leave right after drop, but the dropped bytes are
+     * still arriving on the pipe.  Keep the Motif drop open until they do. */
+    if (!(dp->clip_fetch.active && dp->clip_fetch.is_dnd))
+        mw_dnd_wl_leave(d);
+}
+
+static void dd_motion(void *data, struct wl_data_device *dd, uint32_t time,
                       wl_fixed_t x, wl_fixed_t y)
-{ (void)data;(void)dd;(void)t;(void)x;(void)y; }
+{
+    (void)dd; (void)time;
+    Display *d = data;
+    XDisplayImpl *dp = MWD(d);
+    if (!dp->drag_active) return;
+    dp->drag_x = wl_fixed_to_double(x);
+    dp->drag_y = wl_fixed_to_double(y);
+    if (dp->drag_offer && dp->drag_offer->mime)
+        wl_data_offer_accept(dp->drag_offer->offer, dp->drag_serial,
+                             dp->drag_offer->mime);
+    mw_dnd_wl_motion(d, dp->drag_x, dp->drag_y);
+}
+
 static void dd_drop(void *data, struct wl_data_device *dd)
-{ (void)data;(void)dd; }
+{
+    (void)dd;
+    Display *d = data;
+    XDisplayImpl *dp = MWD(d);
+    if (!dp->drag_active || !dp->drag_offer || !dp->drag_offer->mime) {
+        if (dp->drag_offer && wl_proxy_get_version((struct wl_proxy *)dp->drag_offer->offer) >= 3)
+            wl_data_offer_finish(dp->drag_offer->offer);
+        dd_leave(data, dd);
+        return;
+    }
+
+    /* Fetch the dropped bytes on a pipe, exactly as a clipboard paste does. */
+    if (dp->clip_fetch.active) { dd_leave(data, dd); return; }
+    int fds[2];
+    if (pipe(fds) != 0) { dd_leave(data, dd); return; }
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+
+    wl_data_offer_receive(dp->drag_offer->offer, dp->drag_offer->mime, fds[1]);
+    close(fds[1]);
+    if (wl_proxy_get_version((struct wl_proxy *)dp->drag_offer->offer) >= 3)
+        wl_data_offer_finish(dp->drag_offer->offer);
+    wl_display_flush(dp->wl_display);
+
+    MwClipFetch *f = &dp->clip_fetch;
+    f->active = true;
+    f->is_dnd = true;
+    f->fd = fds[0];
+    f->data = NULL;
+    f->len = f->cap = 0;
+    f->selection = None;
+    f->target = None;
+    f->property = None;
+    f->requestor = None;
+    f->time = CurrentTime;
+    f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
+}
 
 static const struct wl_data_device_listener device_listener = {
     .data_offer = dd_data_offer,
@@ -342,18 +478,20 @@ void mw_clipboard_init(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
     dp->clip_fetch.fd = -1;
+    dp->clip_fetch.is_dnd = false;
     dp->clip_serve.fd = -1;
 
     if (dp->dnd_mgr && dp->wl_seat && !dp->data_device) {
         dp->data_device = wl_data_device_manager_get_data_device(dp->dnd_mgr, dp->wl_seat);
         wl_data_device_add_listener(dp->data_device, &device_listener, d);
     }
-
+    mw_dnd_init(d);
 }
 
 void mw_clipboard_fini(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
+    mw_dnd_fini(d);
     if (dp->clip_fetch.active) {
         if (dp->clip_fetch.fd >= 0) close(dp->clip_fetch.fd);
         free(dp->clip_fetch.data);
@@ -367,7 +505,8 @@ void mw_clipboard_fini(Display *d)
     }
     offer_free(dp->wayland_offer);
     offer_free(dp->pending_offer);
-    dp->wayland_offer = dp->pending_offer = NULL;
+    offer_free(dp->drag_offer);
+    dp->wayland_offer = dp->pending_offer = dp->drag_offer = NULL;
     while (dp->wl_sources) {
         MwWlSource *s = dp->wl_sources;
         dp->wl_sources = s->next;
@@ -395,6 +534,20 @@ static void fetch_finish(Display *d)
     size_t outlen = f->len;
     unsigned char *conv = NULL;
     Atom type = f->target;
+
+    if (f->is_dnd) {
+        /* A dropped drag: hand the bytes to the Motif DnD bridge, which
+         * delivers them to the drop site under the drag. */
+        if (f->fd >= 0) close(f->fd);
+        f->fd = -1;
+        mw_dnd_wl_drop(d, out, outlen);
+        free(f->data);
+        f->data = NULL;
+        f->len = f->cap = 0;
+        f->active = false;
+        f->is_dnd = false;
+        return;
+    }
 
     if (f->target == XA_STRING) {
         /* The offer's bytes are UTF-8; the requestor asked for STRING. */
@@ -486,6 +639,7 @@ bool mw_clipboard_xconvert(Display *d, Atom selection, Atom target,
 
     MwClipFetch *f = &dp->clip_fetch;
     f->active = true;
+    f->is_dnd = false;
     f->fd = fds[0];
     f->data = NULL;
     f->len = f->cap = 0;

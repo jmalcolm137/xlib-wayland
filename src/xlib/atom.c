@@ -358,6 +358,11 @@ int XChangeProperty(Display *d, Window w, Atom property, Atom type, int format,
     /* Republish session-manager properties so other shim processes can read
      * them (they have their own X servers). */
     mw_smprop_publish(d, property, type, format, data, (unsigned long)nelements);
+    /* A Motif drag initiator writes _MOTIF_DRAG_INITIATOR_INFO (with the icc
+     * handle as the property name) when a drag starts; that is how the bridge
+     * learns a local drag is in progress. */
+    if (type == mw_intern_atom(d, "_MOTIF_DRAG_INITIATOR_INFO", True))
+        mw_dnd_initiator_info(d, w, property, format, data, (unsigned long)nelements);
     free(packed);
     prop_notify(d, win, property, PropertyNewValue);
     mw_window_props_changed(d, win, property);

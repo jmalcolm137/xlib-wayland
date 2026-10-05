@@ -81,14 +81,34 @@ int XmbTextPropertyToTextList(Display *d, const XTextProperty *tp, char ***list,
         *count = 0;
         return Success;
     }
-    int n = 0;
-    for (unsigned long i = 0; i < tp->nitems; i++) if (tp->value[i] == 0) n++;
-    if (n == 0) n = 1;
-    char **v = calloc(n + 1, sizeof(char *));
-    int i = 0, start = 0;
-    for (unsigned long k = 0; k < tp->nitems; k++)
-        if (tp->value[k] == 0) { v[i++] = strdup((char *)tp->value + start); start = (int)k + 1; }
-    if (i == 0) v[i++] = strdup("");
+    /* Count the NUL-separated segments.  A STRING property need not be
+     * NUL-terminated: the trailing segment still counts as a string.  Treating
+     * only NUL-terminated data as text made a Motif drop (whose property is
+     * exactly the served bytes, with no trailing NUL) convert to a single
+     * empty string, so the dropped text vanished. */
+    int n = 1;
+    for (unsigned long i = 0; i < tp->nitems; i++)
+        if (tp->value[i] == 0) n++;
+    char **v = calloc((size_t)n + 1, sizeof(char *));
+    if (!v) return 0;
+    int i = 0;
+    unsigned long start = 0;
+    for (unsigned long k = 0; k < tp->nitems; k++) {
+        if (tp->value[k] == 0) {
+            v[i] = malloc(k - start + 1);
+            if (v[i]) { memcpy(v[i], tp->value + start, k - start); v[i][k - start] = 0; }
+            i++;
+            start = k + 1;
+        }
+    }
+    if (start < tp->nitems) {
+        v[i] = malloc(tp->nitems - start + 1);
+        if (v[i]) {
+            memcpy(v[i], tp->value + start, tp->nitems - start);
+            v[i][tp->nitems - start] = 0;
+        }
+        i++;
+    }
     v[i] = NULL;
     *list = v; *count = i;
     return Success;

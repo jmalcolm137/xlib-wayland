@@ -84,6 +84,11 @@ int XConvertSelection(Display *d, Atom selection, Atom target, Atom property,
         mw_put_event(d, (XEvent *)&se);
         return 1;
     }
+    /* A Motif drag's icc handle, standing in for a remote initiator: serve the
+     * dropped bytes to the drop site. */
+    if (owner != None && mw_dnd_owns_window(d, owner) &&
+        mw_dnd_xconvert(d, selection, target, property, requestor, time))
+        return 1;
     MwWindow *owner_win = mw_window(d, owner);
     if (!owner_win) return 0;
     XSelectionRequestEvent re;
