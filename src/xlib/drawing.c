@@ -263,7 +263,26 @@ int XSetGraphicsExposures(Display *d, GC gc, Bool b) { (void)d; gc->graphics_exp
 int XSetDashes(Display *d, GC gc, int dash_offset, _Xconst char *dash_list, int n)
 { (void)d; gc->dash_offset = dash_offset; gc->dashes = n ? dash_list[0] : 0; return 1; }
 int XSetClipOrigin(Display *d, GC gc, int x, int y) { (void)d; gc->clip_x_origin = x; gc->clip_y_origin = y; return 1; }
-int XSetClipMask(Display *d, GC gc, Pixmap p) { (void)d; gc->clip_mask = p; return 1; }
+int XSetClipMask(Display *d, GC gc, Pixmap p)
+{
+    (void)d;
+    gc->clip_mask = p;
+    /* A clip mask (or None, which cairo uses to clear the clip before a
+     * drawing op) replaces any rectangle clip set with XSetClipRectangles.
+     * We do not implement mask clips, so drop the rectangle clip: keeping it
+     * would clip later drawing to a stale box and silently discard pixels.
+     * This was the cause of the GIMP ruler's "missing ticks" trail: cairo
+     * clips the first tile into a scratch pixmap, clears the clip with
+     * XSetClipMask (None), then copies the next tile -- which this stale clip
+     * threw away, so the scratch (later blitted over the ruler) had garbage. */
+    if (gc->has_clip_rects) {
+        free(gc->clip_rects);
+        gc->clip_rects = NULL;
+        gc->nclip = 0;
+        gc->has_clip_rects = false;
+    }
+    return 1;
+}
 
 int XSetClipRectangles(Display *d, GC gc, int clip_x, int clip_y,
                        XRectangle *rects, int n, int ordering)
