@@ -1051,18 +1051,70 @@ Bool XQueryPointer(Display *d, Window w, Window *root, Window *child,
     return True;
 }
 
+/* Move the pointer to an absolute root position and emit the crossing and
+ * motion events a real server sends on a warp.  GDK (and Motif) track the
+ * window under the pointer from EnterNotify; without it a client that warps
+ * and then synthesises a click (gdk_test_simulate_button) never arms the
+ * target, and GTK's client-side-window hit test finds no window. */
+static void ptr_warp(Display *d, int root_x, int root_y)
+{
+    XDisplayImpl *dp = MWD(d);
+    MwWindow *root = mw_window(d, MWSCR(d)->root);
+    if (!root) return;
+    MwWindow *top = NULL;
+    for (MwWindow *c = root->children; c; c = c->next_sib) {
+        if (!c->mapped || !c->tl) continue;
+        int ox, oy;
+        mw_window_origin(c, &ox, &oy);
+        if (root_x >= ox && root_y >= oy &&
+            root_x < ox + c->w && root_y < oy + c->h) { top = c; break; }
+    }
+    if (!top) return;
+    int ox, oy;
+    mw_window_origin(top, &ox, &oy);
+    dp->ptr_toplevel = top;
+    dp->ptr_surf_x = root_x - ox;
+    dp->ptr_surf_y = root_y - oy;
+    int off = top->tl ? mw_toplevel_content_offset(top->tl) : 0;
+    int rx = dp->ptr_surf_x, ry = dp->ptr_surf_y - off;
+    MwWindow *deep = (ry >= 0) ? mw_deepest_at(top, rx, ry, NULL, NULL) : NULL;
+    if (deep != dp->ptr_focus) {
+        if (dp->ptr_focus) {
+            XLeaveWindowEvent le;
+            pt_event(d, dp->ptr_focus, (XEvent *)&le, LeaveNotify, rx, ry,
+                     current_mods(d), NotifyNonlinear, NotifyNormal, 0);
+            le.mode = NotifyNormal; le.detail = NotifyAncestor;
+            deliver(d, dp->ptr_focus, (XEvent *)&le, LeaveWindowMask);
+        }
+        dp->ptr_focus = deep;
+        if (deep) {
+            XEnterWindowEvent en;
+            pt_event(d, deep, (XEvent *)&en, EnterNotify, rx, ry,
+                     current_mods(d), NotifyNonlinear, NotifyNormal, 0);
+            en.mode = NotifyNormal; en.detail = NotifyAncestor;
+            deliver(d, deep, (XEvent *)&en, EnterWindowMask);
+        }
+    }
+    dp->ptr_x = rx; dp->ptr_y = ry;
+    if (deep) {
+        XEvent ev;
+        pt_event(d, deep, &ev, MotionNotify, rx, ry, current_mods(d),
+                 0, NotifyNormal, 0);
+        ev.xmotion.window = deep->id;
+        mw_put_event(d, &ev);
+    }
+    mw_pointer_update_cursor(d, deep);
+}
+
 int XWarpPointer(Display *d, Window src, Window dest, int sx, int sy,
                  unsigned int sw, unsigned int sh, int dx, int dy)
 {
-    (void)src; (void)sy; (void)sw; (void)sh; (void)dx;
-    XDisplayImpl *dp = MWD(d);
+    (void)src; (void)sy; (void)sw; (void)sh;
     MwWindow *w = mw_window(d, dest);
-    if (w && sw == 0 && sh == 0) {
-        int wx, wy;
-        mw_window_origin(w, &wx, &wy);
-        dp->ptr_x = wx + sx;
-        dp->ptr_y = wy + sy;
-    }
+    if (!w) return 1;
+    int wx, wy;
+    mw_window_origin(w, &wx, &wy);
+    ptr_warp(d, wx + dx, wy + dy);
     return 1;
 }
 

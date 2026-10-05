@@ -324,9 +324,12 @@ int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
 int XkbLookupKeySym(Display *d, KeyCode kc, unsigned int state,
                     unsigned int *state_out, KeySym *sym)
 {
-    (void)state;
-    if (state_out) *state_out = 0;
-    if (sym) *sym = mw_keycode_to_keysym(d, kc, 0);
+    /* Honour Shift (and CapsLock, which shifts letters) by selecting the
+     * keymap level, as XkbTranslateKeyCode() does; ignoring the state made a
+     * shifted key report its unshifted keysym (gtk-demo's send-shift-key). */
+    int level = (state & ShiftMask) ? 1 : 0;
+    if (state_out) *state_out = state;
+    if (sym) *sym = mw_keycode_to_keysym(d, kc, level);
     return 1;
 }
 

@@ -236,7 +236,13 @@ int XNextEvent(Display *d, XEvent *event)
             if (g_error_handler) { g_error_handler(d, ee); continue; }
             continue;
         }
-        if (pop_event(d, event)) return 1;
+        if (pop_event(d, event)) {
+            if (getenv("MW_TRACE"))
+                fprintf(stderr, "MW: XNextEvent type=%d win=0x%lx send=%d (to GDK)\n",
+                        event->xany.type, (unsigned long)event->xany.window,
+                        event->xany.send_event);
+            return 1;
+        }
         if (dp->closed) { memset(event, 0, sizeof *event); return 0; }
     }
 }
@@ -507,6 +513,9 @@ Bool XPeekIfEvent(Display *d, XEvent *event, Bool (*pred)(), XPointer arg)
 int XSendEvent(Display *d, Window w, Bool propagate, long event_mask, XEvent *event)
 {
     MwWindow *win = mw_window(d, w);
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: XSendEvent win=0x%lx prop=%d mask=0x%lx type=%d win_valid=%d\n",
+                (unsigned long)w, propagate, event_mask, event->xany.type, win != NULL);
     if (!win) return 0;
     event->xany.send_event = True;
     event->xany.display = d;

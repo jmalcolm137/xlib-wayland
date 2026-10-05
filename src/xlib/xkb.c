@@ -307,15 +307,34 @@ static Status xkb_build_map(Display *dpy, XkbDescPtr xkb, unsigned int deviceSpe
     xkb->map = map;
     map->key_sym_map = calloc((size_t)nkeys, sizeof(XkbSymMapRec));
     map->modmap      = calloc((size_t)nkeys, 1);
-    map->size_types  = 1;
-    map->num_types   = 1;
-    map->types       = calloc(1, sizeof(XkbKeyTypeRec));
+    map->size_types  = 2;
+    map->num_types   = 2;
+    map->types       = calloc(2, sizeof(XkbKeyTypeRec));
     if (!map->key_sym_map || !map->modmap || !map->types) return BadAlloc;
-    /* One key type, no modifier-map entries: clients fall back to the plain
-     * "symbol at (group,level)" lookup, which is what our keysyms model. */
-    map->types[0].num_levels = XkbNumKbdGroups;
-    map->types[0].map = NULL;
-    map->types[0].map_count = 0;
+    /* Consumers (e.g. GDK) derive the shift level from the key type's
+     * modifier->level map, not directly from the core ShiftMask.  With no map
+     * Shift never reached level 1.  Type 0 is one-level; type 1 is two-level
+     * with Shift selecting level 1. */
+    map->types[0].num_levels = 1;
+    map->types[0].map_count  = 1;
+    map->types[0].map        = calloc(1, sizeof(XkbKTMapEntryRec));
+    if (!map->types[0].map) return BadAlloc;
+    map->types[0].map[0].active = True;
+    map->types[0].map[0].level  = 0;
+    map->types[0].map[0].mods.mask = 0;
+
+    map->types[1].num_levels  = 2;
+    map->types[1].mods.mask   = ShiftMask;
+    map->types[1].mods.real_mods = ShiftMask;
+    map->types[1].map_count   = 2;
+    map->types[1].map         = calloc(2, sizeof(XkbKTMapEntryRec));
+    if (!map->types[1].map) return BadAlloc;
+    map->types[1].map[0].active = True;
+    map->types[1].map[0].level  = 0;
+    map->types[1].map[0].mods.mask = 0;
+    map->types[1].map[1].active = True;
+    map->types[1].map[1].level  = 1;
+    map->types[1].map[1].mods.mask = ShiftMask;
 
     size_t nsyms = 0;
     for (KeyCode k = min; k <= max; k++) {
@@ -358,7 +377,7 @@ static Status xkb_build_map(Display *dpy, XkbDescPtr xkb, unsigned int deviceSpe
             (unsigned char)(((width & 0x03) << 4) | (ng & 0x0f));
         map->key_sym_map[k].offset = (unsigned short)off;
         for (int g = 0; g < XkbNumKbdGroups; g++)
-            map->key_sym_map[k].kt_index[g] = 0;
+            map->key_sym_map[k].kt_index[g] = (width >= 2) ? 1 : 0;
 
         if (km) {
             for (int g = 0; g < ng; g++) {

@@ -397,7 +397,19 @@ void mw_destroy_window(Display *d, MwWindow *win)
         if (dp->ptr_window     == win) dp->ptr_window     = NULL;
         if (dp->ptr_toplevel   == win) dp->ptr_toplevel   = NULL;
         if (dp->ptr_focus      == win) dp->ptr_focus      = NULL;
-        if (dp->kbd_focus      == win) dp->kbd_focus      = NULL;
+        if (dp->kbd_focus      == win) {
+            /* X delivers FocusOut when the focus window is destroyed; without
+             * it GDK kept pointing at the dead window and ignored the next
+             * window's FocusIn. */
+            if (win->event_mask & FocusChangeMask) {
+                XFocusChangeEvent fe;
+                memset(&fe, 0, sizeof fe);
+                fe.type = FocusOut; fe.display = d; fe.window = win->id;
+                fe.mode = NotifyNormal; fe.detail = NotifyNonlinear;
+                mw_put_event(d, (XEvent *)&fe);
+            }
+            dp->kbd_focus      = NULL;
+        }
         /* An active grab whose window is destroyed has to be released, not
          * just forgotten: leaving ptr_grab_active set with a NULL grab window
          * made ptr_button()/ptr_motion() drop every event on the floor, so
@@ -465,6 +477,7 @@ void mw_map_window(Display *d, MwWindow *win, bool raised)
      * always shown, so promoting an unanchorable one put a stray window on
      * screen next to the application window. */
     bool promotable;
+    bool focus_toplevel = false;
     if (win->input_only) {
         /* An InputOnly window has no pixels at all; it exists purely to
          * receive events.  Motif uses a 10x10 InputOnly window at (-100,-100)
@@ -507,7 +520,10 @@ void mw_map_window(Display *d, MwWindow *win, bool raised)
         /* Remember this as the application toplevel a popup should anchor to
          * (Motif menu shells are parented to the root, so the X hierarchy
          * cannot be used to find it). */
-        if (!win->override_redirect) MWD(d)->active_toplevel = win;
+        if (!win->override_redirect) {
+            MWD(d)->active_toplevel = win;
+            focus_toplevel = true;
+        }
         mw_window_expose(win, 0, 0, win->w, win->h);
     } else if (win->parent) {
         /* InputOnly windows have no visible surface to build. */
@@ -531,6 +547,35 @@ void mw_map_window(Display *d, MwWindow *win, bool raised)
         me.type = MapNotify; me.display = d; me.event = win->id; me.window = win->id;
         me.override_redirect = win->override_redirect;
         mw_put_event(d, (XEvent *)&me);
+    }
+    /* A window manager focuses a newly mapped toplevel.  Mirror that here,
+     * after the MapNotify (GTK ignores a FocusIn for a not-yet-mapped window),
+     * so the client sees the focus before its event loop returns -- otherwise
+     * the compositor's later wl_keyboard.enter lands after the client has
+     * already checked gtk_widget_has_focus(). */
+    if (focus_toplevel) {
+        MwWindow *mc = MWD(d)->kbd_focus;
+        if (mc != win) {
+            if (mc && (mc->event_mask & FocusChangeMask)) {
+                XFocusChangeEvent fo;
+                memset(&fo, 0, sizeof fo);
+                fo.type = FocusOut; fo.display = d; fo.window = mc->id;
+                fo.mode = NotifyNormal; fo.detail = NotifyNonlinear;
+                mw_put_event(d, (XEvent *)&fo);
+            }
+            MWD(d)->kbd_focus = win;
+            if (getenv("MW_TRACE"))
+                fprintf(stderr, "MW: map-FocusIn win=0x%lx mask=0x%lx focusselmask=%d\n",
+                        (unsigned long)win->id, win->event_mask,
+                        (win->event_mask & FocusChangeMask) != 0);
+            if (win->event_mask & FocusChangeMask) {
+                XFocusChangeEvent fe;
+                memset(&fe, 0, sizeof fe);
+                fe.type = FocusIn; fe.display = d; fe.window = win->id;
+                fe.mode = NotifyNormal; fe.detail = NotifyNonlinear;
+                mw_put_event(d, (XEvent *)&fe);
+            }
+        }
     }
     (void)raised;
 }
