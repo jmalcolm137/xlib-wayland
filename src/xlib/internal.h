@@ -327,6 +327,7 @@ struct MwToplevel {
     int                    width, height;    /* configured (surface) size */
     int                    req_w, req_h;     /* requested */
     bool                   configured;
+    uint32_t               ack_serial;      /* configure awaiting ack+commit */
     bool                   repositioned;      /* popup xdg_popup.reposition sent for the current map */
     bool                   popup_dismissed;   /* compositor dismissed the popup; rebuild before re-map */
     bool                   mapped;

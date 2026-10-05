@@ -47,7 +47,17 @@ static void xs_configure(void *data, struct xdg_surface *xs, uint32_t serial)
 {
     MwToplevel *tl = data;
     Display *d = tl->win->d;
-    xdg_surface_ack_configure(xs, serial);
+    /* xdg-shell wants the ack in the commit that applies the configure, and
+     * only the newest pending configure is acked (so a burst of configures
+     * that arrives before we repaint is acked once).  Acking here -- in the
+     * event handler, possibly several times with no commit between -- made
+     * wlroots reject a repeated serial ("wrong configure serial").  Popups
+     * are the exception: their reposition must follow the ack, so they ack
+     * here. */
+    if (tl->is_popup)
+        xdg_surface_ack_configure(xs, serial);
+    else
+        tl->ack_serial = serial;
     tl->configured = true;
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: xdg configure serial=%u suggested=%dx%d keep=%dx%d%s\n",
@@ -928,6 +938,14 @@ void mw_toplevel_render(MwToplevel *tl)
      * frame triggered a cascade of extra composites -- which is what made the
      * window keep repainting for a second or two after a resize ended. */
     mw_toplevel_request_frame(tl);
+    if (tl->ack_serial && tl->xdg_surface) {
+        if (getenv("MW_TRACE"))
+            fprintf(stderr, "MW: ack_configure xs=%p serial=%u win=0x%lx\n",
+                    (void *)tl->xdg_surface, tl->ack_serial,
+                    (unsigned long)tl->win->id);
+        xdg_surface_ack_configure(tl->xdg_surface, tl->ack_serial);
+        tl->ack_serial = 0;
+    }
     wl_surface_attach(tl->surface, tl->bufs[idx].buffer, 0, 0);
     wl_surface_damage_buffer(tl->surface, 0, 0, w, h);
     wl_surface_commit(tl->surface);
