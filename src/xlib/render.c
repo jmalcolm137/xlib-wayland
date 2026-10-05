@@ -197,6 +197,16 @@ static void set_source(Display *d, cairo_t *cr, MwRenderPicture *src,
         }
         cairo_pattern_set_extend(pat, cairo_extend(src->repeat));
         cairo_pattern_set_filter(pat, cairo_filter(src->filter));
+        /* A gradient picture can carry a transform (cairo passes the CTM
+         * through); apply its inverse as the pattern matrix, as for drawable
+         * sources.  Without this the gradient is evaluated in the wrong
+         * coordinates (Effects' fade mask came out empty). */
+        if (src->have_transform) {
+            cairo_matrix_t t;
+            xf_matrix(&t, &src->xf);
+            if (cairo_matrix_invert(&t) == CAIRO_STATUS_SUCCESS)
+                cairo_pattern_set_matrix(pat, &t);
+        }
         cairo_set_source(cr, pat);
         cairo_pattern_destroy(pat);
         return;
