@@ -1,6 +1,7 @@
 /* selection.c — selections, cut buffers, and inter-client transfer stubs. */
 #include "internal.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -66,6 +67,17 @@ int XConvertSelection(Display *d, Atom selection, Atom target, Atom property,
 {
     MwSelection *s = find_sel(d, selection);
     Window owner = s ? s->owner : None;
+
+    if (getenv("MW_TRACE")) {
+        const char *sn = XGetAtomName(d, selection);
+        if (sn && strncmp(sn, "_MOTIF_ATOM_", 12) == 0) {
+            const char *tn = XGetAtomName(d, target);
+            fprintf(stderr, "MW: XConvertSelection %s target=%s owner=0x%lx\n",
+                    sn, tn ? tn : "?", (unsigned long)owner);
+            if (tn) XFree((char *)tn);
+        }
+        if (sn) XFree((char *)sn);
+    }
 
     /* No X client owns it, or the owner is our proxy window standing in for
      * the compositor clipboard: serve the request from the Wayland offer. */

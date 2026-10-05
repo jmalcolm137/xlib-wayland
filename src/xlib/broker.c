@@ -48,10 +48,10 @@
 static int mwb_trace(void)
 {
     static int t = -1;
-    if (t < 0) t = getenv("MW_TRACE") != NULL;
+    if (t < 0) t = getenv("MW_TRACE") != NULL || getenv("MW_DND_TRACE") != NULL;
     return t;
 }
-#define TR(...) do { if (mwb_trace()) fprintf(stderr, "MWB: " __VA_ARGS__); } while (0)
+#define TR(...) do { if (mwb_trace()) { fprintf(stderr, "MWB[%d] ", (int)getpid()); fprintf(stderr, __VA_ARGS__); } } while (0)
 
 typedef struct MwBroker {
     int      listen_fd;
@@ -68,6 +68,12 @@ typedef struct MwBroker {
     char   **sets;
     int      nsets;
     Atom     proxy_prop;
+
+    /* A connection accepted whose request has not fully arrived yet.  Kept
+     * rather than dropped, so the peer's write does not fail. */
+    int      accept_fd;
+    char     accept_buf[1700];
+    size_t   accept_len;
 
     /* inbound: we asked a remote owner and are waiting for the reply */
     struct {
@@ -283,6 +289,7 @@ void mw_broker_init(Display *d)
     MwBroker *b = calloc(1, sizeof *b);
     if (!b) return;
     b->listen_fd = b->xfer_fd = b->stop_fd = b->cmd_fd = -1;
+    b->accept_fd = -1;
     b->enabled = true;
     b->mypid = (int)getpid();
     b->xfer.fd = -1;
@@ -344,6 +351,7 @@ void mw_broker_fini(Display *d)
     }
     if (b->listen_fd >= 0) close(b->listen_fd);
     if (b->xfer_fd >= 0)   close(b->xfer_fd);
+    if (b->accept_fd >= 0) close(b->accept_fd);
     if (b->xfer.fd >= 0)   close(b->xfer.fd);
     if (b->serve.fd >= 0)  close(b->serve.fd);
     if (b->stop_fd >= 0)   close(b->stop_fd);
@@ -367,6 +375,10 @@ void mw_broker_owner_changed(Display *d, Atom selection, Window owner)
 {
     MwBroker *b = MWD(d)->broker;
     if (!b || !atom_is_shared(b, d, selection)) return;
+    /* The DnD bridge owns a remote initiator's icc handle locally as a proxy so
+     * the drop site's converts reach it; that must not overwrite the real
+     * owner's registry entry. */
+    if (mw_dnd_owns_window(d, owner)) return;
     const char *name = XGetAtomName(d, selection);
     if (!name) return;
     TR("owner %s -> %s\n", name, owner != None ? "us" : "none");
@@ -386,6 +398,8 @@ bool mw_broker_convert(Display *d, Atom selection, Atom target, Atom property,
     const char *selname = XGetAtomName(d, selection);
     if (!selname) return false;
     int owner_pid = reg_get(b, selname);
+    TR("convert begin %s shared=%d owner_pid=%d mypid=%d\n", selname,
+       atom_is_shared(b, d, selection), owner_pid, b->mypid);
     if (owner_pid <= 0 || owner_pid == b->mypid) { XFree((char *)selname); return false; }
 
     char path[224];
@@ -403,6 +417,9 @@ bool mw_broker_convert(Display *d, Atom selection, Atom target, Atom property,
     }
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
 
+    TR("convert %s: prev active=%d fd=%d newfd=%d\n", selname,
+       b->xfer.active, b->xfer.fd, fd);
+
     const char *tname = XGetAtomName(d, target);
     const char *pname = XGetAtomName(d, property == None ? target : property);
     char hs[512], ht[512], hp[512];
@@ -411,7 +428,7 @@ bool mw_broker_convert(Display *d, Atom selection, Atom target, Atom property,
     hexenc(pname ? pname : "", hp, sizeof hp);
     char msg[1700];
     int  mlen = snprintf(msg, sizeof msg, "C %s %s %s\n", hs, ht, hp);
-    ssize_t wn = write(fd, msg, (size_t)mlen);
+    ssize_t wn = send(fd, msg, (size_t)mlen, MSG_NOSIGNAL);
     TR("convert %s -> pid %d\n", selname, owner_pid);
     XFree((char *)selname);
     if (tname) XFree((char *)tname);
@@ -454,7 +471,7 @@ static void serve_finish(Display *d, bool refuse)
             if (tn) XFree((char *)tn);
             if (pn) XFree((char *)pn);
             int l = snprintf(msg, sizeof msg, "R %s %s %s\n", hs, ht, hp);
-            ssize_t n = write(b->serve.fd, msg, (size_t)l); (void)n;
+            ssize_t n = send(b->serve.fd, msg, (size_t)l, MSG_NOSIGNAL); (void)n;
         } else {
             const char *sn = XGetAtomName(d, b->serve.selection);
             const char *tn = XGetAtomName(d, b->serve.target);
@@ -473,7 +490,7 @@ static void serve_finish(Display *d, bool refuse)
             int hl = snprintf(head, sizeof head, "D %s %s %s %s %d %lu %zu\n",
                               hs, ht, hp, hy, b->serve.pformat,
                               b->serve.pnitems, b->serve.pnbytes);
-            ssize_t n1 = write(b->serve.fd, head, (size_t)hl);
+            ssize_t n1 = send(b->serve.fd, head, (size_t)hl, MSG_NOSIGNAL);
             char *hex = malloc(b->serve.pnbytes * 2 + 2);
             if (hex) {
                 static const char *hx = "0123456789abcdef";
@@ -482,7 +499,7 @@ static void serve_finish(Display *d, bool refuse)
                     hex[i * 2 + 1] = hx[b->serve.pdata[i] & 0xf];
                 }
                 hex[b->serve.pnbytes * 2] = '\n';
-                ssize_t n2 = write(b->serve.fd, hex, b->serve.pnbytes * 2 + 1);
+                ssize_t n2 = send(b->serve.fd, hex, b->serve.pnbytes * 2 + 1, MSG_NOSIGNAL);
                 (void)n2;
                 free(hex);
             }
@@ -498,23 +515,59 @@ static void serve_finish(Display *d, bool refuse)
     b->serve.pnbytes = b->serve.pnitems = 0;
 }
 
+static void serve_read(Display *d);
+
 /* Accept a connection and start servicing a CONVERT. */
 static void serve_accept(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
     MwBroker *b = dp->broker;
-    if (b->serve.active) return;                    /* one at a time */
+    if (b->serve.active || b->accept_fd >= 0) return;   /* one at a time */
     int fd = accept4(b->listen_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+    if (fd < 0) return;
     TR("serve_accept fd=%d\n", fd);
+    b->accept_fd = fd;
+    b->accept_len = 0;
+    serve_read(d);
+}
+
+/* Read a request off an accepted connection.  The request may not have arrived
+ * yet (the peer connects and then writes): keep the fd and finish on a later
+ * pump rather than closing it, which would make the peer's write fail with
+ * EPIPE/SIGPIPE and kill it. */
+static void serve_read(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    MwBroker *b = dp->broker;
+    int fd = b->accept_fd;
     if (fd < 0) return;
 
-    char buf[1700];
-    ssize_t n = read(fd, buf, sizeof buf - 1);
-    if (n <= 0) { close(fd); return; }
-    buf[n] = 0;
-    if (buf[0] != 'C' || buf[1] != ' ') { close(fd); return; }
+    bool complete = false;
+    for (;;) {
+        ssize_t n = read(fd, b->accept_buf + b->accept_len,
+                         sizeof b->accept_buf - 1 - b->accept_len);
+        if (n > 0) {
+            b->accept_len += (size_t)n;
+            b->accept_buf[b->accept_len] = 0;
+            if (strchr(b->accept_buf, '\n')) { complete = true; break; }
+            if (b->accept_len >= sizeof b->accept_buf - 1) { complete = true; break; }
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;  /* wait */
+        break;   /* EOF or error */
+    }
+
+    if (!complete) { close(fd); b->accept_fd = -1; b->accept_len = 0; return; }
+
     char hs[512] = "", ht[512] = "", hp[512] = "";
-    if (sscanf(buf + 2, "%511s %511s %511s", hs, ht, hp) != 3) { close(fd); return; }
+    if (b->accept_buf[0] != 'C' || b->accept_buf[1] != ' ' ||
+        sscanf(b->accept_buf + 2, "%511s %511s %511s", hs, ht, hp) != 3) {
+        close(fd);
+        b->accept_fd = -1;
+        b->accept_len = 0;
+        return;
+    }
 
     char selname[256] = "", tname[256] = "", pname[256] = "";
     hexdec(hs, (unsigned char *)selname, sizeof selname - 1);
@@ -527,10 +580,11 @@ static void serve_accept(Display *d)
     Window owner = XGetSelectionOwner(d, sel);
     if (owner == None || (dp->clip_window != None && owner == dp->clip_window)) {
         close(fd);
+        b->accept_fd = -1;
+        b->accept_len = 0;
         return;
     }
 
-    if (dp->broker == NULL) { close(fd); return; }
     if (b->serve.proxy_win == None)
         b->serve.proxy_win = XCreateSimpleWindow(d, DefaultRootWindow(d),
                                                  0, 0, 1, 1, 0, 0, 0);
@@ -542,6 +596,8 @@ static void serve_accept(Display *d)
 
     b->serve.active = true;
     b->serve.fd = fd;
+    b->accept_fd = -1;          /* ownership moved to serve */
+    b->accept_len = 0;
     b->serve.selection = sel;
     b->serve.target = tgt;
     b->serve.property = prop;
@@ -605,6 +661,7 @@ static void xfer_read(Display *d)
     MwBroker *b = dp->broker;
     char *buf = b->xfer.buf;
     size_t *len = &b->xfer.len;
+    TR("xfer_read fd=%d len=%zu\n", b->xfer.fd, *len);
     for (;;) {
         ssize_t n = read(b->xfer.fd, buf + *len, sizeof b->xfer.buf - 1 - *len);
         if (n > 0) {
@@ -660,10 +717,12 @@ static void xfer_read(Display *d)
             unsigned char *data = malloc(nbytes ? nbytes : 1);
             char tname[256] = "";
             hexdec(hy, (unsigned char *)tname, sizeof tname - 1);
+            char tgname[256] = "";
+            hexdec(ht, (unsigned char *)tgname, sizeof tgname - 1);
+            TR("xfer D target=%s type=%s fmt=%d nitems=%lu nbytes=%zu hexlen=%zu\n",
+               tgname, tname, fmt, nit, nbytes, strlen(hex));
             if (data) {
                 size_t got = hexdec(hex, data, nbytes);
-                char tgname[256] = "";
-                hexdec(ht, (unsigned char *)tgname, sizeof tgname - 1);
                 TR("xfer data target=%s type=%s fmt=%d nitems=%lu nbytes=%zu got=%zu\n",
                    tgname, tname, fmt, nit, nbytes, got);
                 Atom type = XInternAtom(d, tname[0] ? tname : "STRING", False);
@@ -713,6 +772,7 @@ int mw_broker_poll_fd(Display *d)
 {
     MwBroker *b = MWD(d)->broker;
     if (!b) return -1;
+    if (b->accept_fd >= 0) return b->accept_fd;
     if (b->xfer.active) return b->xfer.fd;
     return b->listen_fd;
 }
@@ -722,8 +782,10 @@ void mw_broker_handle_ready(Display *d)
     XDisplayImpl *dp = MWD(d);
     MwBroker *b = dp->broker;
     if (!b) return;
-    TR("handle_ready xfer=%d serve=%d\n", b->xfer.active, b->serve.active);
+    if (b->xfer.active || b->serve.active || b->accept_fd >= 0)
+        TR("handle_ready xfer=%d serve=%d\n", b->xfer.active, b->serve.active);
     if (b->xfer.active) xfer_read(d);
+    if (b->accept_fd >= 0) serve_read(d);
     if (b->listen_fd >= 0) serve_accept(d);
     /* Drop a stalled serve so the socket does not leak. */
     if (b->serve.active && now_ms() > b->serve.deadline_ms)

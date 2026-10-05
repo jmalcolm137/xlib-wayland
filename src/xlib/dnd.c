@@ -75,7 +75,8 @@ typedef struct MwDnd {
     /* --- receiving a drag --------------------------------------------- */
     Window   src_win;      /* synthetic initiator window (ours) */
     Atom     icc;          /* transfer selection (our own, or the source's) */
-    bool     remote;       /* the icc selection is owned by another process */
+    bool     remote;       /* the icc selection names a remote initiator */
+    unsigned targets_index; /* our entry in the shared targets table */
     Window   shell;        /* the X shell the drag is over */
     int      root_x, root_y;   /* current position, root coordinates */
     bool     active;       /* a drag is over one of our surfaces */
@@ -97,10 +98,10 @@ typedef struct MwDnd {
 static int dnd_trace(void)
 {
     static int t = -1;
-    if (t < 0) t = getenv("MW_TRACE") != NULL;
+    if (t < 0) t = getenv("MW_TRACE") != NULL || getenv("MW_DND_TRACE") != NULL;
     return t;
 }
-#define TR(...) do { if (dnd_trace()) fprintf(stderr, "MWDND: " __VA_ARGS__); } while (0)
+#define TR(...) do { if (dnd_trace()) { fprintf(stderr, "MWDND[%d] ", (int)getpid()); fprintf(stderr, __VA_ARGS__); } } while (0)
 
 static uint64_t dnd_now_ms(void)
 {
@@ -131,6 +132,10 @@ static Atom a_transfer_success(Display *d)
 { return mw_intern_atom(d, "XmTRANSFER_SUCCESS", False); }
 static Atom a_transfer_failure(Display *d)
 { return mw_intern_atom(d, "XmTRANSFER_FAILURE", False); }
+static Atom a_host_name(Display *d)
+{ return mw_intern_atom(d, "HOST_NAME", False); }
+static Atom a_sun_host(Display *d)
+{ return mw_intern_atom(d, "_SUN_FILE_HOST_NAME", False); }
 
 /* ------------------------------------------------------------- hex */
 
@@ -225,8 +230,7 @@ static int targets_index(Display *d, Window mw, const Atom *list, int n)
                 memcpy(&v, data + off + 2 + (size_t)j * 4, 4);
                 if (v != (uint32_t)list[j]) { same = 0; break; }
             }
-            if (same) { XFree(data); return (int)i; }
-        }
+            if (same) { XFree(data); return (int)i; }        }
         off += 2 + lob;
     }
 
@@ -248,6 +252,7 @@ static int targets_index(Display *d, Window mw, const Atom *list, int n)
     memcpy(buf + 4, &heap, 4);
     XChangeProperty(d, mw, a_motif_targets(d), a_motif_targets(d), 8,
                     PropModeReplace, buf, (int)(len + add));
+    TR("targets append index %u (width %u, %d targets)\n", count, newcount, n);
     free(buf);
     XFree(data);
     return (int)count;
@@ -380,6 +385,7 @@ static void dnd_apply_payload(Display *d, MwDnd *x, const char *hexpayload)
     while (p < end && *p && nl < 64) {
         size_t l = strnlen(p, (size_t)(end - p));
         list[nl++] = mw_intern_atom(d, p, False);
+        TR("  want target %s\n", p);
         p += l + 1;
     }
 
@@ -390,6 +396,11 @@ static void dnd_apply_payload(Display *d, MwDnd *x, const char *hexpayload)
     Window mw = motif_window(d);
     int idx = (mw != None && nl > 0) ? targets_index(d, mw, list, nl) : -1;
     if (idx < 0) idx = ICC_TARGETS_INDEX_STRING;
+    x->targets_index = (unsigned)idx;
+    /* Own the icc handle locally so the drop site's convert requests reach us:
+     * we answer the protocol-level targets (HOST_NAME, TARGETS, the outcome
+     * handshake) ourselves and relay the real payload to the initiator. */
+    XSetSelectionOwner(d, x->icc, x->src_win, CurrentTime);
     write_initiator_info(d, x, (unsigned)idx);
     TR("payload: icc=%s targets=%d index=%d\n", icc, nl, idx);
 }
@@ -521,23 +532,77 @@ void mw_dnd_wl_drop(Display *d, const unsigned char *data, size_t len)
 }
 
 /* Serve a convert on a synthetic icc handle we own (a Wayland-origin drag). */
+static void dnd_notify(Display *d, Atom selection, Atom target, Window requestor,
+                       Time time, Atom prop, bool ok)
+{
+    XSelectionEvent se;
+    memset(&se, 0, sizeof se);
+    se.type = SelectionNotify;
+    se.display = d;
+    se.requestor = requestor;
+    se.selection = selection;
+    se.target = target;
+    se.property = ok ? prop : None;
+    se.time = time;
+    mw_put_event(d, (XEvent *)&se);
+}
+
 bool mw_dnd_xconvert(Display *d, Atom selection, Atom target, Atom property,
                      Window requestor, Time time)
 {
     MwDnd *x = MWD(d)->dnd;
-    if (!x || x->src_win == None || selection != x->icc || x->remote)
+    if (!x || x->src_win == None || selection != x->icc)
         return false;
 
     if (dnd_trace()) {
         const char *tn = XGetAtomName(d, target);
-        TR("xconvert target=%lu (%s) drop_ready=%d\n", (unsigned long)target,
-           tn ? tn : "?", x->drop_ready);
+        TR("xconvert target=%lu (%s) drop_ready=%d remote=%d\n",
+           (unsigned long)target, tn ? tn : "?", x->drop_ready, x->remote);
         if (tn) XFree((char *)tn);
     }
 
     Atom prop = property == None ? target : property;
     bool ok = false;
     long served = -1;
+
+    if (x->remote) {
+        /* HOST_NAME is the Dt file protocol's preflight: the receiver asks the
+         * initiator for its host to choose between FILE_NAME and _DT_NETFILE.
+         * We are the initiator here, so answer it directly. */
+        if (target == a_host_name(d) || target == a_sun_host(d)) {
+            char host[256] = "";
+            if (gethostname(host, sizeof host - 1) != 0) host[0] = 0;
+            XChangeProperty(d, requestor, prop, XA_STRING, 8, PropModeReplace,
+                            (const unsigned char *)host, (int)strlen(host) + 1);
+            dnd_notify(d, selection, target, requestor, time, prop, true);
+            return true;
+        }
+        if (target == a_targets(d)) {
+            Window mw = motif_window(d);
+            Atom *list = NULL;
+            int n = (mw != None) ? targets_at(d, mw, x->targets_index, &list) : 0;
+            if (n > 0) {
+                long vals[64];
+                int cnt = n > 64 ? 64 : n;
+                for (int i = 0; i < cnt; i++) vals[i] = (long)list[i];
+                XChangeProperty(d, requestor, prop, XA_ATOM, 32, PropModeReplace,
+                                (const unsigned char *)vals, cnt);
+            }
+            free(list);
+            dnd_notify(d, selection, target, requestor, time, prop, n > 0);
+            return true;
+        }
+        if (target == a_transfer_success(d) || target == a_transfer_failure(d)) {
+            XChangeProperty(d, requestor, prop, target, 32, PropModeReplace, NULL, 0);
+            dnd_notify(d, selection, target, requestor, time, prop, true);
+            return true;
+        }
+        /* The real payload (FILE_NAME, TEXT, ...): relay to the initiator. */
+        if (mw_broker_convert(d, selection, target, property, requestor, time))
+            return true;
+        dnd_notify(d, selection, target, requestor, time, prop, false);
+        return true;
+    }
 
     if (x->drop_ready && target == a_targets(d)) {
         long list[3];
@@ -571,16 +636,7 @@ bool mw_dnd_xconvert(Display *d, Atom selection, Atom target, Atom property,
         served = 0;
     }
 
-    XSelectionEvent se;
-    memset(&se, 0, sizeof se);
-    se.type = SelectionNotify;
-    se.display = d;
-    se.requestor = requestor;
-    se.selection = selection;
-    se.target = target;
-    se.property = ok ? prop : None;
-    se.time = time;
-    mw_put_event(d, (XEvent *)&se);
+    dnd_notify(d, selection, target, requestor, time, prop, ok);
     TR("xconvert -> %s (served=%ld)\n", ok ? "ok" : "refused", served);
     return true;
 }
