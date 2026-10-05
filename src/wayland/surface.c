@@ -695,6 +695,86 @@ void mw_toplevel_set_size(MwToplevel *tl, int w, int h)
     }
 }
 
+/* ---- EWMH _NET_WM_STATE (we are the window manager) ----
+ *
+ * A client asking to go fullscreen sends a ClientMessage to the root window
+ * (see gdk_window_fullscreen).  We are the window manager, so we translate it
+ * into the xdg-shell request the compositor understands; the compositor then
+ * does the real work.  Only fullscreen is implemented -- the other states are
+ * accepted and ignored. */
+
+/* Mirror the state back onto the window: GDK reads _NET_WM_STATE to answer
+ * gdk_window_get_state()/gdk_window_get_fullscreen() and to update GIMP's
+ * menubar style, and it watches the property for changes. */
+static void toplevel_sync_net_wm_state(Display *d, MwWindow *win)
+{
+    Atom state = mw_intern_atom(d, "_NET_WM_STATE", True);
+    Atom fs = mw_intern_atom(d, "_NET_WM_STATE_FULLSCREEN", True);
+    if (!state) return;
+    if (win->tl && win->tl->fullscreen && fs) {
+        unsigned long atom = (unsigned long)fs;
+        XChangeProperty(d, win->id, state, XA_ATOM, 32, PropModeReplace,
+                        (unsigned char *)&atom, 1);
+    } else {
+        XChangeProperty(d, win->id, state, XA_ATOM, 32, PropModeReplace, NULL, 0);
+    }
+}
+
+void mw_toplevel_set_fullscreen(Display *d, MwWindow *win, bool on)
+{
+    MwToplevel *tl = win ? win->tl : NULL;
+    if (!tl || tl->is_popup || win->override_redirect) return;
+    if (tl->fullscreen == on) return;
+
+    tl->fullscreen = on;
+    if (tl->xdg_toplevel) {
+        if (on) xdg_toplevel_set_fullscreen(tl->xdg_toplevel, NULL);
+        else    xdg_toplevel_unset_fullscreen(tl->xdg_toplevel);
+    }
+
+    /* Fullscreen covers the screen, so drop the client-side titlebar and fill
+     * the screen; the compositor may adjust the geometry with its own
+     * configure afterwards. */
+    if (on) {
+        tl->fs_w = win->w;
+        tl->fs_h = win->h;
+        tl->fs_csd = tl->csd;
+        tl->csd = false;
+        tl->tb_h = 0;
+        mw_window_wm_resize(win, MWSCR(d)->width, MWSCR(d)->height);
+    } else {
+        bool csd = tl->fs_csd && !tl->undecorated;
+        tl->csd = csd;
+        tl->tb_h = csd ? MW_TITLEBAR_H : 0;
+        mw_window_wm_resize(win, tl->fs_w, tl->fs_h);
+    }
+
+    if (tl->configured) {
+        mw_toplevel_set_size(tl, win->w, win->h);
+        mw_toplevel_damage(tl);
+        mw_toplevel_render(tl);
+    }
+    toplevel_sync_net_wm_state(d, win);
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: fullscreen %d win=0x%lx %dx%d csd=%d\n",
+                on, win->id, win->w, win->h, tl->csd);
+}
+
+void mw_wm_net_wm_state(Display *d, XClientMessageEvent *cm)
+{
+    MwWindow *win = mw_window(d, cm->window);
+    if (!win || !win->tl || win->tl->is_popup) return;
+    Atom fs = mw_intern_atom(d, "_NET_WM_STATE_FULLSCREEN", True);
+    long action = cm->data.l[0];              /* 0 remove, 1 add, 2 toggle */
+    for (int i = 0; i < 2; i++) {
+        Atom a = (Atom)cm->data.l[1 + i];
+        if (fs && a == fs) {
+            bool on = (action == 1) || (action == 2 && !win->tl->fullscreen);
+            mw_toplevel_set_fullscreen(d, win, on);
+        }
+    }
+}
+
 void mw_toplevel_map(MwToplevel *tl)
 {
     if (!tl) return;

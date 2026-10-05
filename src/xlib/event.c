@@ -517,6 +517,16 @@ int XSendEvent(Display *d, Window w, Bool propagate, long event_mask, XEvent *ev
         fprintf(stderr, "MW: XSendEvent win=0x%lx prop=%d mask=0x%lx type=%d win_valid=%d\n",
                 (unsigned long)w, propagate, event_mask, event->xany.type, win != NULL);
     if (!win) return 0;
+    /* A client asking the window manager to change a window state sends an
+     * EWMH _NET_WM_STATE ClientMessage to the root window; we *are* the
+     * window manager, so consume it and act on it rather than handing it
+     * back to the client. */
+    if (event->type == ClientMessage && w == MWSCR(d)->root &&
+        event->xclient.message_type ==
+            mw_intern_atom(d, "_NET_WM_STATE", True)) {
+        mw_wm_net_wm_state(d, &event->xclient);
+        return 1;
+    }
     event->xany.send_event = True;
     event->xany.display = d;
     if (win->event_mask & event_mask || event_mask == 0 ||

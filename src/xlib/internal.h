@@ -339,6 +339,9 @@ struct MwToplevel {
     bool                   closed;
     bool                   csd;              /* draw client-side decorations */
     int                    tb_h;             /* titlebar height when csd */
+    bool                   fullscreen;       /* we (as WM) put it fullscreen */
+    int                    fs_w, fs_h;       /* size to restore on unfullscreen */
+    bool                   fs_csd;           /* decoration state to restore */
     bool                   undecorated;      /* client asked for no decorations
                                               * (_MOTIF_WM_HINTS decorations=0) */
     char                  *title;            /* last title sent to the compositor */
@@ -711,6 +714,10 @@ void        mw_composite_window(MwToplevel *tl, MwWindow *win, int ox, int oy);
 void        mw_toplevel_close(MwToplevel *tl);
 int         mw_toplevel_content_offset(MwToplevel *tl);
 void        mw_toplevel_reposition(MwToplevel *tl);
+/* Window-manager side of EWMH _NET_WM_STATE: the client asked us to add,
+ * remove or toggle a state (fullscreen today). */
+void        mw_wm_net_wm_state(Display *d, XClientMessageEvent *cm);
+void        mw_toplevel_set_fullscreen(Display *d, MwWindow *win, bool on);
 
 /* X resource database loading (xresources.c) */
 void        mw_load_resources(Display *d);
