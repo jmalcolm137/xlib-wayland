@@ -662,6 +662,10 @@ static void xfer_read(Display *d)
             hexdec(hy, (unsigned char *)tname, sizeof tname - 1);
             if (data) {
                 size_t got = hexdec(hex, data, nbytes);
+                char tgname[256] = "";
+                hexdec(ht, (unsigned char *)tgname, sizeof tgname - 1);
+                TR("xfer data target=%s type=%s fmt=%d nitems=%lu nbytes=%zu got=%zu\n",
+                   tgname, tname, fmt, nit, nbytes, got);
                 Atom type = XInternAtom(d, tname[0] ? tname : "STRING", False);
                 if (got > 0 && fmt == 32) {
                     /* Xlib's format-32 interface takes an array of longs. */
@@ -697,8 +701,8 @@ static void xfer_read(Display *d)
     mw_put_event(d, (XEvent *)&se);
     TR("xfer posted notify req=%lu prop=%lu qcount=%d\n", req, prop, dp->qcount);
 
-    TR("xfer reply %c ok=%d\n", buf[0], ok);
-    close(b->xfer.fd);
+    TR("xfer reply %c ok=%d sel=%lu target=%lu\n", buf[0], ok,
+       (unsigned long)sel, (unsigned long)tgt);    close(b->xfer.fd);
     b->xfer_fd = -1;
     b->xfer.fd = -1;
     b->xfer.active = false;

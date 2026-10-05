@@ -629,6 +629,10 @@ static void ptr_leave(void *data, struct wl_pointer *p, uint32_t serial,
     if (dp->ptr_wl_surface && surface != dp->ptr_wl_surface)
         return;
     if (getenv("MW_TRACE")) fprintf(stderr, "MW: ptr_leave (wl)\n");
+    /* A Motif drag that leaves its window becomes a Wayland drag, so the
+     * compositor routes it to whatever is under the pointer (see xlib/dnd.c).
+     * A drag that stays inside this application is left native. */
+    mw_dnd_maybe_start(d);
     if (dp->ptr_focus) {
         XLeaveWindowEvent le;
         pt_event(d, dp->ptr_focus, (XEvent *)&le, LeaveNotify,
@@ -884,10 +888,43 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial,
     }
 }
 
+/* Deliver a synthetic ButtonRelease to the window Motif's drag grabbed.  When
+ * the shim hands a drag to the compositor (mw_dnd_maybe_start) the pointer is
+ * routed by Wayland, so Motif never sees the real release and its drag would
+ * stay active with the pointer grabbed.  This gives it the release that ends
+ * the drag. */
+void mw_pointer_synthetic_release(Display *d, unsigned int xbutton)
+{
+    XDisplayImpl *dp = MWD(d);
+    unsigned int btn_mask = xbutton >= 1 ? (1u << (8 + xbutton - 1)) : 0;
+    if (dp->ptr_state & btn_mask) dp->ptr_state &= ~btn_mask;
+
+    MwWindow *target = dp->ptr_grab_window;
+    if (!target) target = dp->implicit_grab;
+    if (!target) target = dp->ptr_focus;
+    if (!target) return;
+
+    bool want = true;
+    if (dp->ptr_grab_active && target == dp->ptr_grab_window)
+        want = (dp->ptr_grab_mask & ButtonReleaseMask) != 0;
+
+    XEvent ev;
+    pt_event(d, target, &ev, ButtonRelease, dp->ptr_x, dp->ptr_y,
+             current_mods(d) | dp->ptr_state, (int)xbutton, NotifyNormal, 0);
+    if (want) { ev.xbutton.window = target->id; mw_put_event(d, &ev); }
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: synthetic ButtonRelease -> 0x%lx\n", target->id);
+
+    if (dp->ptr_grab_temporary) {
+        dp->ptr_grab_active = false;
+        dp->ptr_grab_temporary = false;
+    }
+    dp->implicit_grab = NULL;
+}
+
 /* One wheel click as the X button clients expect: 4/5 vertical, 6/7 horizontal.
  * Wayland's positive direction is down/right, which X reports as 5 and 7. */
-static void wheel_click(Display *d, int axis, int dir)
-{
+static void wheel_click(Display *d, int axis, int dir){
     MwWindow *target = MWD(d)->ptr_focus;
     if (!target) return;
     unsigned int b;

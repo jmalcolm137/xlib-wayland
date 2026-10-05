@@ -157,13 +157,24 @@ static void offer_free(MwWlOffer *o)
     if (!o) return;
     if (o->offer) wl_data_offer_destroy(o->offer);
     free(o->mime);
+    free(o->motif_drag);
     free(o);
 }
+
+/* Bridge payload advertised by another shim on a Motif drag: the initiator's
+ * icc handle selection name and the targets it can serve, hex-encoded (see
+ * xlib/dnd.c). */
+#define MOTIF_DRAG_MIME_PREFIX "application/x-motif-drag;"
 
 static void offer_mime(void *data, struct wl_data_offer *offer, const char *mime)
 {
     MwWlOffer *o = data;
     (void)offer;
+    if (strncmp(mime, MOTIF_DRAG_MIME_PREFIX, strlen(MOTIF_DRAG_MIME_PREFIX)) == 0) {
+        free(o->motif_drag);
+        o->motif_drag = strdup(mime + strlen(MOTIF_DRAG_MIME_PREFIX));
+        return;
+    }
     int r = mime_rank(mime);
     if (r < 0) return;
     int cur = o->mime ? mime_rank(o->mime) : 1000;
@@ -388,7 +399,7 @@ static void dd_enter(void *data, struct wl_data_device *dd, uint32_t serial,
     wl_display_flush(dp->wl_display);
 
     mw_dnd_wl_enter(d, s, wl_fixed_to_double(x), wl_fixed_to_double(y),
-                    o->mime);
+                    o->mime, o->motif_drag);
 }
 
 static void dd_leave(void *data, struct wl_data_device *dd)
@@ -428,6 +439,15 @@ static void dd_drop(void *data, struct wl_data_device *dd)
     (void)dd;
     Display *d = data;
     XDisplayImpl *dp = MWD(d);
+
+    /* A Motif-to-Motif drag carries no data over Wayland: the transfer is the
+     * initiator's icc handle selection, relayed between the two processes by
+     * the selection broker.  Just start the drop at the site. */
+    if (dp->drag_offer && dp->drag_offer->motif_drag) {
+        mw_dnd_wl_drop(d, NULL, 0);
+        return;
+    }
+
     if (!dp->drag_active || !dp->drag_offer || !dp->drag_offer->mime) {
         if (dp->drag_offer && wl_proxy_get_version((struct wl_proxy *)dp->drag_offer->offer) >= 3)
             wl_data_offer_finish(dp->drag_offer->offer);

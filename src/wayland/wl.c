@@ -233,14 +233,16 @@ void mw_block_for_events(Display *d)
      * happening. */
     mw_kbd_repeat_pump(d);
     int rtimeout = mw_kbd_repeat_timeout(d);
+    int dtimeout = mw_dnd_timeout(d);
 
     /* Normally block on the Wayland connection exactly as before.  Only when a
-     * clipboard transfer is in flight, or a key repeat is pending, is it worth
-     * also watching a timer -- otherwise a paste whose data arrives off the
-     * event loop, or a repeat, would wait for an unrelated Wayland event. */
+     * clipboard transfer is in flight, or a key repeat or drag release is
+     * pending, is it worth also watching a timer -- otherwise a paste whose data
+     * arrives off the event loop, a repeat, or the deferred release of a Motif
+     * drag, would wait for an unrelated Wayland event. */
     int cfd = mw_clipboard_poll_fd(d);
     int bfd = mw_broker_poll_fd(d);
-    if (cfd < 0 && bfd < 0 && rtimeout < 0) {
+    if (cfd < 0 && bfd < 0 && rtimeout < 0 && dtimeout < 0) {
         if (wl_display_dispatch(dp->wl_display) < 0)
             mw_io_error(d, "Wayland connection closed");
         mw_input_settle(d);
@@ -264,6 +266,7 @@ void mw_block_for_events(Display *d)
     if (bfd >= 0) { pfd[np].fd = bfd; pfd[np].events = POLLIN; pfd[np].revents = 0; np++; }
 
     int timeout = rtimeout >= 0 ? rtimeout : 100;
+    if (dtimeout >= 0 && dtimeout < timeout) timeout = dtimeout;
     if ((cfd >= 0 || bfd >= 0) && timeout > 100) timeout = 100;
     int r = poll(pfd, np, timeout);
     if (r > 0 && pfd[0].revents) {
@@ -280,6 +283,7 @@ void mw_block_for_events(Display *d)
     mw_clipboard_handle_ready(d);
     mw_broker_handle_ready(d);
     mw_kbd_repeat_pump(d);
+    mw_dnd_pump(d);
 }
 
 void mw_process_events(Display *d, bool block)
@@ -299,6 +303,7 @@ void mw_process_events(Display *d, bool block)
      * per refresh so a window resize does not composite per drawing step. */
     mw_flush_damage_deferred(d);
     mw_kbd_repeat_pump(d);
+    mw_dnd_pump(d);
 
     if (block && dp->qcount == 0) {
         mw_block_for_events(d);

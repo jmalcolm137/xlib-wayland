@@ -195,6 +195,7 @@ struct MwSelection {
 typedef struct MwWlOffer {
     struct wl_data_offer *offer;
     char                 *mime;      /* best text MIME, or NULL */
+    char                 *motif_drag; /* x-motif drag payload, or NULL */
     Display              *d;         /* owning display */
     struct MwWlOffer     *next;
 } MwWlOffer;
@@ -830,6 +831,10 @@ void mw_pointer_update_cursor(Display *d, MwWindow *w);
 void mw_input_settle(Display *d);
 void mw_pointer_enter(Display *d, MwWindow *top, int x, int y);
 void mw_pointer_leave(Display *d, MwWindow *top);
+/* Deliver a synthetic ButtonRelease to the current grab window.  A Wayland
+ * drag makes the compositor swallow the real release, so Motif's own drag
+ * would otherwise never end. */
+void mw_pointer_synthetic_release(Display *d, unsigned int xbutton);
 
 /* keymap (keymap.c) */
 void     mw_keymap_init(Display *d, const char *keymap_str);
@@ -933,7 +938,7 @@ void      mw_dnd_init(Display *d);
 void      mw_dnd_fini(Display *d);
 /* Wayland: a drag entered / moved over / left one of our surfaces. */
 void      mw_dnd_wl_enter(Display *d, struct wl_surface *s, double x, double y,
-                          const char *mime);
+                          const char *mime, const char *motif_drag);
 void      mw_dnd_wl_motion(Display *d, double x, double y);
 void      mw_dnd_wl_leave(Display *d);
 /* The dropped bytes arrived; deliver them to the drop site under the drag. */
@@ -947,6 +952,19 @@ void      mw_dnd_initiator_info(Display *d, Window src, Atom icc, int format,
 /* Whether `w` is a window this bridge created (so XSendEvent etc. treat it as
  * internal). */
 bool      mw_dnd_owns_window(Display *d, Window w);
+/* A Motif drag is in progress and the pointer has left its window: start the
+ * Wayland drag so the compositor routes it.  Called from the pointer leave. */
+void      mw_dnd_maybe_start(Display *d);
+/* The Motif icc handle changed owners; a drag that no longer owns it has
+ * ended. */
+void      mw_dnd_selection_changed(Display *d, Atom selection, Window owner);
+/* The Wayland drag finished or was cancelled: end Motif's drag (the
+ * compositor swallowed the button release). */
+void      mw_dnd_source_done(Display *d);
+/* Deferred release of a Motif drag after its Wayland drag ends, so the broker
+ * can finish relaying the transfer first (see the grace period in dnd.c). */
+void      mw_dnd_pump(Display *d);
+int       mw_dnd_timeout(Display *d);
 /* Produce the bytes a Wayland drag source asked for, by converting the X
  * selection of the in-progress Motif drag.  Returns true if queued. */
 bool      mw_dnd_source_send(Display *d, const char *mime, int fd);
