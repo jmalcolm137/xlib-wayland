@@ -197,6 +197,13 @@ int XPutImage(Display *d, Drawable dr, GC gc, XImage *img,
     int onebit = (img->bits_per_pixel == 1);
     uint32_t fg = 0xff000000u | ((uint32_t)(gc ? gc->foreground : 0) & 0xffffff);
     uint32_t bg = 0xff000000u | ((uint32_t)(gc ? gc->background : 0) & 0xffffff);
+    /* A depth-32 drawable keeps the image's alpha: cairo uploads premultiplied
+     * ARGB icons this way, and forcing alpha to 0xff made every transparent
+     * icon pixel opaque black.  A 24-bit drawable has no alpha, so those stay
+     * opaque. */
+    int ddepth = 0;
+    mw_drawable_surface(d, dr, NULL, NULL, &ddepth);
+    int keep_alpha = (ddepth >= 32);
     MwSurface *tmp = mw_surface_create((int)width, (int)height);
     uint32_t *td = (uint32_t *)mw_surface_data(tmp);
     int tstride = mw_surface_stride(tmp) / 4;
@@ -205,7 +212,8 @@ int XPutImage(Display *d, Drawable dr, GC gc, XImage *img,
             unsigned long px = img_get_pixel(img, src_x + (int)i, src_y + (int)j);
             td[(size_t)j * tstride + i] = onebit
                 ? (px ? fg : bg)
-                : (0xff000000u | ((uint32_t)px & 0xffffff));
+                : (keep_alpha ? (uint32_t)px
+                              : (0xff000000u | ((uint32_t)px & 0xffffff)));
         }
     mw_surface_mark_dirty(tmp);
     MwCanvas *c = mw_canvas_for_drawable(d, dr, gc, NULL, NULL);
