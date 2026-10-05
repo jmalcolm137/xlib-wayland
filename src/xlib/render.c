@@ -213,9 +213,12 @@ static void set_source(Display *d, cairo_t *cr, MwRenderPicture *src,
      * maps user space to pattern space, so it translates by (xs-dx, ys-dy). */
     cairo_matrix_init_translate(&m, xs - dx, ys - dy);
     if (src->have_transform) {
+        /* The picture transform maps the source's coordinate space to the
+         * destination; the cairo pattern matrix is its inverse. */
         cairo_matrix_t t;
         xf_matrix(&t, &src->xf);
-        cairo_matrix_multiply(&m, &m, &t);
+        if (cairo_matrix_invert(&t) == CAIRO_STATUS_SUCCESS)
+            cairo_matrix_multiply(&m, &m, &t);
     }
     cairo_pattern_set_matrix(pat, &m);
     cairo_pattern_set_extend(pat, cairo_extend(src->repeat));
@@ -255,11 +258,12 @@ static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
 {
     if (!dst || w <= 0 || h <= 0) return;
     if (getenv("MW_TRACE_RENDER"))
-        fprintf(stderr, "MW: composite op=%d src=0x%lx(k%d drw=0x%lx fmt=%d) mask=%s op=%d "
+        fprintf(stderr, "MW: composite op=%d src=0x%lx(k%d drw=0x%lx fmt=%d) mask=0x%lx k%d op=%d "
                         "src=%d,%d mask=%d,%d dst=%d,%d %dx%d\n",
                 op, src ? src->id : 0, src ? src->kind : -1,
                 src ? (unsigned long)src->drawable : 0, src ? src->format : -1,
-                mask ? "yes" : "no", op, xs, ys, xm, ym, xd, yd, w, h);
+                mask ? (unsigned long)mask->id : 0UL, mask ? mask->kind : -1,
+                op, xs, ys, xm, ym, xd, yd, w, h);
     MwSurface *ds = pic_surface(d, dst);
     cairo_surface_t *dcs = ds ? mw_surface_native(ds) : NULL;
     if (!dcs) return;
@@ -331,10 +335,11 @@ static void parse_stops(MwRenderPicture *p, const unsigned char *base, size_t n)
     p->stops = calloc(n ? n : 1, sizeof(MwStop));
     if (!p->stops) return;
     p->nstops = 0;
+    /* libXrender sends all n stop positions (CARD32 each) followed by all n
+     * xRenderColors (8 bytes each), not interleaved. */
     for (size_t i = 0; i < n; i++) {
-        const unsigned char *q = base + i * 12;
-        memcpy(&p->stops[i].color, q, 8);
-        memcpy(&p->stops[i].pos, q + 8, 4);
+        memcpy(&p->stops[i].pos, base + i * 4, 4);
+        memcpy(&p->stops[i].color, base + n * 4 + i * 8, 8);
         p->nstops++;
     }
 }
@@ -576,6 +581,11 @@ static void req_set_transform(Display *d, const unsigned char *b, size_t len)
     if (!p) return;
     p->xf = r->transform;
     p->have_transform = True;
+    if (getenv("MW_TRACE_RENDER"))
+        fprintf(stderr, "MW: settransform pic=0x%lx [%.3f %.3f %.3f; %.3f %.3f %.3f]\n",
+                (unsigned long)r->picture,
+                frac(r->transform.matrix11), frac(r->transform.matrix12), frac(r->transform.matrix13),
+                frac(r->transform.matrix21), frac(r->transform.matrix22), frac(r->transform.matrix23));
 }
 
 static void req_set_filter(Display *d, const unsigned char *b, size_t len)
