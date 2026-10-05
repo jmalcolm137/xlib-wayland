@@ -575,6 +575,8 @@ bool mw_dnd_xconvert(Display *d, Atom selection, Atom target, Atom property,
             XChangeProperty(d, requestor, prop, XA_STRING, 8, PropModeReplace,
                             (const unsigned char *)host, (int)strlen(host) + 1);
             dnd_notify(d, selection, target, requestor, time, prop, true);
+            TR("remote HOST_NAME -> '%s' (requestor=0x%lx prop=%lu)\n", host,
+               (unsigned long)requestor, (unsigned long)prop);
             return true;
         }
         if (target == a_targets(d)) {
@@ -600,6 +602,7 @@ bool mw_dnd_xconvert(Display *d, Atom selection, Atom target, Atom property,
         /* The real payload (FILE_NAME, TEXT, ...): relay to the initiator. */
         if (mw_broker_convert(d, selection, target, property, requestor, time))
             return true;
+        TR("remote relay refused target=%lu\n", (unsigned long)target);
         dnd_notify(d, selection, target, requestor, time, prop, false);
         return true;
     }
