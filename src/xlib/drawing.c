@@ -526,6 +526,7 @@ static void send_copy_exposures(Display *d, Drawable dst, GC gc, int major)
 int XCopyArea(Display *d, Drawable src, Drawable dst, GC gc,
               int sx, int sy, unsigned int w, unsigned int h, int dx, int dy)
 {
+
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: XCopyArea src=0x%lx dst=0x%lx (%d,%d)->(%d,%d) %ux%u%s\n",
                 src, dst, sx, sy, dx, dy, w, h, src == dst ? " SELF" : "");
