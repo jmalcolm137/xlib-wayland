@@ -442,6 +442,19 @@ MwWindow *mw_popup_anchor(MwWindow *win)
     if (!win || !win->override_redirect) return NULL;
     Display *d = win->d;
     XDisplayImpl *dp = MWD(d);
+
+    /* A menu mapped while another menu is already open is that menu's
+     * submenu, and has to be a *child popup* of it.  Anchoring it to the
+     * application toplevel instead makes it a sibling, and sibling popups do
+     * not nest: moving the pointer into the submenu leaves the parent menu's
+     * popup subtree, and the compositor dismisses the parent out from under
+     * the selection. */
+    MwWindow *open = dp->open_menu;
+    if (open && open != win && open->mapped && open->tl &&
+        open->tl->is_popup && open->tl->xdg_surface &&
+        !open->tl->popup_dismissed)
+        return open;
+
     MwWindow *cand = dp->ptr_toplevel;
 
     if (!cand || cand->override_redirect) cand = dp->kbd_focus;
@@ -485,6 +498,7 @@ void mw_toplevel_create(MwWindow *win)
     if (ptl) {
         tl->is_popup = true;
         tl->parent_tl = ptl;
+        win->popup_parent = ptl;   /* the menu this (sub)menu nests under */
         int rx = 0, ry = 0, tx = 0, ty = 0;
         mw_window_origin(win, &rx, &ry);
         mw_window_origin(ptl, &tx, &ty);

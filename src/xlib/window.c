@@ -394,6 +394,7 @@ void mw_destroy_window(Display *d, MwWindow *win)
          * caught up still needs somewhere to anchor. */
         if (dp->active_toplevel == win)
             dp->active_toplevel = mw_any_mapped_toplevel(d, win);
+        if (dp->open_menu      == win) dp->open_menu      = win->popup_parent;
         if (dp->ptr_window     == win) dp->ptr_window     = NULL;
         if (dp->ptr_toplevel   == win) dp->ptr_toplevel   = NULL;
         if (dp->ptr_focus      == win) dp->ptr_focus      = NULL;
@@ -523,6 +524,10 @@ void mw_map_window(Display *d, MwWindow *win, bool raised)
         if (!win->override_redirect) {
             MWD(d)->active_toplevel = win;
             focus_toplevel = true;
+        } else if (win->tl && win->tl->is_popup) {
+            /* Remember the open menu so a submenu mapped next nests under it
+             * rather than becoming a sibling popup (see mw_popup_anchor). */
+            MWD(d)->open_menu = win;
         }
         mw_window_expose(win, 0, 0, win->w, win->h);
     } else if (win->parent) {
@@ -600,6 +605,8 @@ void mw_unmap_window(Display *d, MwWindow *win)
     win->map_state = IsUnmapped;
     if (MWD(d)->active_toplevel == win)
         MWD(d)->active_toplevel = mw_any_mapped_toplevel(d, win);
+    if (MWD(d)->open_menu == win)
+        MWD(d)->open_menu = win->popup_parent;
     if (win->tl) mw_toplevel_unmap(win->tl);
     if (win->parent) {
         /* The parent is told about a child being unmapped whatever role the

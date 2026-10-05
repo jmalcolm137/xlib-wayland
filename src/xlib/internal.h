@@ -245,6 +245,7 @@ struct MwWindow {
     bool            redirect_to_toplevel; /* set for top-levels */
 
     MwWindow       *parent;
+    MwWindow       *popup_parent;    /* the menu this popup nests under, if any */
     MwWindow       *children;        /* first child (bottom of stack) */
     MwWindow       *last_child;      /* top of stack */
     MwWindow       *next_sib;
@@ -528,6 +529,10 @@ typedef struct _XDisplayImpl {
      * toplevel by walking the X hierarchy -- yet that is what a menu has to be
      * anchored to. */
     MwWindow                   *active_toplevel;
+    /* The override-redirect menu currently posted, if any.  A menu mapped
+     * while another is open is that menu's submenu, and must be nested under
+     * it (see mw_popup_anchor). */
+    MwWindow                   *open_menu;
 
     MwWindow                   *ptr_grab_window;
     MwWindow                   *implicit_grab;   /* window that got the last button press */
