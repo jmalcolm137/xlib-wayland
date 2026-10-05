@@ -340,7 +340,14 @@ static void apply_values(MwRenderPicture *p, CARD32 mask, const CARD32 *v)
     if (mask & CPAlphaYOrigin)    (void)NEXT();
     if (mask & CPClipXOrigin)     (void)NEXT();
     if (mask & CPClipYOrigin)     (void)NEXT();
-    if (mask & CPClipMask)        (void)NEXT();
+    if (mask & CPClipMask) {
+        /* A clip mask (or None, which cairo uses to clear the clip) replaces
+         * any rectangle clip.  We do not implement mask clips, so drop the
+         * rectangle clip: keeping it would clip later drawing to a stale box
+         * (glyph runs after a clip-to-None lost their text). */
+        (void)NEXT();
+        if (p->has_clip) { pixman_region32_fini(&p->clip); p->has_clip = 0; }
+    }
     if (mask & CPGraphicsExposure)(void)NEXT();
     if (mask & CPSubwindowMode)   p->subwindow_mode = (int)NEXT();
     if (mask & CPPolyEdge)        p->poly_edge = (int)NEXT();
@@ -659,7 +666,11 @@ static void req_add_glyphs(Display *d, const unsigned char *b, size_t len)
 static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
                        int op, MwGlyphSet *gs, int gid, int x, int y)
 {
-    if (gid < 0 || gid >= gs->cap || !gs->glyphs[gid]) return;
+    if (gid < 0 || gid >= gs->cap || !gs->glyphs[gid]) {
+        if (getenv("MW_TRACE_RENDER"))
+            fprintf(stderr, "MW: drawglyph MISSING gid=%d cap=%d\n", gid, gs->cap);
+        return;
+    }
     MwSurface *mask = gs->glyphs[gid];
     int w = gs->gw[gid], h = gs->gh[gid];
     /* The pen (x,y) is the glyph origin; the bitmap's top-left sits at the
@@ -697,6 +708,10 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
     MwGlyphSet *gs = glyphset(d, r->glyphset);
     if (!dst || !src || !gs) return;
 
+    if (getenv("MW_TRACE_RENDER"))
+        fprintf(stderr, "MW: glyphrun dst=0x%lx drawable=0x%lx %dx at %d,%d\n",
+                (unsigned long)r->dst, (unsigned long)dst->drawable, glyph_bytes,
+                (int)r->xSrc, (int)r->ySrc);
     const unsigned char *p = b + sz_xRenderCompositeGlyphs8Req;   /* 28-byte header */
     const unsigned char *end = b + len;
     /* The X server accumulates the pen from the picture origin: each element
