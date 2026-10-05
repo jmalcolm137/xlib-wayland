@@ -161,6 +161,30 @@ void mw_smprop_publish(Display *d, Atom prop, Atom type, int format,
     if (tname) XFree((char *)tname);
 }
 
+/* Does the store hold a value for this property name? */
+static bool smp_has(const char *name)
+{
+    char path[256];
+    smp_path(path, sizeof path);
+    int fd = open(path, O_RDONLY, 0600);
+    if (fd < 0) return false;
+    char   buf[SMP_MAX];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return false;
+    buf[n] = 0;
+    size_t nl = strlen(name);
+    char  *p = buf;
+    bool   found = false;
+    while (*p) {
+        char *e = strchr(p, '\n');
+        size_t sl = e ? (size_t)(e - p) : strlen(p);
+        if (sl > nl && p[nl] == '\t' && strncmp(p, name, nl) == 0) { found = true; break; }
+        p = e ? e + 1 : p + sl;
+    }
+    return found;
+}
+
 /* Look up a shared property.  On success the caller owns *data (XFree it). */
 bool mw_smprop_lookup(Display *d, Atom prop, Atom *type, int *format,
                       unsigned long *nitems, unsigned char **data)
@@ -215,6 +239,15 @@ bool mw_smprop_lookup(Display *d, Atom prop, Atom *type, int *format,
                 p = nl ? nl + 1 : p + sl;
             }
         }
+    }
+    /* dtstyle treats a present _DT_SM_WINDOW_INFO as "the session manager is
+     * here", then insists on its state and screen-saver settings and exits if
+     * they are missing.  A manager that has not published those is worse than
+     * none, so do not offer the window until it has. */
+    if (found && pname && strcmp(pname, "_DT_SM_WINDOW_INFO") == 0 &&
+        (!smp_has("_DT_SM_STATE_INFO") || !smp_has("_DT_SM_SAVER_INFO"))) {
+        if (data && *data) { free(*data); *data = NULL; }
+        found = false;
     }
     XFree((char *)pname);
     return found;
