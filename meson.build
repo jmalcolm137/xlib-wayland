@@ -55,7 +55,7 @@ xlib_sources = files(
   'src/xlib/font.c', 'src/xlib/geometry.c', 'src/xlib/image.c',
   'src/xlib/input.c', 'src/xlib/keymap.c', 'src/xlib/region.c',
   'src/xlib/resource.c', 'src/xlib/selection.c', 'src/xlib/window.c',
-  'src/xlib/xim.c', 'src/xlib/xi2.c', 'src/xlib/xkb.c', 'src/xlib/xmb.c', 'src/xlib/xtcompat.c', 'src/xlib/xlibint.c', 'src/xlib/xrandr.c',
+  'src/xlib/xim.c', 'src/xlib/xi2.c', 'src/xlib/xkb.c', 'src/xlib/xmb.c', 'src/xlib/xtcompat.c', 'src/xlib/xlibint.c',
   'src/xlib/xresources.c', 'src/xlib/xftbridge.c', 'src/xlib/render.c',
   'src/xlib/xshape.c')
 
@@ -104,6 +104,29 @@ pkg.generate(libxft,
   filebase: 'xft',
   version: '2.3.6',
   description: 'Xft over the Motif/Wayland raster font path',
+  requires: 'x11',
+  subdirs: 'X11')
+
+# RandR lives in its own library, as in Xorg.  We advertise 1.4 (the single
+# monitor covers the wl_output; XRRGetOutputInfo reports its physical size, so
+# GDK derives a real DPI).  Installing libXrandr.so.2 here shadows the host's
+# -- the same soname -- so GTK2/GDK use this facade instead of issuing RandR
+# wire requests that we do not implement (which made XRRQueryVersion return 0
+# and left GDK without monitor millimetres).
+libxrandr = shared_library('Xrandr',
+  'src/xlib/xrandr.c',
+  include_directories: inc,
+  dependencies: [pixman_dep, m_dep],
+  link_with: libx11,
+  version: '2.0.2',
+  soversion: '2',
+  install: true)
+
+pkg.generate(libxrandr,
+  name: 'xrandr',
+  filebase: 'xrandr',
+  version: '1.4.0',
+  description: 'X Resize and Rotate (RandR 1.4) over Wayland',
   requires: 'x11',
   subdirs: 'X11')
 

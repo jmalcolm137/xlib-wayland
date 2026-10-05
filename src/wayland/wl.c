@@ -72,7 +72,16 @@ static const struct xdg_wm_base_listener wm_base_listener = {
 static void output_geometry(void *data, struct wl_output *o, int32_t x, int32_t y,
                             int32_t pw, int32_t ph, int32_t subpixel,
                             const char *make, const char *model, int32_t transform)
-{ (void)data;(void)o;(void)x;(void)y;(void)pw;(void)ph;(void)subpixel;(void)make;(void)model;(void)transform; }
+{
+    (void)o; (void)x; (void)y; (void)subpixel;
+    (void)make; (void)model; (void)transform;
+    /* Physical size in millimetres; 0 means the compositor does not know it.
+     * XRandR (and thus GDK) turns pixel size + mm into a real DPI, which GIMP
+     * and others use to size their UI. */
+    Display *d = data;
+    MWD(d)->output_pw = pw;
+    MWD(d)->output_ph = ph;
+}
 
 static void output_mode(void *data, struct wl_output *o, uint32_t flags,
                         int32_t width, int32_t height, int32_t refresh)
@@ -81,6 +90,12 @@ static void output_mode(void *data, struct wl_output *o, uint32_t flags,
     Display *d = data;
     XDisplayImpl *dp = MWD(d);
     if (flags & WL_OUTPUT_MODE_CURRENT) {
+        /* The mode is in physical pixels; output_done() turns it into the
+         * logical size once scale has been seen.  Set the screen here too so
+         * that a compositor whose wl_output predates `done` still gets a
+         * usable size. */
+        dp->output_mode_w = width;
+        dp->output_mode_h = height;
         dp->output_w = width;
         dp->output_h = height;
         if (dp->screens) {
@@ -89,8 +104,39 @@ static void output_mode(void *data, struct wl_output *o, uint32_t flags,
         }
     }
 }
-static void output_done(void *data, struct wl_output *o) { (void)data;(void)o; }
-static void output_scale(void *data, struct wl_output *o, int32_t f) { (void)data;(void)o;(void)f; }
+static void output_scale(void *data, struct wl_output *o, int32_t f)
+{
+    (void)o;
+    /* MW_FORCE_SCALE overrides the compositor's scale, so the HiDPI path can
+     * be exercised on an unscaled display (test aid; see docs). */
+    const char *force = getenv("MW_FORCE_SCALE");
+    if (force && atoi(force) > 0) f = atoi(force);
+    if (f > 0) MWD((Display *)data)->output_scale = f;
+}
+
+/* wl_output.done arrives after geometry/mode/scale, so this is where the
+ * logical size is finalised.  GTK2 has no HiDPI support: 1 logical pixel is
+ * presented as `scale` physical pixels, so the screen the application sees is
+ * mode/scale, and GDK's DPI (logical pixels per millimetre) comes out as the
+ * physical DPI divided by the scale -- which is exactly what a non-scaled
+ * client should lay its UI out for. */
+static void output_done(void *data, struct wl_output *o)
+{
+    (void)o;
+    Display *d = data;
+    XDisplayImpl *dp = MWD(d);
+    int scale = dp->output_scale > 0 ? dp->output_scale : 1;
+    int w = dp->output_mode_w > 0 ? dp->output_mode_w / scale : dp->output_w;
+    int h = dp->output_mode_h > 0 ? dp->output_mode_h / scale : dp->output_h;
+    if (w <= 0) w = dp->output_w > 0 ? dp->output_w : MW_DEFAULT_W;
+    if (h <= 0) h = dp->output_h > 0 ? dp->output_h : MW_DEFAULT_H;
+    dp->output_w = w;
+    dp->output_h = h;
+    if (dp->screens) {
+        dp->screens[0].width = w;
+        dp->screens[0].height = h;
+    }
+}
 static void output_name(void *data, struct wl_output *o, const char *n) { (void)data;(void)o;(void)n; }
 static void output_description(void *data, struct wl_output *o, const char *n) { (void)data;(void)o;(void)n; }
 

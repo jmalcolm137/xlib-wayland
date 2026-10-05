@@ -5,8 +5,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-void mw_xrandr_init(Display *d) { (void)d; }
-
 Bool XRRQueryExtension(Display *d, int *event_base, int *error_base)
 {
     (void)d;
@@ -80,8 +78,15 @@ XRROutputInfo *XRRGetOutputInfo(Display *d, XRRScreenResources *res, RROutput ou
     o->crtc = out == 3 ? 2 : 0;
     o->name = strdup("WAYLAND-1");
     o->nameLen = (int)strlen(o->name);
-    o->mm_width = (unsigned)(MWD(d)->output_w * 25.4 / MW_DEFAULT_DPI);
-    o->mm_height = (unsigned)(MWD(d)->output_h * 25.4 / MW_DEFAULT_DPI);
+    /* Prefer the compositor's physical size (wl_output.geometry); fall back to
+     * a 96-dpi guess only when it does not report one.  GDK turns pixel size
+     * plus millimetres into a real DPI, which applications such as GIMP use. */
+    o->mm_width  = MWD(d)->output_pw > 0
+                   ? (unsigned)MWD(d)->output_pw
+                   : (unsigned)(MWD(d)->output_w * 25.4 / MW_DEFAULT_DPI);
+    o->mm_height = MWD(d)->output_ph > 0
+                   ? (unsigned)MWD(d)->output_ph
+                   : (unsigned)(MWD(d)->output_h * 25.4 / MW_DEFAULT_DPI);
     o->connection = RR_Connected;
     o->subpixel_order = SubPixelUnknown;
     o->ncrtc = 1;
@@ -168,3 +173,101 @@ void XRRSetScreenSize(Display *d, Window w, int width, int height,
 }
 
 int XRRGetScreenResourcesRefCount(XRRScreenResources *r) { (void)r; return 0; }
+
+/* RandR 1.5 monitors.  We advertise 1.4, so GDK takes the 1.3 path
+ * (XRRGetOutputInfo); these exist so a program that links libXrandr finds the
+ * symbols, and so advertising 1.5 later is a one-line change. */
+XRRMonitorInfo *XRRGetMonitors(Display *d, Window w, Bool get_active,
+                               int *nmonitors)
+{
+    (void)w; (void)get_active;
+    XDisplayImpl *dp = MWD(d);
+    XRRMonitorInfo *m = calloc(1, sizeof *m);
+    if (!m) { if (nmonitors) *nmonitors = 0; return NULL; }
+    m->name = None;
+    m->primary = True;
+    m->automatic = False;
+    m->noutput = 1;
+    m->x = 0;
+    m->y = 0;
+    m->width  = dp->output_w > 0 ? dp->output_w : MW_DEFAULT_W;
+    m->height = dp->output_h > 0 ? dp->output_h : MW_DEFAULT_H;
+    m->mwidth  = dp->output_pw > 0 ? dp->output_pw
+                 : (int)(m->width * 25.4 / MW_DEFAULT_DPI);
+    m->mheight = dp->output_ph > 0 ? dp->output_ph
+                 : (int)(m->height * 25.4 / MW_DEFAULT_DPI);
+    m->outputs = malloc(sizeof(RROutput));
+    if (m->outputs) m->outputs[0] = 3;
+    else m->noutput = 0;
+    if (nmonitors) *nmonitors = 1;
+    return m;
+}
+
+void XRRFreeMonitors(XRRMonitorInfo *monitors)
+{
+    if (!monitors) return;
+    free(monitors[0].outputs);
+    free(monitors);
+}
+
+/* The remaining RandR entry points a GTK2 application may link.  There is one
+ * output whose configuration the compositor owns, so gamma and mode-setting
+ * requests are accepted and not carried, and output properties report "not
+ * found".  They exist so nothing fails to resolve at load time. */
+
+XRRCrtcGamma *XRRAllocGamma(int size)
+{
+    XRRCrtcGamma *g = malloc(sizeof *g);
+    if (!g) return NULL;
+    g->size = size;
+    g->red   = calloc((size_t)size, sizeof(unsigned short));
+    g->green = calloc((size_t)size, sizeof(unsigned short));
+    g->blue  = calloc((size_t)size, sizeof(unsigned short));
+    if (!g->red || !g->green || !g->blue) { XRRFreeGamma(g); return NULL; }
+    return g;
+}
+
+void XRRFreeGamma(XRRCrtcGamma *gamma)
+{
+    if (!gamma) return;
+    free(gamma->red);
+    free(gamma->green);
+    free(gamma->blue);
+    free(gamma);
+}
+
+int XRRGetCrtcGammaSize(Display *d, RRCrtc crtc) { (void)d; (void)crtc; return 0; }
+
+XRRCrtcGamma *XRRGetCrtcGamma(Display *d, RRCrtc crtc)
+{ (void)d; (void)crtc; return NULL; }
+
+void XRRSetCrtcGamma(Display *d, RRCrtc crtc, XRRCrtcGamma *gamma)
+{ (void)d; (void)crtc; (void)gamma; }
+
+int XRRGetOutputProperty(Display *dpy, RROutput output, Atom property,
+                         long offset, long length, Bool delete, Bool pending,
+                         Atom req_type, Atom *actual_type, int *actual_format,
+                         unsigned long *nitems, unsigned long *bytes_after,
+                         unsigned char **prop)
+{
+    (void)dpy; (void)output; (void)property; (void)offset; (void)length;
+    (void)delete; (void)pending; (void)req_type;
+    if (actual_type)   *actual_type = None;
+    if (actual_format) *actual_format = 0;
+    if (nitems)        *nitems = 0;
+    if (bytes_after)   *bytes_after = 0;
+    if (prop)          *prop = NULL;
+    return BadName;
+}
+
+Status XRRSetCrtcConfig(Display *dpy, XRRScreenResources *res, RRCrtc crtc,
+                        Time timestamp, int x, int y, RRMode mode,
+                        Rotation rotation, RROutput *outputs, int noutputs)
+{
+    (void)dpy; (void)res; (void)crtc; (void)timestamp; (void)x; (void)y;
+    (void)mode; (void)rotation; (void)outputs; (void)noutputs;
+    return Success;
+}
+
+void XRRSetOutputPrimary(Display *dpy, Window window, RROutput output)
+{ (void)dpy; (void)window; (void)output; }

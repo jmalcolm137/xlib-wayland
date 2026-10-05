@@ -433,7 +433,10 @@ typedef struct _XDisplayImpl {
     MwClipFetch                  clip_fetch;
     MwClipServe                  clip_serve;
 
-    int                         output_w, output_h;
+    int                         output_w, output_h;   /* logical size, pixels */
+    int                         output_pw, output_ph; /* physical size, mm */
+    int                         output_mode_w, output_mode_h; /* mode, physical px */
+    int                         output_scale;         /* wl_output.scale, >= 1 */
     int                         seat_caps;
 
     /* XInput2 emulation: the last request built through _XGetRequest (so
@@ -815,7 +818,7 @@ void      mw_cursor_fini(Display *d);
 void      mw_xim_init(Display *d);
 
 /* xrandr (xrandr.c) / shape (xshape.c) */
-void      mw_xrandr_init(Display *d);
+
 void      mw_shape_init(Display *d);
 
 /* Render extension (render.c): intercepts libXrender's wire requests under the

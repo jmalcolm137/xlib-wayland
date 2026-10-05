@@ -251,7 +251,6 @@ Display *XOpenDisplay(_Xconst char *display_name)
     mw_clipboard_init(d);
     mw_cursor_init(d);
     mw_xim_init(d);
-    mw_xrandr_init(d);
     mw_shape_init(d);
 
     /* The keymap comes from the compositor, but keymap-aware clients read the
