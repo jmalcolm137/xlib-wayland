@@ -249,6 +249,7 @@ Display *XOpenDisplay(_Xconst char *display_name)
     mw_keymap_init(d, NULL);
     mw_init_selection(d);
     mw_clipboard_init(d);
+    mw_broker_init(d);
     mw_cursor_init(d);
     mw_xim_init(d);
     mw_shape_init(d);

@@ -441,6 +441,9 @@ typedef struct _XDisplayImpl {
     void                              *text_input_ic;
     bool                               text_input_entered;
 
+    /* Cross-process selection broker (optional; see broker.c).  Opaque here. */
+    struct MwBroker             *broker;
+
     /* Wayland clipboard bridge */
     MwWlOffer                   *wayland_offer;   /* current clipboard offer */
     MwWlOffer                   *pending_offer;   /* seen, not yet selected */
@@ -849,6 +852,38 @@ void      mw_clipboard_owner_changed(Display *d, Atom selection, Window owner);
 /* Convert between UTF-8 and Latin-1 where a peer needs a particular encoding. */
 char     *mw_clipboard_to_utf8(const unsigned char *in, size_t inlen, size_t *outlen);
 char     *mw_clipboard_from_utf8(const unsigned char *in, size_t inlen, size_t *outlen);
+
+/* Cross-process selection broker (xlib/broker.c).
+ *
+ * Every shim process is its own X server, so an X selection owned by one client
+ * is invisible to the rest.  CDE's colour server (dtsession) owns
+ * "Customize Data:<screen>"; dtstyle asks for it and, getting no answer, decides
+ * the colour server is not running.  When enabled, sharing clients advertise
+ * their ownership in a file under XDG_RUNTIME_DIR and accept convert requests on
+ * a per-process Unix socket, servicing each through their own SelectionRequest
+ * path and returning the converted property.  Opt in with
+ * XLIB_WAYLAND_SHARE_SELECTIONS (comma-separated name prefixes; the default is
+ * "Customize Data:"). */
+void      mw_broker_init(Display *d);
+void      mw_broker_fini(Display *d);
+/* Service inbound/outbound broker traffic (call on every event pump). */
+void      mw_broker_handle_ready(Display *d);
+/* fd to include in the event-loop poll for broker traffic, or -1. */
+int       mw_broker_poll_fd(Display *d);
+/* Record/clear our ownership of a shared selection. */
+void      mw_broker_owner_changed(Display *d, Atom selection, Window owner);
+/* Forward a convert request to a remote owner.  Returns true when accepted (the
+ * SelectionNotify is posted later, asynchronously). */
+bool      mw_broker_convert(Display *d, Atom selection, Atom target,
+                            Atom property, Window requestor, Time time);
+/* Capture the property an owner writes while servicing a broker request.
+ * Returns true when the write was ours (the serve proxy window). */
+bool      mw_broker_capture_prop(Display *d, Window w, Atom property, Atom type,
+                                 int format, const unsigned char *data,
+                                 unsigned long nitems);
+/* Complete a serve when the owner's SelectionNotify arrives.  Returns true when
+ * the event was ours and should not be queued. */
+bool      mw_broker_serve_notify(Display *d, XSelectionEvent *se);
 
 
 /* cursor (cursor.c) */

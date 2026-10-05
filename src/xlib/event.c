@@ -102,6 +102,11 @@ void mw_put_event(Display *d, XEvent *ev)
         ev->xselection.requestor == dp->clip_window &&
         mw_clipboard_serve_notify(d, &ev->xselection))
         return;
+    /* Likewise, a SelectionNotify for the broker's proxy requestor window
+     * belongs to a transfer we are servicing for another shim process. */
+    if (ev->type == SelectionNotify &&
+        mw_broker_serve_notify(d, &ev->xselection))
+        return;
     static int trace = -1;
     static long evtotal;
     static long evcount[64];

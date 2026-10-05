@@ -40,6 +40,7 @@ int XSetSelectionOwner(Display *d, Atom selection, Window owner, Time time)
     s->owner = owner;
     s->time = time;
     mw_clipboard_owner_changed(d, selection, owner);
+    mw_broker_owner_changed(d, selection, owner);
     if (old != None && old != owner) {
         MwWindow *w = mw_window(d, old);
         if (w) {
@@ -68,6 +69,11 @@ int XConvertSelection(Display *d, Atom selection, Atom target, Atom property,
     /* No X client owns it, or the owner is our proxy window standing in for
      * the compositor clipboard: serve the request from the Wayland offer. */
     if (owner == None || owner == MWD(d)->clip_window) {
+        /* A shared selection may be owned by another shim process (e.g. the
+         * colour server in dtsession); ask its broker for the transfer. */
+        if (owner == None &&
+            mw_broker_convert(d, selection, target, property, requestor, time))
+            return 1;
         if (mw_clipboard_xconvert(d, selection, target, property, requestor, time))
             return 1;   /* SelectionNotify posted once the transfer completes */
         XSelectionEvent se;

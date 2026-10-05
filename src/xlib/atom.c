@@ -351,6 +351,10 @@ int XChangeProperty(Display *d, Window w, Atom property, Atom type, int format,
         mw_set_prop(d, win, property, type, format, buf, oldn + nelements);
         free(buf);
     }
+    /* If this is the broker's proxy requestor window, remember what the
+     * selection converter wrote; the broker forwards it to the remote client
+     * (packed is still live here). */
+    mw_broker_capture_prop(d, w, property, type, format, data, (unsigned long)nelements);
     free(packed);
     prop_notify(d, win, property, PropertyNewValue);
     mw_window_props_changed(d, win, property);

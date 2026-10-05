@@ -193,6 +193,7 @@ void mw_wl_disconnect(XDisplayImpl *dp)
 {
     if (!dp->wl_display) return;
     mw_wakeup_stop(dp);
+    mw_broker_fini((Display *)dp);
     mw_clipboard_fini((Display *)dp);
     if (dp->wl_seat) mw_input_fini((Display *)dp);
     if (dp->text_input) zwp_text_input_v3_destroy(dp->text_input);
@@ -238,7 +239,8 @@ void mw_block_for_events(Display *d)
      * also watching a timer -- otherwise a paste whose data arrives off the
      * event loop, or a repeat, would wait for an unrelated Wayland event. */
     int cfd = mw_clipboard_poll_fd(d);
-    if (cfd < 0 && rtimeout < 0) {
+    int bfd = mw_broker_poll_fd(d);
+    if (cfd < 0 && bfd < 0 && rtimeout < 0) {
         if (wl_display_dispatch(dp->wl_display) < 0)
             mw_io_error(d, "Wayland connection closed");
         mw_input_settle(d);
@@ -249,18 +251,21 @@ void mw_block_for_events(Display *d)
         if (wl_display_dispatch_pending(dp->wl_display) < 0) {
             if (!dp->closed) mw_io_error(d, "Wayland connection error");
             mw_clipboard_handle_ready(d);
+    mw_broker_handle_ready(d);
             return;
         }
     }
     wl_display_flush(dp->wl_display);
 
-    struct pollfd pfd[2];
-    pfd[0].fd = dp->wl_fd; pfd[0].events = POLLIN; pfd[0].revents = 0;
-    pfd[1].fd = cfd;    pfd[1].events = POLLIN; pfd[1].revents = 0;
+    struct pollfd pfd[3];
+    int np = 0;
+    pfd[np].fd = dp->wl_fd; pfd[np].events = POLLIN; pfd[np].revents = 0; np++;
+    if (cfd >= 0) { pfd[np].fd = cfd; pfd[np].events = POLLIN; pfd[np].revents = 0; np++; }
+    if (bfd >= 0) { pfd[np].fd = bfd; pfd[np].events = POLLIN; pfd[np].revents = 0; np++; }
 
     int timeout = rtimeout >= 0 ? rtimeout : 100;
-    if (cfd >= 0 && timeout > 100) timeout = 100;
-    int r = poll(pfd, cfd >= 0 ? 2 : 1, timeout);
+    if ((cfd >= 0 || bfd >= 0) && timeout > 100) timeout = 100;
+    int r = poll(pfd, np, timeout);
     if (r > 0 && pfd[0].revents) {
         if (wl_display_read_events(dp->wl_display) < 0) {
             mw_io_error(d, "Wayland connection closed");
@@ -273,6 +278,7 @@ void mw_block_for_events(Display *d)
         mw_io_error(d, "Wayland connection error");
     mw_input_settle(d);
     mw_clipboard_handle_ready(d);
+    mw_broker_handle_ready(d);
     mw_kbd_repeat_pump(d);
 }
 
@@ -321,4 +327,5 @@ void mw_process_events(Display *d, bool block)
         mw_io_error(d, "Wayland connection error");
     mw_input_settle(d);
     mw_clipboard_handle_ready(d);
+    mw_broker_handle_ready(d);
 }
