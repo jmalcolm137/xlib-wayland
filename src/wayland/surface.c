@@ -704,20 +704,22 @@ void mw_toplevel_set_size(MwToplevel *tl, int w, int h)
  * accepted and ignored. */
 
 /* Mirror the state back onto the window: GDK reads _NET_WM_STATE to answer
- * gdk_window_get_state()/gdk_window_get_fullscreen() and to update GIMP's
- * menubar style, and it watches the property for changes. */
+ * gdk_window_get_state()/get_fullscreen() and to update the application's UI,
+ * and it watches the property for changes. */
 static void toplevel_sync_net_wm_state(Display *d, MwWindow *win)
 {
     Atom state = mw_intern_atom(d, "_NET_WM_STATE", True);
-    Atom fs = mw_intern_atom(d, "_NET_WM_STATE_FULLSCREEN", True);
-    if (!state) return;
-    if (win->tl && win->tl->fullscreen && fs) {
-        unsigned long atom = (unsigned long)fs;
-        XChangeProperty(d, win->id, state, XA_ATOM, 32, PropModeReplace,
-                        (unsigned char *)&atom, 1);
-    } else {
-        XChangeProperty(d, win->id, state, XA_ATOM, 32, PropModeReplace, NULL, 0);
+    if (!state || !win->tl) return;
+    unsigned long atoms[3];
+    int n = 0;
+    if (win->tl->fullscreen)
+        atoms[n++] = mw_intern_atom(d, "_NET_WM_STATE_FULLSCREEN", True);
+    if (win->tl->maximized) {
+        atoms[n++] = mw_intern_atom(d, "_NET_WM_STATE_MAXIMIZED_VERT", True);
+        atoms[n++] = mw_intern_atom(d, "_NET_WM_STATE_MAXIMIZED_HORZ", True);
     }
+    XChangeProperty(d, win->id, state, XA_ATOM, 32, PropModeReplace,
+                    n ? (unsigned char *)atoms : NULL, n);
 }
 
 void mw_toplevel_set_fullscreen(Display *d, MwWindow *win, bool on)
@@ -765,14 +767,41 @@ void mw_wm_net_wm_state(Display *d, XClientMessageEvent *cm)
     MwWindow *win = mw_window(d, cm->window);
     if (!win || !win->tl || win->tl->is_popup) return;
     Atom fs = mw_intern_atom(d, "_NET_WM_STATE_FULLSCREEN", True);
+    Atom mv = mw_intern_atom(d, "_NET_WM_STATE_MAXIMIZED_VERT", True);
+    Atom mh = mw_intern_atom(d, "_NET_WM_STATE_MAXIMIZED_HORZ", True);
     long action = cm->data.l[0];              /* 0 remove, 1 add, 2 toggle */
     for (int i = 0; i < 2; i++) {
         Atom a = (Atom)cm->data.l[1 + i];
-        if (fs && a == fs) {
+        if (!a) continue;
+        if (a == fs) {
             bool on = (action == 1) || (action == 2 && !win->tl->fullscreen);
             mw_toplevel_set_fullscreen(d, win, on);
+        } else if (a == mv || a == mh) {
+            /* xdg-shell only has a full maximize, and GDK sends both hints,
+             * so either atom maximises (and a half-maximised request is
+             * treated as a full one). */
+            bool on = (action == 1) || (action == 2 && !win->tl->maximized);
+            mw_toplevel_set_maximized(d, win, on);
         }
     }
+}
+
+/* Maximize has no client-side geometry of its own: xdg_toplevel_set_maximized
+ * lets the compositor size the window (keeping its decorations), and its
+ * configure resizes the X window.  We only track the state and mirror it. */
+void mw_toplevel_set_maximized(Display *d, MwWindow *win, bool on)
+{
+    MwToplevel *tl = win ? win->tl : NULL;
+    if (!tl || tl->is_popup || win->override_redirect) return;
+    if (tl->maximized == on) return;
+    tl->maximized = on;
+    if (tl->xdg_toplevel) {
+        if (on) xdg_toplevel_set_maximized(tl->xdg_toplevel);
+        else    xdg_toplevel_unset_maximized(tl->xdg_toplevel);
+    }
+    toplevel_sync_net_wm_state(d, win);
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: maximize %d win=0x%lx\n", on, win->id);
 }
 
 void mw_toplevel_map(MwToplevel *tl)
@@ -1109,10 +1138,26 @@ void mw_queue_render(Display *d)
 static void tl_configure(void *data, struct xdg_toplevel *t, int32_t w, int32_t h,
                          struct wl_array *states)
 {
-    (void)t; (void)states;
+    (void)t;
     MwToplevel *tl = data;
+    /* Track the states the compositor reports (a maximize from the window
+     * chrome does not go through the client's X request) and mirror them into
+     * the window's _NET_WM_STATE property, which is what GDK and the
+     * application read. */
+    bool maximized = false, fullscreen = false;
+    uint32_t *s;
+    wl_array_for_each(s, states) {
+        if (*s == XDG_TOPLEVEL_STATE_MAXIMIZED)  maximized = true;
+        else if (*s == XDG_TOPLEVEL_STATE_FULLSCREEN) fullscreen = true;
+    }
     if (w > 0) tl->req_w = w;
     if (h > 0) tl->req_h = h;
+    if (!tl->is_popup && tl->win &&
+        (maximized != tl->maximized || fullscreen != tl->fullscreen)) {
+        tl->maximized = maximized;
+        tl->fullscreen = fullscreen;
+        toplevel_sync_net_wm_state(tl->win->d, tl->win);
+    }
     /* The window is now managed, so relay _MOTIF_WM_HINTS.  The WM may not
      * have registered the window's title yet; the helper retries briefly. */
     if (!tl->motif_functions_sent && tl->win)

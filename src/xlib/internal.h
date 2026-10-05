@@ -340,6 +340,7 @@ struct MwToplevel {
     bool                   csd;              /* draw client-side decorations */
     int                    tb_h;             /* titlebar height when csd */
     bool                   fullscreen;       /* we (as WM) put it fullscreen */
+    bool                   maximized;        /* ... or maximized */
     int                    fs_w, fs_h;       /* size to restore on unfullscreen */
     bool                   fs_csd;           /* decoration state to restore */
     bool                   undecorated;      /* client asked for no decorations
@@ -718,6 +719,7 @@ void        mw_toplevel_reposition(MwToplevel *tl);
  * remove or toggle a state (fullscreen today). */
 void        mw_wm_net_wm_state(Display *d, XClientMessageEvent *cm);
 void        mw_toplevel_set_fullscreen(Display *d, MwWindow *win, bool on);
+void        mw_toplevel_set_maximized(Display *d, MwWindow *win, bool on);
 
 /* X resource database loading (xresources.c) */
 void        mw_load_resources(Display *d);
