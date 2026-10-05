@@ -525,6 +525,9 @@ typedef struct _XDisplayImpl {
     struct xkb_context         *xkb_ctx;
     struct xkb_keymap          *xkb_keymap;
     struct xkb_state           *xkb_state;
+    /* Dead-key / compose sequences (e.g. dead_acute + e -> é). */
+    struct xkb_compose_table   *xkb_compose_table;
+    struct xkb_compose_state   *xkb_compose_state;
     XModifierKeymap            *modmap;
     int                         keymap_inited;
 

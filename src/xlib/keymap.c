@@ -5,8 +5,38 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <locale.h>
 #include <sys/mman.h>
 #include <wchar.h>
+#include <xkbcommon/xkbcommon-compose.h>
+
+/* Load the compose table for the current locale, so dead keys and multi-key
+ * sequences (dead_acute then e -> é, Multi_key then ... ) resolve to their
+ * composed character.  Honours $XCOMPOSEFILE via xkbcommon. */
+static void mw_compose_init(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (dp->xkb_compose_state || !dp->xkb_ctx) return;
+
+    const char *loc = setlocale(LC_CTYPE, NULL);
+    /* An application that never called setlocale() reports "C", which has no
+     * compose sequences; fall back to the environment's locale. */
+    if (!loc || !*loc || strcmp(loc, "C") == 0 || strcmp(loc, "POSIX") == 0) {
+        const char *e = getenv("LC_CTYPE");
+        if (!e || !*e) e = getenv("LANG");
+        if (e && *e) loc = e;
+    }
+    if (!loc || !*loc) loc = "C";
+
+    dp->xkb_compose_table = xkb_compose_table_new_from_locale(
+        dp->xkb_ctx, loc, XKB_COMPOSE_COMPILE_NO_FLAGS);
+    if (dp->xkb_compose_table)
+        dp->xkb_compose_state = xkb_compose_state_new(
+            dp->xkb_compose_table, XKB_COMPOSE_STATE_NO_FLAGS);
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: compose table %s (locale %s)\n",
+                dp->xkb_compose_state ? "loaded" : "absent", loc);
+}
 
 static const struct { const char *name; KeySym ks; } ks_table[] = {
 #include "keysym_table.h"
@@ -75,6 +105,7 @@ void mw_keymap_init(Display *d, const char *keymap_str)
     }
     if (dp->xkb_keymap)
         dp->xkb_state = xkb_state_new(dp->xkb_keymap);
+    mw_compose_init(d);
     dp->keymap_inited = 1;
     mw_update_modmap(d);
 }
@@ -91,6 +122,7 @@ void mw_keymap_init_fd(Display *d, int fd, uint32_t size, uint32_t format)
     dp->xkb_keymap = xkb_keymap_new_from_string(dp->xkb_ctx, map,
                         XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
     if (dp->xkb_keymap) dp->xkb_state = xkb_state_new(dp->xkb_keymap);
+    mw_compose_init(d);
     dp->keymap_inited = 1;
     munmap(map, size);
     mw_update_modmap(d);
@@ -102,6 +134,8 @@ void mw_keymap_fini(Display *d)
     if (dp->xkb_state) xkb_state_unref(dp->xkb_state);
     if (dp->xkb_keymap) xkb_keymap_unref(dp->xkb_keymap);
     if (dp->xkb_ctx) xkb_context_unref(dp->xkb_ctx);
+    if (dp->xkb_compose_state) { xkb_compose_state_unref(dp->xkb_compose_state); dp->xkb_compose_state = NULL; }
+    if (dp->xkb_compose_table) { xkb_compose_table_unref(dp->xkb_compose_table); dp->xkb_compose_table = NULL; }
     if (dp->modmap) { free(dp->modmap); dp->modmap = NULL; }
     dp->xkb_state = NULL; dp->xkb_keymap = NULL; dp->xkb_ctx = NULL;
     dp->modmap = NULL; dp->keymap_inited = 0;
@@ -282,6 +316,42 @@ int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
         if (s2 != NoSymbol) ks = s2;
     }
     if (keysym) *keysym = ks;
+
+    /* Feed the keysym to the compose state: dead keys and multi-key sequences
+     * resolve here, so an intl. layout's dead_acute then e yields é.  Skip it
+     * while Ctrl/Alt is held (there the key means something else). */
+    if (dp->xkb_compose_state && !(event->state & ControlMask) &&
+        !(event->state & Mod1Mask)) {
+        /* feed() only says whether the keysym was accepted into a sequence;
+         * the outcome is read from get_status(). */
+        xkb_compose_state_feed(dp->xkb_compose_state, ks);
+        switch (xkb_compose_state_get_status(dp->xkb_compose_state)) {
+        case XKB_COMPOSE_COMPOSING:
+            if (getenv("MW_TRACE"))
+                fprintf(stderr, "MW: composing ks=0x%lx\n", (unsigned long)ks);
+            return 0;                    /* part of a sequence: no bytes yet */
+        case XKB_COMPOSE_COMPOSED: {
+            char cbuf[64];
+            int r = xkb_compose_state_get_utf8(dp->xkb_compose_state,
+                                               cbuf, sizeof cbuf);
+            if (r > 1) {
+                int len = r - 1;
+                if (len > nbytes) len = nbytes;
+                memcpy(buffer, cbuf, (size_t)len);
+                xkb_compose_state_reset(dp->xkb_compose_state);
+                if (getenv("MW_TRACE"))
+                    fprintf(stderr, "MW: composed '%s' n=%d\n", cbuf, len);
+                return len;
+            }
+            xkb_compose_state_reset(dp->xkb_compose_state);
+            break;
+        }
+        case XKB_COMPOSE_CANCELLED:      /* partial sequence dropped: fall through */
+        case XKB_COMPOSE_NOTHING:
+        default:
+            break;
+        }
+    }
 
     /* Non-printable keys still yield a byte: Xlib collapses them to their low
      * seven bits, exactly as the reference _XkbHandleSpecialSym() does.  This
