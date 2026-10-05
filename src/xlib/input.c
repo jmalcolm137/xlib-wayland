@@ -180,9 +180,18 @@ static void kbd_enter(void *data, struct wl_keyboard *kbd, uint32_t serial,
 static void kbd_leave(void *data, struct wl_keyboard *kbd, uint32_t serial,
                       struct wl_surface *surface)
 {
-    (void)kbd; (void)serial; (void)surface;
+    (void)kbd; (void)serial;
     Display *d = data;
     XDisplayImpl *dp = MWD(d);
+    MwWindow *w = window_for_surface(d, surface);
+    /* Only focus out the window this surface actually owns.  When focus moves
+     * from one toplevel to another the compositor may deliver leave(A) after
+     * the FocusIn we already emitted synchronously for B; acting on it aimed a
+     * FocusOut at B and deactivated the window that had just taken focus (the
+     * gtester keys-events subtest failed exactly this way when it ran after
+     * another subtest). */
+    if (!w || (dp->kbd_focus && !same_toplevel(dp->kbd_focus, w)))
+        return;
     if (dp->kbd_focus && (dp->kbd_focus->event_mask & FocusChangeMask)) {
         XFocusChangeEvent fe;
         memset(&fe, 0, sizeof fe);
