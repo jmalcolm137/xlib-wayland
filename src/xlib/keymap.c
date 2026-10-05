@@ -334,8 +334,10 @@ int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
             char cbuf[64];
             int r = xkb_compose_state_get_utf8(dp->xkb_compose_state,
                                                cbuf, sizeof cbuf);
-            if (r > 1) {
-                int len = r - 1;
+            /* Unlike xkb_state_key_get_utf8(), this returns the byte count
+             * *without* the terminating NUL. */
+            if (r > 0) {
+                int len = r;
                 if (len > nbytes) len = nbytes;
                 memcpy(buffer, cbuf, (size_t)len);
                 xkb_compose_state_reset(dp->xkb_compose_state);
