@@ -33,7 +33,15 @@ Wayland compositor:
 | **NEdit 5.7 built unmodified and rendering** | ✅ **done** |
 | X resource database (`RESOURCE_MANAGER`, `~/.Xresources`, `$XENVIRONMENT`) | ✅ done |
 | Client-side decorations when the compositor has none | ✅ done |
-| M5 Xft/Render, full IME | ⚠️ text antialiased; Motif's Xft render path and a real IME remain |
+| M5 Xft/Render, full IME | ⚠️ **Render implemented and on by default** (GTK2/MATE/GIMP match the core fallback); a real IME remains |
+| GTK+ 2.24.33 built unmodified; gtester 14/14 | ✅ done |
+| MATE 1.10 applications built unmodified (29 components) | ✅ done |
+| GIMP 2.10.24 built unmodified; runs and renders with no XWayland | ✅ done |
+| EWMH window-manager messages (`_NET_WM_STATE` fullscreen/maximize) | ✅ done |
+
+The GTK2 / MATE 1.10 / GIMP 2.10 targets are built and run by the
+[`gtk2-wayland`](https://github.com/jmalcolm137/gtk2-wayland) project; their
+status is recorded there.
 
 Verified behaviour (see `scripts/run-tests.sh`): display/screen/visual setup,
 the X window tree, GCs and the drawing primitives, `XPutImage`/`XGetImage`
