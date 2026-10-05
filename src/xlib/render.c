@@ -234,12 +234,16 @@ static void set_source(Display *d, cairo_t *cr, MwRenderPicture *src,
      * maps user space to pattern space, so it translates by (xs-dx, ys-dy). */
     cairo_matrix_init_translate(&m, xs - dx, ys - dy);
     if (src->have_transform) {
-        /* The picture transform maps the source's coordinate space to the
-         * destination; the cairo pattern matrix is its inverse. */
-        cairo_matrix_t t;
+        /* The picture transform already maps destination to pattern space, so
+         * the cairo pattern matrix is the origin shift composed with it --
+         * NOT its inverse.  (Inverting is invisible for the common identity
+         * case but scales a source pattern the wrong way: GIMP's 8x8 canvas
+         * guide stipple came out compressed at any zoom other than 100%.)
+         * Verified against cairo's core path at several zooms. */
+        cairo_matrix_t t, r;
         xf_matrix(&t, &src->xf);
-        if (cairo_matrix_invert(&t) == CAIRO_STATUS_SUCCESS)
-            cairo_matrix_multiply(&m, &m, &t);
+        cairo_matrix_multiply(&r, &m, &t);
+        m = r;
     }
     cairo_pattern_set_matrix(pat, &m);
     cairo_pattern_set_extend(pat, cairo_extend(src->repeat));
