@@ -394,6 +394,7 @@ static void ti_enable(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
     if (!dp->text_input) return;
+    if (getenv("MW_TRACE")) fprintf(stderr, "MW: XIM ti_enable\n");
     zwp_text_input_v3_enable(dp->text_input);
     zwp_text_input_v3_set_content_type(dp->text_input,
                                        ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE,
@@ -418,6 +419,7 @@ static void ti_enter(void *data, struct zwp_text_input_v3 *ti, struct wl_surface
     Display *d = data;
     XDisplayImpl *dp = MWD(d);
     dp->text_input_entered = true;
+    if (getenv("MW_TRACE")) fprintf(stderr, "MW: XIM ti_enter\n");
     /* After enter, all state is invalidated and must be resent. */
     if (dp->text_input) {
         zwp_text_input_v3_set_content_type(dp->text_input,
@@ -489,8 +491,10 @@ static void text_input_ensure(Display *d)
     if (dp->text_input || !dp->text_input_mgr || !dp->wl_seat) return;
     dp->text_input = zwp_text_input_manager_v3_get_text_input(dp->text_input_mgr,
                                                               dp->wl_seat);
-    if (dp->text_input)
+    if (dp->text_input) {
         zwp_text_input_v3_add_listener(dp->text_input, &ti_listener, d);
+        if (getenv("MW_TRACE")) fprintf(stderr, "MW: XIM text_input created\n");
+    }
 }
 
 void mw_xim_init(Display *d) { (void)d; }
