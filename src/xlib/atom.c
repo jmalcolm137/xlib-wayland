@@ -355,6 +355,9 @@ int XChangeProperty(Display *d, Window w, Atom property, Atom type, int format,
      * selection converter wrote; the broker forwards it to the remote client
      * (packed is still live here). */
     mw_broker_capture_prop(d, w, property, type, format, data, (unsigned long)nelements);
+    /* Republish session-manager properties so other shim processes can read
+     * them (they have their own X servers). */
+    mw_smprop_publish(d, property, type, format, data, (unsigned long)nelements);
     free(packed);
     prop_notify(d, win, property, PropertyNewValue);
     mw_window_props_changed(d, win, property);
@@ -376,6 +379,41 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
     if (property == mw_intern_atom(d, "_DT_WORKSPACE_LIST", False) ||
         property == mw_intern_atom(d, "_DT_WORKSPACE_CURRENT", False))
         mw_refresh_workspace_props(d, win);
+    /* A shared session-manager property we do not hold locally (dtstyle reading
+     * the manager dtsession published) is served from the shared store. */
+    if (!mw_get_prop(d, win, property)) {
+        Atom st = None; int sf = 0; unsigned long sn = 0; unsigned char *sd = NULL;
+        if (mw_smprop_lookup(d, property, &st, &sf, &sn, &sd)) {
+            if (property == mw_intern_atom(d, "_DT_SM_WINDOW_INFO", False) &&
+                sf == 32 && sn >= 2) {
+                /* Substitute our local proxy window for the manager's. */
+                uint32_t v = (uint32_t)mw_smprop_proxy_window(d);
+                memcpy(sd + 4, &v, 4);          /* element 1 == smWindow */
+            }
+            unsigned char *out = NULL;
+            if (sn > 0 && prop_return) {
+                if (sf == 32) {
+                    long *lout = malloc((size_t)sn * sizeof(long));
+                    for (unsigned long i = 0; i < sn; i++) {
+                        uint32_t v; memcpy(&v, sd + i * 4, 4);
+                        lout[i] = (long)v;
+                    }
+                    out = (unsigned char *)lout;
+                } else {
+                    size_t unit = sf == 16 ? 2 : 1;
+                    out = calloc(1, sn * unit + unit);
+                    if (out) memcpy(out, sd, sn * unit);
+                }
+            }
+            if (actual_type_return) *actual_type_return = st;
+            if (actual_format_return) *actual_format_return = sf;
+            if (nitems_return) *nitems_return = sn;
+            if (bytes_after_return) *bytes_after_return = 0;
+            if (prop_return) *prop_return = out;
+            free(sd);
+            return Success;
+        }
+    }
     MwProp *p = mw_get_prop(d, win, property);
     if (!p) {
         if (actual_type_return) *actual_type_return = None;

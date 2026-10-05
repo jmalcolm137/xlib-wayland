@@ -449,6 +449,7 @@ typedef struct _XDisplayImpl {
     MwWlOffer                   *pending_offer;   /* seen, not yet selected */
     MwWlSource                  *wl_sources;      /* sources we advertise */
     Window                       clip_window;     /* hidden requestor/owner */
+    Window                       sm_window;       /* proxy for the SM window */
     MwClipFetch                  clip_fetch;
     MwClipServe                  clip_serve;
 
@@ -884,6 +885,18 @@ bool      mw_broker_capture_prop(Display *d, Window w, Atom property, Atom type,
 /* Complete a serve when the owner's SelectionNotify arrives.  Returns true when
  * the event was ours and should not be queued. */
 bool      mw_broker_serve_notify(Display *d, XSelectionEvent *se);
+
+/* Share the session manager's _DT_SM_* properties (xlib/smprops.c).  Each shim
+ * process is its own X server, so the properties dtsession puts on its root and
+ * top-level window (and that dtstyle's Style Manager reads) are invisible to the
+ * rest.  Enabled with XLIB_WAYLAND_SHARE_PROPERTIES (comma-separated prefixes). */
+void      mw_smprop_publish(Display *d, Atom prop, Atom type, int format,
+                            const unsigned char *data, unsigned long nitems);
+bool      mw_smprop_lookup(Display *d, Atom prop, Atom *type, int *format,
+                           unsigned long *nitems, unsigned char **data);
+bool      mw_smprop_is_shared(Display *d, Atom prop);
+/* Hidden local window standing in for the session manager's window. */
+Window    mw_smprop_proxy_window(Display *d);
 
 
 /* cursor (cursor.c) */

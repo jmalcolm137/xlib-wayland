@@ -68,7 +68,7 @@ xlib_sources = files(
   'src/xlib/resource.c', 'src/xlib/selection.c', 'src/xlib/window.c',
   'src/xlib/xim.c', 'src/xlib/xi2.c', 'src/xlib/xkb.c', 'src/xlib/xmb.c', 'src/xlib/xtcompat.c', 'src/xlib/xlibint.c',
   'src/xlib/xresources.c', 'src/xlib/xftbridge.c', 'src/xlib/render.c',
-  'src/xlib/xshape.c', 'src/xlib/broker.c')
+  'src/xlib/xshape.c', 'src/xlib/broker.c', 'src/xlib/smprops.c')
 
 # Installed as libX11.so.6 so that -lX11, dlopen("libX11.so.6") and the
 # transitive dependency of libXext/libXrender/libcairo all resolve to us.
