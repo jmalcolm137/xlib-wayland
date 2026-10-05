@@ -35,6 +35,7 @@
 #include "xdg-shell-client-protocol.h"
 #include "xdg-decoration-client-protocol.h"
 #include "viewporter-client-protocol.h"
+#include "text-input-unstable-v3-client-protocol.h"
 
 /* ------------------------------------------------------------------ utility */
 
@@ -429,6 +430,16 @@ typedef struct _XDisplayImpl {
     struct wp_viewporter              *viewporter;   /* may be NULL */
     struct wl_data_device_manager     *dnd_mgr;
     struct wl_data_device             *data_device;
+
+    /* Input method bridge (xim.c): the client side of zwp_text_input_v3.
+     * A single text-input object per display/seat; text_input_ic points at the
+     * _XIC (owned by xim.c) that currently has the input focus.  All NULL when
+     * the compositor does not offer text-input, in which case XIM degrades to
+     * the local pass-through. */
+    struct zwp_text_input_manager_v3  *text_input_mgr;
+    struct zwp_text_input_v3          *text_input;
+    void                              *text_input_ic;
+    bool                               text_input_entered;
 
     /* Wayland clipboard bridge */
     MwWlOffer                   *wayland_offer;   /* current clipboard offer */
@@ -846,6 +857,9 @@ void      mw_cursor_fini(Display *d);
 
 /* XIM (xim.c) */
 void      mw_xim_init(Display *d);
+/* Draw an active over-the-spot (XIMPreeditPosition) preedit into a toplevel
+ * frame, after the window tree has been composited (wayland/surface.c). */
+void      mw_xim_overlay(Display *d, MwToplevel *tl);
 
 /* xrandr (xrandr.c) / shape (xshape.c) */
 

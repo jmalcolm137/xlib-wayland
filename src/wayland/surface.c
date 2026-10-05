@@ -1037,6 +1037,9 @@ void mw_toplevel_render(MwToplevel *tl)
     mw_surface_clear(tl->frame, 0xff000000u |
                      (tl->win->background_pixel & 0xffffff));
     mw_composite_window(tl, tl->win, 0, tb);
+    /* An active over-the-spot XIM preedit is painted on top of the composited
+     * client content, so it is redrawn on every repaint (xim.c). */
+    mw_xim_overlay(tl->win->d, tl);
     if (tl->csd) {
         draw_titlebar(tl);
         if (tl->xdg_surface)

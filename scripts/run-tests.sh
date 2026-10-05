@@ -197,6 +197,38 @@ print(("  ok   " if ok else "  FAIL ") +
 sys.exit(0 if ok else 1)
 PY
 
+say "XIM bridge (zwp_text_input_v3 preedit + commit)"
+# The headless compositor's text-input server sends a canned preedit and then a
+# canned commit once the input context is focused; test_xim registers preedit
+# callbacks and reads the commit back through XmbLookupString.
+HC_TIMEOUT=6 run_headless xim mwxim 400x300 "$WORK/xim.png" "$BUILD/test_xim"
+sed 's/^/  /' "$WORK/xim.client" || true
+if grep -q '^XIM:COMMIT' "$WORK/xim.client" \
+   && grep -q 'XIM:RESULT start=1 draw=1 done=1' "$WORK/xim.client"; then
+    echo "  ok   preedit callbacks fired and the commit came back as UTF-8"
+else
+    echo "  FAIL: XIM bridge did not deliver preedit and commit"
+    exit 1
+fi
+
+say "XIM over-the-spot preedit (XIMPreeditPosition)"
+# HC_IME_COMMIT="" makes the compositor hold the preedit so the shim's own
+# drawing of the composing string can be captured and checked.
+HC_IME_COMMIT= HC_TIMEOUT=6 run_headless xim-pos mwximpos 400x300 \
+    "$WORK/xim-pos.png" "$BUILD/test_xim" position
+python3 - "$WORK/xim-pos.png" <<'PY'
+import sys
+from PIL import Image
+im = Image.open(sys.argv[1]).convert('RGB')
+px = im.load(); w, h = im.size
+# The spot is (20,40); the shim paints the preedit string there.
+n = sum(1 for y in range(20, min(55, h)) for x in range(15, min(150, w))
+        if sum(px[x, y]) < 720)
+print(("  ok   " if n > 20 else "  FAIL ") +
+      "shim drew the preedit at the spot (%d non-white px)" % n)
+sys.exit(0 if n > 20 else 1)
+PY
+
 say "menu interaction test (override-redirect popup + grab)"
     # A Motif menu popup is an override-redirect window parented to the app's
     # toplevel shell plus an XGrabPointer with owner_events.  test_popup.c

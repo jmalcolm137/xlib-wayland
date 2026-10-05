@@ -92,6 +92,14 @@
 #  endif
 #endif
 
+#if defined(__has_include)
+#  if __has_include("text-input-unstable-v3-server-protocol.h")
+#    include "text-input-unstable-v3-server-protocol.h"
+#  elif __has_include(<text-input-unstable-v3-server-protocol.h>)
+#    include <text-input-unstable-v3-server-protocol.h>
+#  endif
+#endif
+
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
     (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
 #  define MW_LITTLE_ENDIAN 1
@@ -1463,6 +1471,179 @@ static void bind_viewporter(struct wl_client *client, void *data,
 	(void)data;
 	wl_resource_set_implementation(resource, &viewporter_implementation, NULL,
 				       NULL);
+}
+
+/* ------------------------------------------------------------------ */
+/* zwp_text_input_manager_v3 — a scripted input method                  */
+/*                                                                      */
+/* The shim binds this to implement XIM.  There is no real IME here:     */
+/* once a text-input is enabled and committed, the compositor sends      */
+/* enter, then a canned preedit, then (a moment later) a canned commit,  */
+/* so the whole XIM path can be exercised without ibus.  The strings are */
+/* overridable with HC_IME_PREEDIT / HC_IME_COMMIT.                      */
+/* ------------------------------------------------------------------ */
+
+struct hc_text_input {
+	struct wl_resource     *resource;
+	struct mw_compositor   *comp;
+	int                     enabled;
+	int                     entered;
+	int                     sent;
+	struct wl_event_source *commit_timer;
+};
+
+/* A surface of the text-input's own client to deliver enter to. */
+static struct mw_surface *ti_target_surface(struct hc_text_input *ti)
+{
+	struct wl_client *client = wl_resource_get_client(ti->resource);
+	struct mw_surface *s;
+
+	if (ti->comp->input_surface &&
+	    wl_resource_get_client(ti->comp->input_surface->resource) == client)
+		return ti->comp->input_surface;
+	wl_list_for_each(s, &ti->comp->surfaces, link) {
+		if (s->is_toplevel &&
+		    wl_resource_get_client(s->resource) == client)
+			return s;
+	}
+	return NULL;
+}
+
+static int ti_commit_timer_cb(void *data)
+{
+	struct hc_text_input *ti = data;
+	const char *text = getenv("HC_IME_COMMIT");
+	if (!text) text = "\xe4\xbd\xa0\xe5\xa5\xbd";  /* 你好 */
+	/* HC_IME_COMMIT="" holds the preedit (no commit), so a Position-style
+	 * overlay can be captured; otherwise send the commit. */
+	if (ti->resource && text[0]) {
+		zwp_text_input_v3_send_commit_string(ti->resource, text);
+		zwp_text_input_v3_send_done(ti->resource,
+			wl_display_next_serial(ti->comp->display));
+	}
+	if (ti->commit_timer) {
+		wl_event_source_remove(ti->commit_timer);
+		ti->commit_timer = NULL;
+	}
+	return 0;
+}
+
+static void ti_send_preedit(struct hc_text_input *ti)
+{
+	const char *pre = getenv("HC_IME_PREEDIT");
+	if (!pre) pre = "ni";
+	zwp_text_input_v3_send_preedit_string(ti->resource, pre, -1, -1);
+	zwp_text_input_v3_send_done(ti->resource,
+		wl_display_next_serial(ti->comp->display));
+	ti->commit_timer = wl_event_loop_add_timer(ti->comp->loop,
+			ti_commit_timer_cb, ti);
+	if (ti->commit_timer)
+		wl_event_source_timer_update(ti->commit_timer, 60);
+}
+
+static void text_input_destroy(struct wl_client *client, struct wl_resource *r)
+{
+	(void)client;
+	wl_resource_destroy(r);
+}
+
+static void text_input_enable(struct wl_client *client, struct wl_resource *r)
+{
+	(void)client;
+	struct hc_text_input *ti = wl_resource_get_user_data(r);
+	ti->enabled = 1;
+}
+
+static void text_input_disable(struct wl_client *client, struct wl_resource *r)
+{
+	(void)client;
+	struct hc_text_input *ti = wl_resource_get_user_data(r);
+	ti->enabled = 0;
+	ti->entered = 0;
+	ti->sent = 0;
+}
+
+static void text_input_set_surrounding_text(struct wl_client *client,
+		struct wl_resource *r, const char *text, int32_t cursor, int32_t anchor)
+{ (void)client; (void)r; (void)text; (void)cursor; (void)anchor; }
+
+static void text_input_set_text_change_cause(struct wl_client *client,
+		struct wl_resource *r, uint32_t cause)
+{ (void)client; (void)r; (void)cause; }
+
+static void text_input_set_content_type(struct wl_client *client,
+		struct wl_resource *r, uint32_t hint, uint32_t purpose)
+{ (void)client; (void)r; (void)hint; (void)purpose; }
+
+static void text_input_set_cursor_rectangle(struct wl_client *client,
+		struct wl_resource *r, int32_t x, int32_t y, int32_t w, int32_t h)
+{ (void)client; (void)r; (void)x; (void)y; (void)w; (void)h; }
+
+static void text_input_commit(struct wl_client *client, struct wl_resource *r)
+{
+	(void)client;
+	struct hc_text_input *ti = wl_resource_get_user_data(r);
+	if (!ti->enabled) return;
+	if (!ti->entered) {
+		struct mw_surface *s = ti_target_surface(ti);
+		if (!s) return;              /* retry on a later commit */
+		zwp_text_input_v3_send_enter(r, s->resource);
+		ti->entered = 1;
+		return;                      /* the client re-commits in response */
+	}
+	if (ti->sent == 0) {
+		ti->sent = 1;
+		ti_send_preedit(ti);
+	}
+}
+
+static const struct zwp_text_input_v3_interface text_input_implementation = {
+	.destroy = text_input_destroy,
+	.enable = text_input_enable,
+	.disable = text_input_disable,
+	.set_surrounding_text = text_input_set_surrounding_text,
+	.set_text_change_cause = text_input_set_text_change_cause,
+	.set_content_type = text_input_set_content_type,
+	.set_cursor_rectangle = text_input_set_cursor_rectangle,
+	.commit = text_input_commit,
+};
+
+static void text_input_destroyed(struct wl_resource *r)
+{
+	struct hc_text_input *ti = wl_resource_get_user_data(r);
+	if (!ti) return;
+	if (ti->commit_timer) {
+		wl_event_source_remove(ti->commit_timer);
+		ti->commit_timer = NULL;
+	}
+	free(ti);
+}
+
+static void text_input_manager_get_text_input(struct wl_client *client,
+		struct wl_resource *manager, uint32_t id, struct wl_resource *seat)
+{
+	(void)seat;
+	struct hc_text_input *ti = calloc(1, sizeof *ti);
+	if (!ti) return;
+	ti->comp = wl_resource_get_user_data(manager);
+	ti->resource = wl_resource_create(client, &zwp_text_input_v3_interface, 1, id);
+	if (!ti->resource) { free(ti); return; }
+	wl_resource_set_implementation(ti->resource, &text_input_implementation,
+				       ti, text_input_destroyed);
+}
+
+static const struct zwp_text_input_manager_v3_interface
+text_input_manager_implementation = {
+	.get_text_input = text_input_manager_get_text_input,
+};
+
+static void bind_text_input_manager(struct wl_client *client, void *data,
+				    uint32_t version, uint32_t id)
+{
+	struct wl_resource *resource = wl_resource_create(client,
+			&zwp_text_input_manager_v3_interface, MIN(version, 1), id);
+	wl_resource_set_implementation(resource, &text_input_manager_implementation,
+				       data, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2915,6 +3096,11 @@ int main(int argc, char **argv)
 			 &comp, bind_data_device_manager);
 	wl_global_create(comp.display, &wp_viewporter_interface, 1, &comp,
 			 bind_viewporter);
+	/* Text-input v3 (the shim's XIM bridge).  HC_NO_TEXTINPUT mimics a
+	 * compositor without it, so the local XIM fallback stays testable. */
+	if (!getenv("HC_NO_TEXTINPUT"))
+		wl_global_create(comp.display, &zwp_text_input_manager_v3_interface,
+				 1, &comp, bind_text_input_manager);
 	wl_global_create(comp.display, &wl_output_interface, 3, &comp, bind_output);
 	/* HC_NO_DECO mimics a compositor without xdg-decoration (GNOME/Mutter,
 	 * for instance), so the client-side fallback path stays testable. */

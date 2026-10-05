@@ -437,19 +437,29 @@ scope; we accept and ignore them so applications proceed.
 
 ### 3.10 XIM (input methods)
 
-Motif text widgets use XIM/XIC. Full XIM (a client–server protocol with preedit/status
-callbacks) is out of scope. We provide a **local input method** that is protocol-correct from
-the client's point of view:
+Motif text widgets use XIM/XIC. The shim implements the client-visible XIM
+contract and makes the input method the compositor's, through the Wayland
+text-input protocol (`zwp_text_input_v3`); there is no XIM wire protocol and no
+separate XIM server process.
 
-* `XOpenIM(dpy, ...)` returns a non-NULL opaque IM that supports the standard styles
-  (`XIMPreeditNothing | XIMStatusNothing`).
-* `XCreateIC(im, XNInputStyle, ..., XNClientWindow, w, XNFocusWindow, w, ...)` returns an IC
-  bound to the window; `XmbLookupString` delegates to the same xkbcommon path as
-  `XLookupString`; `XFilterEvent` returns `False` (no preedit interception).
-* `XSetICFocus`/`XUnsetICFocus` maintain IC focus state.
+* `XOpenIM(dpy, ...)` returns a non-NULL IM and `XNQueryInputStyle` advertises
+  `XIMPreeditPosition`, `XIMPreeditCallbacks`, `XIMPreeditNothing` and
+  `XIMPreeditNone` styles, in that order.
+* `XCreateIC(...)` parses `XNInputStyle`, `XNClientWindow`, `XNFocusWindow` and
+  the `XNPreeditAttributes` / `XNStatusAttributes` nested lists (including
+  Motif's `XNVaNestedList` form), storing the preedit/status callbacks and the
+  over-the-spot attributes.
+* `XSetICFocus`/`XUnsetICFocus` enable/disable the Wayland text-input on the
+  focused window's toplevel surface.
+* `preedit_string` reaches the client as `XNPreeditStart/Draw/Caret/Done` for
+  `XIMPreeditCallbacks`, or is painted by the shim at `XNSpotLocation` for
+  `XIMPreeditPosition` (`mw_xim_overlay`). `commit_string` is delivered through
+  `XmbLookupString` on a synthetic keycode-0 `KeyPress`, exactly as libX11's XIM
+  client does. `XFilterEvent` returns `False` (keys the IME consumes never reach
+  the client). `XmbResetIC` returns the preedit as committed text.
 
-This is enough for NEdit's text editing to type ASCII and UTF-8 composed characters. True
-preedit/IME integration is a later milestone.
+This types ASCII, composed characters and full IME composition. See
+[`docs/IME-STATUS.md`](docs/IME-STATUS.md).
 
 ### 3.11 The Xrm resource manager
 
@@ -797,8 +807,9 @@ fallback `fixed` font -- 40 core draws against 0 Xft draws in a trace -- so the
 requested face and size are lost.  Until that resolution is understood, Motif
 is built `--disable-xft` and the antialiasing comes from the core path.
 
-Still to do: a real preedit/IME, and the long tail of Xlib entry points not
-exercised by XV/NEdit.  `MW_TRACE=1` enables an operation trace (`src/xlib/window.c`,
-`src/wayland/surface.c`, `wl.c`) for debugging applications on the shim.
+Still to do: `delete_surrounding_text` handling, and the long tail of Xlib entry
+points not exercised by XV/NEdit.  `MW_TRACE=1` enables an operation trace
+(`src/xlib/window.c`, `src/wayland/surface.c`, `wl.c`) for debugging
+applications on the shim.
 
 

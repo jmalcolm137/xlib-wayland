@@ -209,13 +209,8 @@ int Xutf8TextPerCharExtents(XFontSet fs, _Xconst char *s, int n, XRectangle *ink
                             XRectangle *ink_ret, XRectangle *logical_ret)
 { return XmbTextPerCharExtents(fs, s, n, ink, logical, nink, num, ink_ret, logical_ret); }
 
-/* Xlib's contract: reset the input context and return the string it had
- * committed, which the caller frees with XFree.  There is no preedit state
- * here, so the answer is an empty string -- and non-NULL, because callers
- * treat NULL as a failure. */
-char *XmbResetIC(XIC ic) { (void)ic; return strdup(""); }
-char *Xutf8ResetIC(XIC ic) { (void)ic; return strdup(""); }
-wchar_t *XwcResetIC(XIC ic) { (void)ic; return calloc(1, sizeof(wchar_t)); }
+/* XmbResetIC/Xutf8ResetIC/XwcResetIC live in xim.c: resetting an input context
+ * also has to tear down the Wayland preedit and flush it as committed text. */
 
 /* ------------------------------------------------------------- OM / OC */
 

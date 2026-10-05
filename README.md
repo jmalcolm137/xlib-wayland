@@ -33,7 +33,7 @@ Wayland compositor:
 | **NEdit 5.7 built unmodified and rendering** | ✅ **done** |
 | X resource database (`RESOURCE_MANAGER`, `~/.Xresources`, `$XENVIRONMENT`) | ✅ done |
 | Client-side decorations when the compositor has none | ✅ done |
-| M5 Xft/Render, full IME | ⚠️ **Render implemented and on by default** (GTK2/MATE/GIMP match the core fallback); a real IME remains |
+| M5 Xft/Render, full IME | ✅ **done** — Render is implemented and on by default; XIM is a real bridge to Wayland `zwp_text_input_v3` ([docs/IME-STATUS.md](docs/IME-STATUS.md)) |
 | GTK+ 2.24.33 built unmodified; gtester 14/14 | ✅ done |
 | MATE 1.10 applications built unmodified (29 components) | ✅ done |
 | GIMP 2.10.24 built unmodified; runs and renders with no XWayland | ✅ done |

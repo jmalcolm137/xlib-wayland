@@ -22,6 +22,7 @@ proto_dir = protos_dep.get_variable(pkgconfig: 'pkgdatadir')
 xdg_xml  = proto_dir / 'stable/xdg-shell/xdg-shell.xml'
 deco_xml = proto_dir / 'unstable/xdg-decoration/xdg-decoration-unstable-v1.xml'
 viewp_xml = proto_dir / 'stable/viewporter/viewporter.xml'
+textinput_xml = proto_dir / 'unstable/text-input/text-input-unstable-v3.xml'
 
 client_protos = [
   custom_target('xdg-shell-client-header',
@@ -41,6 +42,16 @@ client_protos = [
     command: [wl_scan, 'client-header', '@INPUT@', '@OUTPUT@']),
   custom_target('viewporter-client-code',
     input: viewp_xml, output: 'viewporter-protocol.c',
+    command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
+  # zwp_text_input_v3: the client side of the Wayland input-method protocol.
+  # XIM (src/xlib/xim.c) is a real bridge onto this, so a CDE/Motif or GTK2
+  # text widget gets preedit and commit from a running IME (e.g. ibus) via the
+  # compositor.
+  custom_target('text-input-client-header',
+    input: textinput_xml, output: 'text-input-unstable-v3-client-protocol.h',
+    command: [wl_scan, 'client-header', '@INPUT@', '@OUTPUT@']),
+  custom_target('text-input-client-code',
+    input: textinput_xml, output: 'text-input-protocol.c',
     command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
 ]
 
@@ -151,6 +162,14 @@ if get_option('tests')
     link_with: libx11,
     install: false)
 
+  # XIM bridge: an input context that receives a scripted preedit and commit
+  # from the headless compositor's text-input server (tests/test_xim.c).
+  executable('test_xim', 'tests/test_xim.c',
+    include_directories: inc,
+    dependencies: [wl_dep],
+    link_with: libx11,
+    install: false)
+
   # Format-32 property semantics (long array) and mask-based event selection.
   # Needs a compositor, so run-tests.sh drives it rather than meson test().
   executable('test_props', 'tests/test_props.c',
@@ -192,6 +211,12 @@ if get_option('tools')
       command: [wl_scan, 'server-header', '@INPUT@', '@OUTPUT@']),
     custom_target('viewporter-server-code',
       input: viewp_xml, output: 'viewporter-protocol-server.c',
+      command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
+    custom_target('text-input-server-header',
+      input: textinput_xml, output: 'text-input-unstable-v3-server-protocol.h',
+      command: [wl_scan, 'server-header', '@INPUT@', '@OUTPUT@']),
+    custom_target('text-input-server-code',
+      input: textinput_xml, output: 'text-input-protocol-server.c',
       command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
   ]
   wl_server_dep = dependency('wayland-server')

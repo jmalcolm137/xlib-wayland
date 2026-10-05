@@ -44,6 +44,12 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name,
     } else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {
         dp->dnd_mgr = wl_registry_bind(reg, name,
                           &wl_data_device_manager_interface, version < 3 ? version : 3);
+    } else if (strcmp(interface, zwp_text_input_manager_v3_interface.name) == 0 &&
+               dp->text_input_mgr == NULL) {
+        /* Client side of the input-method protocol: our XIM bridge uses this to
+         * receive preedit/commit from a compositor-run IME (xim.c). */
+        dp->text_input_mgr = wl_registry_bind(reg, name,
+                          &zwp_text_input_manager_v3_interface, 1);
     }
 }
 
@@ -189,6 +195,8 @@ void mw_wl_disconnect(XDisplayImpl *dp)
     mw_wakeup_stop(dp);
     mw_clipboard_fini((Display *)dp);
     if (dp->wl_seat) mw_input_fini((Display *)dp);
+    if (dp->text_input) zwp_text_input_v3_destroy(dp->text_input);
+    if (dp->text_input_mgr) zwp_text_input_manager_v3_destroy(dp->text_input_mgr);
     if (dp->data_device) wl_data_device_destroy(dp->data_device);
     if (dp->dnd_mgr) wl_data_device_manager_destroy(dp->dnd_mgr);
     if (dp->viewporter) wp_viewporter_destroy(dp->viewporter);
