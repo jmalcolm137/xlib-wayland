@@ -233,6 +233,7 @@ void mw_block_for_events(Display *d)
     if (cfd < 0 && rtimeout < 0) {
         if (wl_display_dispatch(dp->wl_display) < 0)
             mw_io_error(d, "Wayland connection closed");
+        mw_input_settle(d);
         return;
     }
 
@@ -262,6 +263,7 @@ void mw_block_for_events(Display *d)
     }
     if (wl_display_dispatch_pending(dp->wl_display) < 0 && !dp->closed)
         mw_io_error(d, "Wayland connection error");
+    mw_input_settle(d);
     mw_clipboard_handle_ready(d);
     mw_kbd_repeat_pump(d);
 }
@@ -309,5 +311,6 @@ void mw_process_events(Display *d, bool block)
     }
     if (wl_display_dispatch_pending(dp->wl_display) < 0 && !dp->closed)
         mw_io_error(d, "Wayland connection error");
+    mw_input_settle(d);
     mw_clipboard_handle_ready(d);
 }

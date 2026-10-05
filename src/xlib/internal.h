@@ -549,6 +549,18 @@ typedef struct _XDisplayImpl {
     int                         ptr_surf_x, ptr_surf_y;
     MwWindow                   *ptr_toplevel;
     uint32_t                    ptr_enter_serial;
+    /* While a menu is open the compositor emits the whole popup chain
+     * (main -> parent -> submenu) as a leave/enter burst on every motion, and
+     * the ancestor enters carry stale coordinates (the parent's first item).
+     * Acting on each event made GTK re-select an item in the parent menu --
+     * deselecting the item whose submenu was open and popping the submenu
+     * down.  Buffer the burst and, once it settles, focus only the deepest
+     * popup that was entered (see mw_input_settle). */
+    struct wl_surface          *ptr_defer_surface;
+    MwWindow                   *ptr_defer_top;      /* window entered (surface) */
+    MwWindow                   *ptr_defer_deep;     /* deepest window in it */
+    int                         ptr_defer_sx, ptr_defer_sy;
+    bool                        ptr_defer_active;
     uint32_t                    last_input_serial;  /* any input serial */
     uint32_t                    last_press_serial;  /* serial of the last button press */
     uint32_t                    kbd_mods;         /* xkb serialized mods */
@@ -768,6 +780,10 @@ void mw_refresh_workspace_props(Display *d, MwWindow *win);
 /* Apply the cursor of the window (or nearest ancestor) under the pointer.
  * Called as the pointer moves, like the server's cursor inheritance. */
 void mw_pointer_update_cursor(Display *d, MwWindow *w);
+/* Coalesce a burst of wl_pointer leave/enter events into a single focus
+ * change, so the spurious ancestor enters of a nested popup chain do not
+ * re-select in the parent menu.  Called after each Wayland dispatch. */
+void mw_input_settle(Display *d);
 void mw_pointer_enter(Display *d, MwWindow *top, int x, int y);
 void mw_pointer_leave(Display *d, MwWindow *top);
 

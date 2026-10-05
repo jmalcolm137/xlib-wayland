@@ -413,6 +413,7 @@ int XSync(Display *d, Bool discard)
         mw_flush_damage(d);
         wl_display_dispatch_pending(dp->wl_display);
         wl_display_roundtrip(dp->wl_display);
+        mw_input_settle(d);
     }
     return 1;
 }

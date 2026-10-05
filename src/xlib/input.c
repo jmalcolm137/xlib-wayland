@@ -463,6 +463,112 @@ static const struct wl_keyboard_listener keyboard_listener = {
 
 /* ----------------------------------------------------------- pointer */
 
+/* Pointer position expressed in the coordinate space of the toplevel that
+ * owns `w`.  A crossing event must carry coordinates relative to the window
+ * it is delivered to, but the pointer's stored position (ptr_surf_x/y) is
+ * relative to the current toplevel -- which is a *different* one whenever a
+ * grab leaves a menu for the window that grabbed, or a menu leaves for its
+ * submenu (a separate popup).  Reusing the current toplevel's coordinates put
+ * the leave at bogus positions (e.g. x=216 for a pointer actually at the
+ * menu's right edge, x=413); GTK feeds those to its submenu-navigation and
+ * scrolling logic, which then mis-handles the menu.  Convert via the screen
+ * position so pt_event() recovers the correct window- and root-relative x/y. */
+static void ptr_in_win_space(Display *d, MwWindow *w, int *x, int *y)
+{
+    XDisplayImpl *dp = MWD(d);
+    int sx = dp->ptr_surf_x, sy = dp->ptr_surf_y;
+    if (dp->ptr_toplevel) {
+        int ox, oy;
+        int off = dp->ptr_toplevel->tl
+                      ? mw_toplevel_content_offset(dp->ptr_toplevel->tl) : 0;
+        mw_window_origin(dp->ptr_toplevel, &ox, &oy);
+        sx = ox + dp->ptr_surf_x;
+        sy = oy + dp->ptr_surf_y - off;
+    }
+    int wx, wy, rx, ry;
+    mw_window_origin(w, &wx, &wy);
+    origin_rel(w, &rx, &ry);
+    *x = sx - wx + rx;
+    *y = sy - wy + ry;
+}
+
+/* Nesting depth of a window's popup chain (1 for an ordinary toplevel).  Used
+ * to pick the deepest popup in a compositor enter burst. */
+static int win_depth(MwWindow *w)
+{
+    int n = 0;
+    MwToplevel *tl = (w && w->tl) ? w->tl : NULL;
+    while (tl) {
+        n++;
+        tl = (tl->parent_tl && tl->parent_tl->tl) ? tl->parent_tl->tl : NULL;
+    }
+    return n;
+}
+
+/* Move the pointer focus to `deep`, emitting the X crossing events. */
+static void ptr_set_focus(Display *d, MwWindow *deep, int rx, int ry)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (deep == dp->ptr_focus) return;
+    if (dp->ptr_focus) {
+        XLeaveWindowEvent le;
+        int lx, ly;
+        ptr_in_win_space(d, dp->ptr_focus, &lx, &ly);
+        pt_event(d, dp->ptr_focus, (XEvent *)&le, LeaveNotify, lx, ly,
+                 current_mods(d), NotifyNonlinear, NotifyNormal, 0);
+        le.mode = NotifyNormal; le.detail = NotifyAncestor;
+        deliver(d, dp->ptr_focus, (XEvent *)&le, LeaveWindowMask);
+    }
+    dp->ptr_focus = deep;
+    if (deep) {
+        XEnterWindowEvent en;
+        pt_event(d, deep, (XEvent *)&en, EnterNotify, rx, ry,
+                 current_mods(d), NotifyNonlinear, NotifyNormal, 0);
+        en.mode = NotifyNormal; en.detail = NotifyAncestor;
+        deliver(d, deep, (XEvent *)&en, EnterWindowMask);
+    }
+}
+
+/* Once a menu is open the compositor reports the whole popup chain
+ * (application toplevel -> parent menu -> submenu) as a leave/enter burst on
+ * every motion, and the ancestor enters carry stale coordinates -- the parent
+ * menu's land on its first item.  Delivering those made GTK re-select that
+ * item, which deselected the item whose submenu was open and popped the
+ * submenu down (the "parent highlight jumps while I pick a submenu item"
+ * symptom).  Buffer the burst and, when it settles, focus only the deepest
+ * popup that was entered; the last event of a burst is not reliable, the
+ * deepest popup is. */
+void mw_input_settle(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (!dp->ptr_defer_active) return;
+    MwWindow *top = dp->ptr_defer_top;
+    MwWindow *deep = dp->ptr_defer_deep;
+    struct wl_surface *surf = dp->ptr_defer_surface;
+    int sx = dp->ptr_defer_sx, sy = dp->ptr_defer_sy;
+    dp->ptr_defer_active = false;
+    dp->ptr_defer_top = NULL;
+    dp->ptr_defer_deep = NULL;
+
+    if (top) {
+        /* Adopt the deepest popup so the crossing is reported relative to the
+         * right toplevel, then move the focus there. */
+        dp->ptr_toplevel = top;
+        dp->ptr_wl_surface = surf;
+        dp->ptr_surf_x = sx;
+        dp->ptr_surf_y = sy;
+        int off = top->tl ? mw_toplevel_content_offset(top->tl) : 0;
+        ptr_set_focus(d, deep, sx, sy - off);
+        mw_pointer_update_cursor(d, deep);
+    } else {
+        /* The burst left everything: no popup remained under the pointer. */
+        ptr_set_focus(d, NULL, 0, 0);
+        dp->ptr_toplevel = NULL;
+        dp->ptr_wl_surface = NULL;
+        mw_pointer_update_cursor(d, NULL);
+    }
+}
+
 static void ptr_enter(void *data, struct wl_pointer *p, uint32_t serial,
                       struct wl_surface *surface, wl_fixed_t sx, wl_fixed_t sy)
 {
@@ -473,39 +579,56 @@ static void ptr_enter(void *data, struct wl_pointer *p, uint32_t serial,
     MwWindow *top = window_for_surface(d, surface);
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: ptr_enter surface=%p -> win=0x%lx%s\n", (void*)surface,
-                top ? top->id : 0UL, (top && top->tl && top->tl->is_popup) ? " POPUP" : "");
+                top ? top->id : 0UL,
+                (top && top->tl && top->tl->is_popup) ? " POPUP" : "");
+    int off = (top && top->tl) ? mw_toplevel_content_offset(top->tl) : 0;
+    int rx = wl_fixed_to_int(sx), ry = wl_fixed_to_int(sy) - off;
+    MwWindow *deep = (top && ry >= 0) ? mw_deepest_at(top, rx, ry, NULL, NULL) : NULL;
+
+    if (dp->open_menu) {
+        /* Buffer the burst; only the deepest popup is the real focus. */
+        if (deep && (!dp->ptr_defer_active ||
+                     win_depth(top) >= win_depth(dp->ptr_defer_top))) {
+            dp->ptr_defer_surface = surface;
+            dp->ptr_defer_top = top;
+            dp->ptr_defer_deep = deep;
+            dp->ptr_defer_sx = wl_fixed_to_int(sx);
+            dp->ptr_defer_sy = wl_fixed_to_int(sy);
+        }
+        dp->ptr_defer_active = true;
+        return;
+    }
+
     dp->ptr_toplevel = top;
     dp->ptr_wl_surface = surface;
     dp->ptr_surf_x = wl_fixed_to_int(sx);
     dp->ptr_surf_y = wl_fixed_to_int(sy);
-    int off = (top && top->tl) ? mw_toplevel_content_offset(top->tl) : 0;
-    int rx = dp->ptr_surf_x, ry = dp->ptr_surf_y - off;
-    MwWindow *deep = (top && ry >= 0) ? mw_deepest_at(top, rx, ry, NULL, NULL) : NULL;
-    if (deep && deep != dp->ptr_focus) {
-        if (dp->ptr_focus) {
-            XLeaveWindowEvent le;
-            pt_event(d, dp->ptr_focus, (XEvent *)&le, LeaveNotify, rx, ry,
-                     current_mods(d), NotifyNonlinear, NotifyNormal, 0);
-            le.mode = NotifyNormal; le.detail = NotifyAncestor;
-            deliver(d, dp->ptr_focus, (XEvent *)&le, LeaveWindowMask);
-        }
-        dp->ptr_focus = deep;
-        XEnterWindowEvent en;
-        pt_event(d, deep, (XEvent *)&en, EnterNotify, rx, ry,
-                 current_mods(d), NotifyNonlinear, NotifyNormal, 0);
-        en.mode = NotifyNormal; en.detail = NotifyAncestor;
-        deliver(d, deep, (XEvent *)&en, EnterWindowMask);
-    }
+    ptr_set_focus(d, deep, rx, ry);
     mw_pointer_update_cursor(d, deep);
 }
 
 static void ptr_leave(void *data, struct wl_pointer *p, uint32_t serial,
                       struct wl_surface *surface)
 {
-    (void)p; (void)serial; (void)surface;
+    (void)p; (void)serial;
     Display *d = data;
-    if (getenv("MW_TRACE")) fprintf(stderr, "MW: ptr_leave (wl)\n");
     XDisplayImpl *dp = MWD(d);
+    if (dp->open_menu) {
+        /* Part of the popup-chain churn the compositor sends while a menu is
+         * open; folded into the focus at mw_input_settle. */
+        dp->ptr_defer_active = true;
+        return;
+    }
+    /* Only act on a leave for the surface we currently track.  When the
+     * pointer moves between two popups (parent menu -> submenu) the compositor
+     * can deliver leave(old) after enter(new); acting on it cleared
+     * ptr_toplevel, so subsequent motion had no window under the pointer and
+     * fell back to the grab window -- the parent menu -- whose highlighted
+     * item then followed the pointer as if it were still over the parent.
+     * Same shape as the stale key leave fixed in a800706. */
+    if (dp->ptr_wl_surface && surface != dp->ptr_wl_surface)
+        return;
+    if (getenv("MW_TRACE")) fprintf(stderr, "MW: ptr_leave (wl)\n");
     if (dp->ptr_focus) {
         XLeaveWindowEvent le;
         pt_event(d, dp->ptr_focus, (XEvent *)&le, LeaveNotify,
@@ -543,9 +666,6 @@ static bool same_toplevel(MwWindow *a, MwWindow *b)
 static MwWindow *ptr_deepest(Display *d, int *rx, int *ry)
 {
     XDisplayImpl *dp = MWD(d);
-    /* Always write the out-params: callers assign them to dp->ptr_x/y even
-     * when no toplevel is under the pointer, and used to read them
-     * uninitialized. */
     *rx = dp->ptr_surf_x;
     *ry = dp->ptr_surf_y;
     if (!dp->ptr_toplevel) return NULL;
@@ -593,8 +713,11 @@ static void ptr_motion(void *data, struct wl_pointer *p, uint32_t time,
      * crossing events the same way keeps the two consistent. */
     bool hover_changed = (deep != dp->ptr_focus);
     if (deep && deep != dp->ptr_focus) {
-        if (dp->ptr_focus)
-            crossing(d, dp->ptr_focus, LeaveNotify, NotifyNormal, NotifyNonlinear, rx, ry);
+        if (dp->ptr_focus) {
+            int lx, ly;
+            ptr_in_win_space(d, dp->ptr_focus, &lx, &ly);
+            crossing(d, dp->ptr_focus, LeaveNotify, NotifyNormal, NotifyNonlinear, lx, ly);
+        }
         dp->ptr_focus = deep;
         crossing(d, deep, EnterNotify, NotifyNormal, NotifyNonlinear, rx, ry);
     }
@@ -912,12 +1035,16 @@ int XGrabPointer(Display *d, Window grab_window, Bool owner_events,
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: XGrabPointer win=0x%lx owner=%d mask=0x%x\n",
                 grab_window, owner_events, event_mask);
-    if (dp->ptr_focus)
-        crossing(d, dp->ptr_focus, LeaveNotify, NotifyGrab, NotifyNonlinear,
-                 dp->ptr_x, dp->ptr_y);
-    if (dp->ptr_grab_window)
-        crossing(d, dp->ptr_grab_window, EnterNotify, NotifyGrab, NotifyNonlinear,
-                 dp->ptr_x, dp->ptr_y);
+    if (dp->ptr_focus) {
+        int lx, ly;
+        ptr_in_win_space(d, dp->ptr_focus, &lx, &ly);
+        crossing(d, dp->ptr_focus, LeaveNotify, NotifyGrab, NotifyNonlinear, lx, ly);
+    }
+    if (dp->ptr_grab_window) {
+        int ex, ey;
+        ptr_in_win_space(d, dp->ptr_grab_window, &ex, &ey);
+        crossing(d, dp->ptr_grab_window, EnterNotify, NotifyGrab, NotifyNonlinear, ex, ey);
+    }
     return GrabSuccess;
 }
 
@@ -925,13 +1052,23 @@ int XUngrabPointer(Display *d, Time time)
 {
     (void)time;
     XDisplayImpl *dp = MWD(d);
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: XUngrabPointer (was 0x%lx owner=%d active=%d)\n",
+                dp->ptr_grab_window ? dp->ptr_grab_window->id : 0UL,
+                dp->ptr_grab_owner, dp->ptr_grab_active);
     if (dp->ptr_grab_active) {
-        if (dp->ptr_grab_window)
+        if (dp->ptr_grab_window) {
+            int lx, ly;
+            ptr_in_win_space(d, dp->ptr_grab_window, &lx, &ly);
             crossing(d, dp->ptr_grab_window, LeaveNotify, NotifyUngrab,
-                     NotifyNonlinear, dp->ptr_x, dp->ptr_y);
-        if (dp->ptr_focus)
+                     NotifyNonlinear, lx, ly);
+        }
+        if (dp->ptr_focus) {
+            int ex, ey;
+            ptr_in_win_space(d, dp->ptr_focus, &ex, &ey);
             crossing(d, dp->ptr_focus, EnterNotify, NotifyUngrab, NotifyNonlinear,
-                     dp->ptr_x, dp->ptr_y);
+                     ex, ey);
+        }
     }
     dp->ptr_grab_active = false;
     dp->ptr_grab_temporary = false;
@@ -1090,7 +1227,9 @@ static void ptr_warp(Display *d, int root_x, int root_y)
     if (deep != dp->ptr_focus) {
         if (dp->ptr_focus) {
             XLeaveWindowEvent le;
-            pt_event(d, dp->ptr_focus, (XEvent *)&le, LeaveNotify, rx, ry,
+            int lx, ly;
+            ptr_in_win_space(d, dp->ptr_focus, &lx, &ly);
+            pt_event(d, dp->ptr_focus, (XEvent *)&le, LeaveNotify, lx, ly,
                      current_mods(d), NotifyNonlinear, NotifyNormal, 0);
             le.mode = NotifyNormal; le.detail = NotifyAncestor;
             deliver(d, dp->ptr_focus, (XEvent *)&le, LeaveWindowMask);
