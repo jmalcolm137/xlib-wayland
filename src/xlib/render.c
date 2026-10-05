@@ -224,6 +224,16 @@ static void set_source(Display *d, cairo_t *cr, MwRenderPicture *src,
     cairo_pattern_destroy(pat);
 }
 
+/* A picture transform on the destination maps picture coordinates to the
+ * drawable (cairo-rotate'd text and scaled drawing rely on it). */
+static void apply_dst_transform(cairo_t *cr, MwRenderPicture *dst)
+{
+    if (!dst->have_transform) return;
+    cairo_matrix_t m;
+    xf_matrix(&m, &dst->xf);
+    cairo_transform(cr, &m);
+}
+
 static void apply_dst_clip(cairo_t *cr, MwRenderPicture *dst)
 {
     if (!dst->has_clip) return;
@@ -257,6 +267,7 @@ static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_t *cr = cairo_create(dcs);
     cairo_save(cr);
     cairo_set_operator(cr, cairo_op(op));
+    apply_dst_transform(cr, dst);
 
     /* Clip to the target rectangle and the picture's clip. */
     cairo_rectangle(cr, xd, yd, w, h);
@@ -686,6 +697,7 @@ static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_t *cr = cairo_create(dcs);
     cairo_save(cr);
     cairo_set_operator(cr, cairo_op(op));
+    apply_dst_transform(cr, dst);
     cairo_rectangle(cr, bx, by, w, h);
     cairo_clip(cr);
     apply_dst_clip(cr, dst);
@@ -776,6 +788,7 @@ static void fill_poly(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_t *cr = cairo_create(dcs);
     cairo_save(cr);
     cairo_set_operator(cr, cairo_op(op));
+    apply_dst_transform(cr, dst);
     apply_dst_clip(cr, dst);
     set_source(d, cr, src, 0, 0, 0, 0);
     cairo_move_to(cr, pts[0], pts[1]);
@@ -796,6 +809,15 @@ static void req_trapezoids(Display *d, const unsigned char *b, size_t len)
     MwRenderPicture *dst = pic(d, r->dst), *src = pic(d, r->src);
     size_t n = (len - sz_xRenderTrapezoidsReq) / sz_xTrapezoid;
     const unsigned char *p = b + sz_xRenderTrapezoidsReq;
+    if (getenv("MW_TRACE_RENDER") && n) {
+        xTrapezoid t0; memcpy(&t0, p, sz_xTrapezoid);
+        fprintf(stderr, "MW: trapezoids dst=0x%lx src=0x%lx op=%d n=%zu "
+                        "top=%.1f bot=%.1f l=%.1f..%.1f r=%.1f..%.1f\n",
+                (unsigned long)r->dst, (unsigned long)r->src, r->op, n,
+                t0.top/65536.0, t0.bottom/65536.0,
+                frac(t0.left.p1.x), frac(t0.left.p2.x),
+                frac(t0.right.p1.x), frac(t0.right.p2.x));
+    }
     for (size_t i = 0; i < n; i++) {
         xTrapezoid t; memcpy(&t, p + i*sz_xTrapezoid, sz_xTrapezoid);
         double pts[8] = {
