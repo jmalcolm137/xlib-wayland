@@ -68,13 +68,24 @@ typedef struct {
     int          nstops;
 } MwRenderPicture;
 
+/* One glyph-set entry.  cairo's glyph indices can be compound (a font id in
+ * the high byte, e.g. 0x0B000003), so an array indexed by glyph id is not
+ * viable -- it ballooned to 256M entries.  Use an open-addressing hash map. */
 typedef struct {
-    XID        id;
-    int        format;
-    MwSurface **glyphs;          /* by glyph id */
-    int        *gw, *gh, *gx, *gy;   /* bitmap size + xOff/yOff (advance) */
-    int        *gox, *goy;           /* xGlyphInfo.x/y: pen-to-bitmap bearing */
-    int         cap;
+    CARD32     gid;
+    MwSurface *surface;
+    int        w, h;                 /* bitmap size */
+    int        gx, gy;               /* xOff/yOff: advance */
+    int        gox, goy;             /* xGlyphInfo.x/y: pen-to-bitmap bearing */
+    int        used;
+} MwGlyph;
+
+typedef struct {
+    XID       id;
+    int       format;
+    MwGlyph  *tab;                   /* open-addressing hash table */
+    int       cap;                   /* power of two, 0 = empty */
+    int       used;
 } MwGlyphSet;
 
 int mw_render_opcode(void) { return 138; }
@@ -394,23 +405,57 @@ static void free_picture(Display *d, MwRenderPicture *p)
 
 /* --------------------------------------------------------------- glyphsets */
 
-static void glyphset_reserve(MwGlyphSet *gs, int gid)
+static void glyph_rehash(MwGlyphSet *gs, int ncap)
 {
-    if (gid < gs->cap) return;
-    int ncap = gs->cap ? gs->cap : 256;
-    while (ncap <= gid) ncap *= 2;
-    gs->glyphs = realloc(gs->glyphs, sizeof(MwSurface *) * ncap);
-    gs->gw = realloc(gs->gw, sizeof(int) * ncap);
-    gs->gh = realloc(gs->gh, sizeof(int) * ncap);
-    gs->gx = realloc(gs->gx, sizeof(int) * ncap);
-    gs->gy = realloc(gs->gy, sizeof(int) * ncap);
-    gs->gox = realloc(gs->gox, sizeof(int) * ncap);
-    gs->goy = realloc(gs->goy, sizeof(int) * ncap);
-    for (int i = gs->cap; i < ncap; i++) {
-        gs->glyphs[i] = NULL; gs->gw[i] = gs->gh[i] = 0;
-        gs->gx[i] = gs->gy[i] = gs->gox[i] = gs->goy[i] = 0;
-    }
+    MwGlyph *old = gs->tab;
+    int oldcap = gs->cap;
+    gs->tab = calloc(ncap, sizeof *gs->tab);
     gs->cap = ncap;
+    if (!gs->tab) return;
+    int mask = ncap - 1;
+    for (int i = 0; i < oldcap; i++) {
+        if (!old[i].used) continue;
+        int j = (int)((old[i].gid * 2654435761u) & (unsigned)mask);
+        while (gs->tab[j].used) j = (j + 1) & mask;
+        gs->tab[j] = old[i];
+    }
+    free(old);
+}
+
+static MwGlyph *glyph_slot(MwGlyphSet *gs, CARD32 gid, int create)
+{
+    if (gs->cap == 0) {
+        if (!create) return NULL;
+        glyph_rehash(gs, 256);
+        if (!gs->tab) return NULL;
+    }
+    if (create && (gs->used + 1) * 4 >= gs->cap * 3)
+        glyph_rehash(gs, gs->cap * 2);
+    if (!gs->tab) return NULL;
+    int mask = gs->cap - 1;
+    int i = (int)((gid * 2654435761u) & (unsigned)mask);
+    for (;;) {
+        MwGlyph *g = &gs->tab[i];
+        if (!g->used) {
+            if (!create) return NULL;
+            memset(g, 0, sizeof *g);
+            g->used = 1; g->gid = gid;
+            gs->used++;
+            return g;
+        }
+        if (g->gid == gid) return g;
+        i = (i + 1) & mask;
+    }
+}
+
+static void glyph_remove(MwGlyphSet *gs, CARD32 gid)
+{
+    MwGlyph *g = glyph_slot(gs, gid, 0);
+    if (!g) return;
+    if (g->surface) mw_surface_destroy(g->surface);
+    g->used = 0; g->surface = NULL;
+    gs->used--;
+    glyph_rehash(gs, gs->cap);   /* keep the probe chains valid */
 }
 
 /* Build an ARGB32 surface from an A8 or A1 glyph image (premultiplied white). */
@@ -448,9 +493,9 @@ static void free_glyphset(Display *d, MwGlyphSet *gs)
 {
     if (!gs) return;
     for (int i = 0; i < gs->cap; i++)
-        if (gs->glyphs[i]) mw_surface_destroy(gs->glyphs[i]);
-    free(gs->glyphs); free(gs->gw); free(gs->gh);
-    free(gs->gx); free(gs->gy); free(gs->gox); free(gs->goy);
+        if (gs->tab[i].used && gs->tab[i].surface)
+            mw_surface_destroy(gs->tab[i].surface);
+    free(gs->tab);
     mw_unregister(d, gs->id);
     free(gs);
 }
@@ -650,13 +695,8 @@ static void req_free_glyphs(Display *d, const unsigned char *b, size_t len)
     if (!gs) return;
     size_t n = (len - sz_xRenderFreeGlyphsReq) / 4;
     const CARD32 *ids = (const CARD32 *)(b + sz_xRenderFreeGlyphsReq);
-    for (size_t i = 0; i < n; i++) {
-        int g = (int)ids[i];
-        if (g >= 0 && g < gs->cap && gs->glyphs[g]) {
-            mw_surface_destroy(gs->glyphs[g]);
-            gs->glyphs[g] = NULL;
-        }
-    }
+    for (size_t i = 0; i < n; i++)
+        glyph_remove(gs, ids[i]);
 }
 
 static void req_add_glyphs(Display *d, const unsigned char *b, size_t len)
@@ -677,17 +717,19 @@ static void req_add_glyphs(Display *d, const unsigned char *b, size_t len)
         size_t need = depth1 ? ((info.width + 7) / 8) * info.height
                              : (size_t)stride * info.height;
         if (p + need > end) break;
-        glyphset_reserve(gs, (int)gid);
-        if (gs->glyphs[gid]) { mw_surface_destroy(gs->glyphs[gid]); }
+        MwGlyph *g = glyph_slot(gs, gid, 1);
         if (getenv("MW_TRACE_RENDER") && i == 0)
             fprintf(stderr, "MW: addglyph gid=%u w=%u h=%u x=%d y=%d xOff=%d yOff=%d d0=%d\n",
                     (unsigned)gid, info.width, info.height,
                     (int)info.x, (int)info.y,
                     (int)info.xOff, (int)info.yOff, p[0]);
-        gs->glyphs[gid] = glyph_surface(p, need, info.width, info.height, depth1);
-        gs->gw[gid] = info.width; gs->gh[gid] = info.height;
-        gs->gx[gid] = info.xOff; gs->gy[gid] = info.yOff;   /* advance */
-        gs->gox[gid] = info.x; gs->goy[gid] = info.y;       /* bearing */
+        if (g) {
+            if (g->surface) mw_surface_destroy(g->surface);
+            g->surface = glyph_surface(p, need, info.width, info.height, depth1);
+            g->w = info.width; g->h = info.height;
+            g->gx = info.xOff; g->gy = info.yOff;   /* advance */
+            g->gox = info.x; g->goy = info.y;       /* bearing */
+        }
         p += need;
     }
 }
@@ -697,18 +739,19 @@ static void req_add_glyphs(Display *d, const unsigned char *b, size_t len)
 static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
                        int op, MwGlyphSet *gs, int gid, int x, int y)
 {
-    if (gid < 0 || gid >= gs->cap || !gs->glyphs[gid]) {
+    MwGlyph *gp = glyph_slot(gs, (CARD32)gid, 0);
+    if (!gp || !gp->surface) {
         if (getenv("MW_TRACE_RENDER"))
-            fprintf(stderr, "MW: drawglyph MISSING gid=%d cap=%d\n", gid, gs->cap);
+            fprintf(stderr, "MW: drawglyph MISSING gid=%d\n", gid);
         return;
     }
-    MwSurface *mask = gs->glyphs[gid];
-    int w = gs->gw[gid], h = gs->gh[gid];
+    MwSurface *mask = gp->surface;
+    int w = gp->w, h = gp->h;
     /* The pen (x,y) is the glyph origin; the bitmap's top-left sits at the
      * glyph's stored bearing (xGlyphInfo.x/y), exactly as the X server
      * composites it (destination = pen - info). */
-    int bx = x - gs->gox[gid];
-    int by = y - gs->goy[gid];
+    int bx = x - gp->gox;
+    int by = y - gp->goy;
     /* Decode mask onto the destination directly (cairo mask pattern needs a
      * drawable; a glyph mask is an in-memory surface, so composite it here). */
     MwSurface *ds = pic_surface(d, dst);
@@ -782,10 +825,8 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
             draw_glyph(d, dst, src, r->op, gs, (int)gid, px, py);
             /* The glyph's stored xOff/yOff is its advance (cairo/Xft); a
              * zero-size glyph (space) has no surface but still advances. */
-            if (gid < (CARD32)gs->cap) {
-                px += gs->gx[gid];
-                py += gs->gy[gid];
-            }
+            MwGlyph *gp = glyph_slot(gs, gid, 0);
+            if (gp) { px += gp->gx; py += gp->gy; }
             total++;
         }
         pen_x = px;
