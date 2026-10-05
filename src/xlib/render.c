@@ -840,7 +840,7 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
 /* --------------------------------------------------- traps / triangles */
 
 static void fill_poly(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
-                      int op, double *pts, int n)
+                      int op, double *pts, int n, int xs, int ys)
 {
     if (!dst || n < 3) return;
     MwSurface *ds = pic_surface(d, dst);
@@ -851,7 +851,10 @@ static void fill_poly(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_set_operator(cr, cairo_op(op));
     apply_dst_transform(cr, dst);
     apply_dst_clip(cr, dst);
-    set_source(d, cr, src, 0, 0, 0, 0);
+    /* The trapezoids are in destination coordinates, so source (xSrc,ySrc)
+     * maps to destination (0,0); honouring it keeps pattern sources
+     * (GIMP's canvas guide stipple) at the right phase. */
+    set_source(d, cr, src, 0, 0, xs, ys);
     cairo_move_to(cr, pts[0], pts[1]);
     for (int i = 1; i < n; i++) cairo_line_to(cr, pts[i*2], pts[i*2+1]);
     cairo_close_path(cr);
@@ -887,7 +890,7 @@ static void req_trapezoids(Display *d, const unsigned char *b, size_t len)
             frac(t.right.p2.x), t.bottom / 65536.0,
             frac(t.left.p2.x),  t.bottom / 65536.0,
         };
-        fill_poly(d, dst, src, r->op, pts, 4);
+        fill_poly(d, dst, src, r->op, pts, 4, r->xSrc, r->ySrc);
     }
 }
 
@@ -902,7 +905,7 @@ static void req_triangles(Display *d, const unsigned char *b, size_t len)
         xTriangle t; memcpy(&t, p + i*sz_xTriangle, sz_xTriangle);
         double pts[6] = { frac(t.p1.x), frac(t.p1.y), frac(t.p2.x), frac(t.p2.y),
                           frac(t.p3.x), frac(t.p3.y) };
-        fill_poly(d, dst, src, r->op, pts, 3);
+        fill_poly(d, dst, src, r->op, pts, 3, r->xSrc, r->ySrc);
     }
 }
 
