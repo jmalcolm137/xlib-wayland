@@ -53,6 +53,13 @@ static int mwb_trace(void)
 }
 #define TR(...) do { if (mwb_trace()) { fprintf(stderr, "MWB[%d] ", (int)getpid()); fprintf(stderr, __VA_ARGS__); } } while (0)
 
+typedef struct MwXferReq {
+    Atom     selection, target, property;
+    Window   requestor;
+    Time     time;
+    struct MwXferReq *next;
+} MwXferReq;
+
 typedef struct MwBroker {
     int      listen_fd;
     volatile int xfer_fd;    /* outbound connection we are waiting on, or -1 */
@@ -74,6 +81,12 @@ typedef struct MwBroker {
     int      accept_fd;
     char     accept_buf[1700];
     size_t   accept_len;
+
+    /* Conversions waiting for the one in-flight slot.  Only one can be in
+     * flight at a time, but a client may have several outstanding (the colour
+     * server palette and a drag's file list, say); queueing them keeps a
+     * request from being refused just because another was in progress. */
+    MwXferReq *xfer_queue;
 
     /* inbound: we asked a remote owner and are waiting for the reply */
     struct {
@@ -357,6 +370,11 @@ void mw_broker_fini(Display *d)
     if (b->stop_fd >= 0)   close(b->stop_fd);
     if (b->cmd_fd >= 0)    close(b->cmd_fd);
     free(b->serve.pdata);
+    while (b->xfer_queue) {
+        MwXferReq *r = b->xfer_queue;
+        b->xfer_queue = r->next;
+        free(r);
+    }
     unlink(b->sock_path);
     for (int i = 0; i < b->nsets; i++) free(b->sets[i]);
     free(b->sets);
@@ -388,12 +406,14 @@ void mw_broker_owner_changed(Display *d, Atom selection, Window owner)
 
 /* ----------------------------------------------------------- requestor */
 
-bool mw_broker_convert(Display *d, Atom selection, Atom target, Atom property,
+/* Start the conversion for one request.  Returns true when it is in flight (or
+ * was handed off); false when it cannot be served at all (no local/registered
+ * owner). */
+static bool xfer_start(Display *d, Atom selection, Atom target, Atom property,
                        Window requestor, Time time)
 {
     MwBroker *b = MWD(d)->broker;
-    if (!b || !atom_is_shared(b, d, selection)) return false;
-    if (b->xfer.active) return false;
+    if (!b || b->xfer.active) return false;
 
     const char *selname = XGetAtomName(d, selection);
     if (!selname) return false;
@@ -446,6 +466,60 @@ bool mw_broker_convert(Display *d, Atom selection, Atom target, Atom property,
     b->xfer.len = 0;
     b->xfer.deadline_ms = now_ms() + MWB_DEADLINE_MS;
     poke(b);
+    return true;
+}
+
+/* Start the next queued conversion, or refuse it so the waiting client is not
+ * left without a SelectionNotify. */
+static void xfer_next(Display *d)
+{
+    MwBroker *b = MWD(d)->broker;
+    if (!b) return;
+    while (b->xfer_queue && !b->xfer.active) {
+        MwXferReq *r = b->xfer_queue;
+        b->xfer_queue = r->next;
+        if (xfer_start(d, r->selection, r->target, r->property, r->requestor,
+                       r->time)) {
+            free(r);
+            return;
+        }
+        XSelectionEvent se;
+        memset(&se, 0, sizeof se);
+        se.type = SelectionNotify;
+        se.display = d;
+        se.requestor = r->requestor;
+        se.selection = r->selection;
+        se.target = r->target;
+        se.property = None;
+        se.time = r->time;
+        mw_put_event(d, (XEvent *)&se);
+        free(r);
+    }
+}
+
+bool mw_broker_convert(Display *d, Atom selection, Atom target, Atom property,
+                       Window requestor, Time time)
+{
+    MwBroker *b = MWD(d)->broker;
+    if (!b || !atom_is_shared(b, d, selection)) return false;
+    if (!b->xfer.active)
+        return xfer_start(d, selection, target, property, requestor, time);
+
+    /* One conversion at a time, but a client can have several outstanding --
+     * the colour palette and a drag's file list, say.  Queue rather than drop:
+     * a request that never gets a reply stalls the client's transfer (and a
+     * failed file transfer is fatal to some CDE applications). */
+    MwXferReq *r = calloc(1, sizeof *r);
+    if (!r) return false;
+    r->selection = selection;
+    r->target = target;
+    r->property = property;
+    r->requestor = requestor;
+    r->time = time;
+    MwXferReq **pp = &b->xfer_queue;
+    while (*pp) pp = &(*pp)->next;
+    *pp = r;
+    TR("queued convert %lu (xfer busy)\n", (unsigned long)selection);
     return true;
 }
 
@@ -692,6 +766,7 @@ static void xfer_read(Display *d)
             se.target = b->xfer.target; se.property = None; se.time = b->xfer.time;
             mw_put_event(d, (XEvent *)&se);
             b->xfer.len = 0;
+            xfer_next(d);
         }
         return;
     }
@@ -761,11 +836,13 @@ static void xfer_read(Display *d)
     TR("xfer posted notify req=%lu prop=%lu qcount=%d\n", req, prop, dp->qcount);
 
     TR("xfer reply %c ok=%d sel=%lu target=%lu\n", buf[0], ok,
-       (unsigned long)sel, (unsigned long)tgt);    close(b->xfer.fd);
+       (unsigned long)sel, (unsigned long)tgt);
+    close(b->xfer.fd);
     b->xfer_fd = -1;
     b->xfer.fd = -1;
     b->xfer.active = false;
     b->xfer.len = 0;
+    xfer_next(d);
 }
 
 int mw_broker_poll_fd(Display *d)
