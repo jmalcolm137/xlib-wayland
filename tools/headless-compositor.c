@@ -115,6 +115,10 @@
 #define FRAME_INTERVAL_MS 16
 #define SCRIPT_START_MS  400
 #define SCRIPT_STEP_MS   60
+/* How long to keep waiting for the client to map a window before delivering the
+ * script anyway, and how often to re-check while waiting. */
+#define SCRIPT_BACKSTOP_MS 3000
+#define SCRIPT_GATE_POLL_MS 50
 
 #ifndef MIN
 #  define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -298,8 +302,10 @@ struct mw_compositor {
 	struct mw_action *actions;
 	int action_count;
 	int action_index;
-	struct wl_event_source *script_timer;
+	struct wl_event_source *script_timer;   /* drives the actions */
+	struct wl_event_source *script_gate;    /* waits for a surface to exist */
 	int script_started;
+	uint64_t script_gate_start_ms;
 };
 
 /* ------------------------------------------------------------------ */
@@ -634,6 +640,10 @@ static void capture_and_exit(struct mw_compositor *comp)
 /* Frame callbacks (throttled ~60 Hz)                                  */
 /* ------------------------------------------------------------------ */
 
+/* Defined with the script machinery further down; called when a surface first
+ * becomes visible so a queued input script starts as soon as there is a target. */
+static void script_gate_kick(struct mw_compositor *comp);
+
 static void arm_frame_timer(struct mw_compositor *comp)
 {
 	if (comp->frame_timer)
@@ -927,6 +937,8 @@ static void surface_commit(struct wl_client *client,
 			 * ordinary window that merely repainted -- the main
 			 * window redrawing while a dialog was up, say -- took
 			 * the input away from the dialog. */
+			if (!was_mapped && comp->action_count > 0)
+				script_gate_kick(comp);
 		} else {
 			/* A NULL commit unmaps the surface.  Whether the
 			 * compositor owes it a fresh configure when it comes
@@ -2909,10 +2921,40 @@ static void start_script(struct mw_compositor *comp)
 	wl_event_source_timer_update(comp->script_timer, delay);
 }
 
-static int script_fallback_func(void *data)
+/* Is there anything an input action could be delivered to?  Delivering motion or
+ * a button to no surface is a silent no-op, so a script that starts before the
+ * client has mapped its first toplevel loses those actions -- which looks
+ * exactly like a client that ignored the input.  A slow starter (XForms spends
+ * its first few hundred milliseconds in Xrm, the font list and the colormap
+ * before it maps anything) needs the script to wait for the window. */
+static int script_has_target(struct mw_compositor *comp)
 {
-	start_script(data);
+	return comp->popup_surface != NULL ||
+	       fallback_toplevel(comp, NULL) != NULL;
+}
+
+static int script_gate_func(void *data)
+{
+	struct mw_compositor *comp = data;
+
+	/* Wait for a window to exist before delivering input, but not forever:
+	 * a client that maps late still gets its script, and one that never
+	 * maps at all does not hang the run past the backstop. */
+	if (script_has_target(comp) ||
+	    now_ms() - comp->script_gate_start_ms >= SCRIPT_BACKSTOP_MS)
+		start_script(comp);
+	else
+		wl_event_source_timer_update(comp->script_gate,
+					     SCRIPT_GATE_POLL_MS);
 	return 0;
+}
+
+/* Called when a surface becomes visible: start the script right away instead of
+ * waiting for the next poll, so the first action lands as soon as possible. */
+static void script_gate_kick(struct mw_compositor *comp)
+{
+	if (!comp->script_started && comp->script_gate)
+		script_gate_func(comp);
 }
 
 /* ------------------------------------------------------------------ */
@@ -3134,10 +3176,12 @@ int main(int argc, char **argv)
 					comp.capture_every_ms);
 	}
 	if (comp.action_count > 0) {
-		struct wl_event_source *fallback =
-			wl_event_loop_add_timer(comp.loop, script_fallback_func, &comp);
-		if (fallback)
-			wl_event_source_timer_update(fallback, SCRIPT_START_MS);
+		comp.script_gate_start_ms = now_ms();
+		comp.script_gate = wl_event_loop_add_timer(comp.loop,
+							   script_gate_func, &comp);
+		if (comp.script_gate)
+			wl_event_source_timer_update(comp.script_gate,
+						     SCRIPT_START_MS);
 	}
 
 	/* A line on stdin triggers an early screenshot. */
