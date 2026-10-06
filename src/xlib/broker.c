@@ -92,6 +92,7 @@ typedef struct MwBroker {
     struct {
         bool     active;
         int      fd;
+        int      retries;
         Atom     selection, target, property;
         Window   requestor;
         Time     time;
@@ -458,6 +459,7 @@ static bool xfer_start(Display *d, Atom selection, Atom target, Atom property,
     b->xfer.active = true;
     b->xfer.fd = fd;
     b->xfer_fd = fd;
+    b->xfer.retries = 0;
     b->xfer.selection = selection;
     b->xfer.target = target;
     b->xfer.property = property;
@@ -796,6 +798,41 @@ static void xfer_read(Display *d)
             hexdec(ht, (unsigned char *)tgname, sizeof tgname - 1);
             TR("xfer D target=%s type=%s fmt=%d nitems=%lu nbytes=%zu hexlen=%zu\n",
                tgname, tname, fmt, nit, nbytes, strlen(hex));
+
+            /* Replies echo the request's target in the first field of the
+             * header.  If it does not match what we asked for, this is a stale
+             * reply (an earlier conversion's) that arrived on this socket;
+             * ignore it and ask the owner again rather than handing the wrong
+             * bytes to the application. */
+            const char *rn = XGetAtomName(d, b->xfer.target);
+            char reqname[128] = "";
+            if (rn) { snprintf(reqname, sizeof reqname, "%s", rn); XFree((char *)rn); }
+            if (reqname[0] && strcmp(reqname, tgname) != 0) {
+                TR("xfer stale reply (want %s); retry %d\n", reqname, b->xfer.retries);
+                free(data);
+                Atom s = b->xfer.selection, tg = b->xfer.target;
+                Atom pr = b->xfer.property;
+                Window rq = b->xfer.requestor;
+                Time tm = b->xfer.time;
+                int tries = ++b->xfer.retries;
+                close(b->xfer.fd);
+                b->xfer_fd = -1; b->xfer.fd = -1; b->xfer.active = false;
+                b->xfer.len = 0;
+                if (tries <= 3 &&
+                    (xfer_start(d, s, tg, pr, rq, tm),
+                     b->xfer.active)) {
+                    b->xfer.retries = tries;   /* xfer_start resets it */
+                    return;
+                }
+                XSelectionEvent se;
+                memset(&se, 0, sizeof se);
+                se.type = SelectionNotify; se.display = d;
+                se.requestor = rq; se.selection = s; se.target = tg;
+                se.property = None; se.time = tm;
+                mw_put_event(d, (XEvent *)&se);
+                xfer_next(d);
+                return;
+            }
             if (data) {
                 size_t got = hexdec(hex, data, nbytes);
                 TR("xfer data target=%s type=%s fmt=%d nitems=%lu nbytes=%zu got=%zu\n",
@@ -863,8 +900,10 @@ void mw_broker_handle_ready(Display *d)
         TR("handle_ready xfer=%d serve=%d\n", b->xfer.active, b->serve.active);
     if (b->xfer.active) xfer_read(d);
     if (b->accept_fd >= 0) serve_read(d);
-    if (b->listen_fd >= 0) serve_accept(d);
-    /* Drop a stalled serve so the socket does not leak. */
+    /* Drop a stalled serve before accepting anything new: otherwise one
+     * conversion whose owner never answers blocks every later request (the
+     * accept is refused and the client waits forever). */
     if (b->serve.active && now_ms() > b->serve.deadline_ms)
         serve_finish(d, true);
+    if (b->listen_fd >= 0) serve_accept(d);
 }
