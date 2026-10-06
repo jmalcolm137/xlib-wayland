@@ -523,12 +523,15 @@ void mw_dnd_wl_drop(Display *d, const unsigned char *data, size_t len)
     put32(m + 16, (unsigned long)x->src_win);
     send_icc(d, x->shell, m, 20);
 
-    if (!x->remote) {
-        /* We own the icc handle; the site pulls the data from us. */
-        x->active = false;
-        x->entered = false;
-        x->shell = None;
-    }
+    /* The drop has been delivered.  Do NOT send TOP_LEVEL_LEAVE afterwards:
+     * Motif's ReceiverShellExternalSourceHandler destroys the external
+     * DragContext on a leave that is not accompanied by a DROP_START in the
+     * same batch, and the transfer machinery still holds that context -- the
+     * next XtGetValues on it is a use-after-free.  Mark the drag finished so
+     * the compositor's leave (which comes right after the drop) is ignored. */
+    x->active = false;
+    x->entered = false;
+    x->shell = None;
 }
 
 /* Serve a convert on a synthetic icc handle we own (a Wayland-origin drag). */
