@@ -965,6 +965,8 @@ void      mw_dnd_source_done(Display *d);
  * can finish relaying the transfer first (see the grace period in dnd.c). */
 void      mw_dnd_pump(Display *d);
 int       mw_dnd_timeout(Display *d);
+/* The broker finished relaying one of a drag's conversions. */
+void      mw_dnd_serve_done(Display *d);
 /* Produce the bytes a Wayland drag source asked for, by converting the X
  * selection of the in-progress Motif drag.  Returns true if queued. */
 bool      mw_dnd_source_send(Display *d, const char *mime, int fd);

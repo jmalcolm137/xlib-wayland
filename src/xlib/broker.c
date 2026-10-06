@@ -533,6 +533,16 @@ static void serve_finish(Display *d, bool refuse)
     MwBroker *b = dp->broker;
     if (!b || !b->serve.active) return;
 
+    /* A conversion for a Motif drag's icc handle: when it is done the
+     * destination has the data, so the initiator's own drag can be ended (the
+     * source shim defers that until the relay completes). */
+    bool motif = false;
+    {
+        const char *sn = XGetAtomName(d, b->serve.selection);
+        if (sn && strncmp(sn, "_MOTIF_ATOM_", 12) == 0) motif = true;
+        if (sn) XFree((char *)sn);
+    }
+
     if (b->serve.fd >= 0) {
         if (refuse || !b->serve.got_prop) {
             char msg[1700];
@@ -589,6 +599,7 @@ static void serve_finish(Display *d, bool refuse)
     free(b->serve.pdata);
     b->serve.pdata = NULL;
     b->serve.pnbytes = b->serve.pnitems = 0;
+    if (motif) mw_dnd_serve_done(d);
 }
 
 static void serve_read(Display *d);

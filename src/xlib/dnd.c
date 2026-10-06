@@ -65,7 +65,7 @@ enum {
 /* How long to keep the initiator's selection owned after the Wayland drag ends,
  * so the destination's convert request (relayed by the broker) can complete
  * before Motif disowns it. */
-#define DND_RELEASE_GRACE_MS 800
+#define DND_RELEASE_GRACE_MS 4000
 
 #define MOTIF_DRAG_MIME_PREFIX "application/x-motif-drag;"
 
@@ -707,6 +707,14 @@ void mw_dnd_pump(Display *d)
     MwDnd *x = MWD(d)->dnd;
     if (x && x->release_pending && dnd_now_ms() >= x->release_at)
         dnd_release_now(d);
+}
+
+/* The broker has finished relaying a conversion for a Motif drag's icc handle:
+ * the destination now has the data, so Motif's own drag can end. */
+void mw_dnd_serve_done(Display *d)
+{
+    MwDnd *x = MWD(d)->dnd;
+    if (x && x->release_pending) dnd_release_now(d);
 }
 
 static void dnd_src_target(void *data, struct wl_data_source *src, const char *mime)
