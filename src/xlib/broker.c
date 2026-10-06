@@ -75,6 +75,7 @@ typedef struct MwBroker {
     char   **sets;
     int      nsets;
     Atom     proxy_prop;
+    unsigned proxy_seq;   /* makes each serve's property name unique */
 
     /* A connection accepted whose request has not fully arrived yet.  Kept
      * rather than dropped, so the peer's write does not fail. */
@@ -675,11 +676,17 @@ static void serve_read(Display *d)
     if (b->serve.proxy_win == None)
         b->serve.proxy_win = XCreateSimpleWindow(d, DefaultRootWindow(d),
                                                  0, 0, 1, 1, 0, 0, 0);
-    if (!b->proxy_prop) {
-        char pn[64];
-        snprintf(pn, sizeof pn, "_XLIB_WAYLAND_SEL_%d", b->mypid);
+    /* A unique property per serve: a delayed write from a previous conversion
+     * (another serve, or the colour server) landing on a fixed property name
+     * would otherwise be captured as this request's data. */
+    {
+        char pn[80];
+        snprintf(pn, sizeof pn, "_XLIB_WAYLAND_SEL_%d_%u", b->mypid,
+                 ++b->proxy_seq);
         b->proxy_prop = XInternAtom(d, pn, False);
     }
+    b->serve.pdata = NULL;
+    b->serve.pnbytes = 0;
 
     b->serve.active = true;
     b->serve.fd = fd;
