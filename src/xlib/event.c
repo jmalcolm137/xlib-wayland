@@ -248,7 +248,9 @@ int XNextEvent(Display *d, XEvent *event)
                 fprintf(stderr, "MW: XNextEvent type=%d win=0x%lx send=%d (to GDK)\n",
                         event->xany.type, (unsigned long)event->xany.window,
                         event->xany.send_event);
-            return 1;
+            /* Xlib's XNextEvent returns 0, and clients loop on
+             * `while (XNextEvent(dpy, &ev) == 0)` (rendercheck does). */
+            return 0;
         }
         if (dp->closed) { memset(event, 0, sizeof *event); return 0; }
     }
