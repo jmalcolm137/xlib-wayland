@@ -552,6 +552,17 @@ static void req_clip_rectangles(Display *d, const unsigned char *b, size_t len)
     MwRenderPicture *p = pic(d, r->picture);
     if (!p) return;
     size_t n = (len - sz_xRenderSetPictureClipRectanglesReq) / 8;
+    if (getenv("MW_TRACE_RENDER")) {
+        const short *rp0 = (const short *)(b + sz_xRenderSetPictureClipRectanglesReq);
+        fprintf(stderr, "MW: SetPictureClipRectangles pic=0x%lx origin=%d,%d n=%zu hdr=%zu",
+                (unsigned long)r->picture, r->xOrigin, r->yOrigin, n,
+                (size_t)sz_xRenderSetPictureClipRectanglesReq);
+        if (n) fprintf(stderr, " first=%d,%d %ux%u", rp0[0], rp0[1],
+                       (unsigned short)rp0[2], (unsigned short)rp0[3]);
+        fprintf(stderr, " bytes:");
+        for (size_t i = 0; i < len && i < 28; i++) fprintf(stderr, " %02x", b[i]);
+        fprintf(stderr, "\n");
+    }
     if (p->has_clip) { pixman_region32_fini(&p->clip); p->has_clip = 0; }
     if (n == 0) return;
     pixman_region32_init(&p->clip);

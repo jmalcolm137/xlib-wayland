@@ -652,6 +652,8 @@ void mw_window_expose(MwWindow *win, int x, int y, int w, int h)
 {
     Display *d = win->d;
     if (!d) return;
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: expose win=0x%lx %d,%d %dx%d\n", win->id, x, y, w, h);
     if (win->event_mask & ExposureMask) {
         XExposeEvent ee;
         memset(&ee, 0, sizeof ee);

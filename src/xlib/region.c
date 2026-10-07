@@ -15,15 +15,27 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <pixman.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------ model */
 
+/* The rectangle mirror must match Xlib's own REGION/BOX layout, not XRectangle:
+ * client libraries read it directly.  libXrender's
+ * XRenderSetPictureClipRegion walks numRects/rects as BOX { x1, x2, y1, y2 },
+ * and storing XRectangle { x, y, width, height } there turned a full-window
+ * clip into a degenerate (0, height, 0, 0) one -- which blanked every Xft
+ * client that clips through Render (upstream libXft does; ours does not). */
+typedef struct {
+    short x1, x2, y1, y2;
+} MwRegionBox;
+
 struct _XRegion {
-    long              size;      /* capacity of rects, in XRectangle units */
+    long              size;      /* capacity of rects, in boxes            */
     long              numRects;  /* number of valid entries in rects       */
-    XRectangle       *rects;     /* mirror of pix, in Xlib representation   */
+    MwRegionBox      *rects;     /* mirror of pix, in Xlib REGION layout    */
+    MwRegionBox       extents;   /* mirror of pix's bounding box            */
     pixman_region32_t pix;       /* authoritative geometry                  */
 };
 
@@ -123,7 +135,7 @@ static void mw_sync_rects(Region r)
         n = 0;
 
     if ((long)n > r->size) {
-        XRectangle *nr = realloc(r->rects, (size_t)n * sizeof *nr);
+        MwRegionBox *nr = realloc(r->rects, (size_t)n * sizeof *nr);
 
         if (!nr) {
             r->numRects = 0;
@@ -134,12 +146,19 @@ static void mw_sync_rects(Region r)
     }
 
     for (i = 0; i < n; i++) {
-        r->rects[i].x = (short)boxes[i].x1;
-        r->rects[i].y = (short)boxes[i].y1;
-        r->rects[i].width = (unsigned short)(boxes[i].x2 - boxes[i].x1);
-        r->rects[i].height = (unsigned short)(boxes[i].y2 - boxes[i].y1);
+        r->rects[i].x1 = (short)boxes[i].x1;
+        r->rects[i].x2 = (short)boxes[i].x2;
+        r->rects[i].y1 = (short)boxes[i].y1;
+        r->rects[i].y2 = (short)boxes[i].y2;
     }
     r->numRects = n;
+    {
+        pixman_box32_t *ext = pixman_region32_extents(&r->pix);
+        r->extents.x1 = (short)ext->x1;
+        r->extents.x2 = (short)ext->x2;
+        r->extents.y1 = (short)ext->y1;
+        r->extents.y2 = (short)ext->y2;
+    }
 }
 
 /* Install a computed region, clip it and refresh the cache. */
@@ -479,6 +498,12 @@ int XClipBox(Region r, XRectangle *rect_return)
 {
     pixman_box32_t *ext = pixman_region32_extents(&r->pix);
 
+    if (getenv("MW_TRACE_REGION")) {
+        int n = 0;
+        pixman_region32_rectangles(&r->pix, &n);
+        fprintf(stderr, "MW: XClipBox nrects=%d -> %d,%d %dx%d\n", n,
+                ext->x1, ext->y1, ext->x2 - ext->x1, ext->y2 - ext->y1);
+    }
     rect_return->x = (short)ext->x1;
     rect_return->y = (short)ext->y1;
     rect_return->width = (unsigned short)(ext->x2 - ext->x1);
