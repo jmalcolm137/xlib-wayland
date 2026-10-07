@@ -292,10 +292,15 @@ static void set_extents(XftFont *pub, const char *u, int n, XGlyphInfo *extents)
     memset(extents, 0, sizeof *extents);
     if (!pub) return;
     int w = mw_xft_text_width(((MwXftFont *)pub)->raster, u, n);
-    extents->width  = (unsigned short)(w < 0 ? 0 : w);
+    if (w < 0) w = 0;
+    extents->width  = (unsigned short)w;
     extents->height = (unsigned short)pub->height;
     extents->x      = 0;
     extents->y      = (short)pub->ascent;
+    /* Xft reports the advance in xOff (callers lay text out from it); leaving it
+     * zero made every string measure as zero wide. */
+    extents->xOff   = (short)w;
+    extents->yOff   = 0;
 }
 
 static void text_extents(Display *dpy, XftFont *pub, const void *s, int len,
@@ -516,10 +521,13 @@ void XftGlyphExtents(Display *dpy, XftFont *pub, _Xconst FT_UInt *glyphs,
     int w = 0;
     for (int i = 0; i < nglyphs; i++)
         w += ft_glyph_advance(pub, glyphs[i]);
-    extents->width  = (unsigned short)(w < 0 ? 0 : w);
+    if (w < 0) w = 0;
+    extents->width  = (unsigned short)w;
     extents->height = (unsigned short)pub->height;
     extents->x      = 0;
     extents->y      = (short)pub->ascent;
+    extents->xOff   = (short)w;
+    extents->yOff   = 0;
 }
 
 static void draw_glyph_run(XftDraw *draw, _Xconst XftColor *color,
