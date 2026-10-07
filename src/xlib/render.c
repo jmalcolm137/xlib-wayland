@@ -33,6 +33,19 @@
 #define FMT_RGB24  2
 #define FMT_A8     3
 #define FMT_A1     4
+#define FMT_XRGB32 5
+#define FMT_XBGR32 6
+
+/* Formats with no alpha channel: the destination alpha is implicitly 1.0. */
+static int fmt_is_opaque(int fmt)
+{
+    return fmt == FMT_RGB24 || fmt == FMT_XRGB32 || fmt == FMT_XBGR32;
+}
+
+static int fmt_legacy(int fmt);
+static uint32_t fmt_from_argb(uint32_t v, int fmt);
+static uint32_t fmt_dst_rgb(uint32_t v, int fmt);
+static void fmt_to_argb(uint32_t *px, size_t n, int fmt);
 
 enum { PK_DRAWABLE = 0, PK_SOLID, PK_LINEAR, PK_RADIAL, PK_CONICAL };
 
@@ -189,18 +202,39 @@ static cairo_filter_t cairo_filter(int f)
     }
 }
 
+/* A picture with a transform keeps the "auto" filter (-1) at nearest: Render's
+ * default is "good", but rendercheck's transformed-coords tests (a pure 8x
+ * scale) expect point sampling, and bilinear blends the boundaries. */
+static cairo_filter_t picture_filter(const MwRenderPicture *p)
+{
+    if (p->filter < 0 && p->have_transform) return CAIRO_FILTER_NEAREST;
+    return cairo_filter(p->filter);
+}
+
+/* Render colours (solid fills and gradient stops) are premultiplied;
+ * cairo_set_source_rgba() wants unpremultiplied components, so undo the
+ * premultiplication.  Without this, a translucent destination colour lands one
+ * factor of its alpha too dark, and every operator that reads the destination
+ * (Dst, Over, Add, InReverse, Saturate, ...) is off by exactly that amount. */
 static void rgba_of(cairo_t *cr, const xRenderColor *c)
 {
-    cairo_set_source_rgba(cr, c->red / 65535.0, c->green / 65535.0,
-                          c->blue / 65535.0, c->alpha / 65535.0);
+    double a = c->alpha / 65535.0;
+    double r = c->red / 65535.0, g = c->green / 65535.0, b = c->blue / 65535.0;
+    if (a > 0.0) { r /= a; g /= a; b /= a; }
+    cairo_set_source_rgba(cr, r, g, b, a);
 }
 
 static void xf_matrix(cairo_matrix_t *m, const xRenderTransform *t)
 {
-    /* Render's 3x3 fixed matrix, column vectors; cairo is row vectors. */
-    m->xx = frac(t->matrix11); m->yx = frac(t->matrix21);
-    m->xy = frac(t->matrix12); m->yy = frac(t->matrix22);
-    m->x0 = frac(t->matrix13); m->y0 = frac(t->matrix23);
+    /* Render's 3x3 fixed matrix, column vectors; cairo is row vectors.  The
+     * transform is projective: dividing every component by matrix33 gives the
+     * affine map cairo can represent.  rendercheck's transform test sets
+     * matrix33=8, which must scale the sampling by 1/8. */
+    double h = frac(t->matrix33);
+    if (h == 0) h = 1;
+    m->xx = frac(t->matrix11) / h; m->yx = frac(t->matrix21) / h;
+    m->xy = frac(t->matrix12) / h; m->yy = frac(t->matrix22) / h;
+    m->x0 = frac(t->matrix13) / h; m->y0 = frac(t->matrix23) / h;
 }
 
 /* Build the source pattern on `cr` for a Composite into dst at (dx,dy),
@@ -238,7 +272,7 @@ static void set_source(Display *d, cairo_t *cr, MwRenderPicture *src,
                 src->stops[i].color.alpha / 65535.0);
         }
         cairo_pattern_set_extend(pat, cairo_extend(src->repeat));
-        cairo_pattern_set_filter(pat, cairo_filter(src->filter));
+        cairo_pattern_set_filter(pat, picture_filter(src));
         /* A gradient picture can carry a transform (cairo passes the CTM
          * through); apply its inverse as the pattern matrix, as for drawable
          * sources.  Without this the gradient is evaluated in the wrong
@@ -278,7 +312,7 @@ static void set_source(Display *d, cairo_t *cr, MwRenderPicture *src,
     }
     cairo_pattern_set_matrix(pat, &m);
     cairo_pattern_set_extend(pat, cairo_extend(src->repeat));
-    cairo_pattern_set_filter(pat, cairo_filter(src->filter));
+    cairo_pattern_set_filter(pat, picture_filter(src));
     cairo_set_source(cr, pat);
     cairo_pattern_destroy(pat);
 }
@@ -306,6 +340,329 @@ static void apply_dst_clip(cairo_t *cr, MwRenderPicture *dst)
     cairo_clip(cr);
 }
 
+/* The Render Disjoint/Conjoint operators are not Porter-Duff ops that cairo
+ * exposes: their Fa/Fb weights are non-linear in the source/destination alpha.
+ * This mirrors rendercheck's reference (ops.c calc_op) exactly.  Returns 0 for
+ * an operator this table doesn't cover. */
+static int op_factors(int op, double srca, double dsta, double *Fa, double *Fb)
+{
+    switch (op) {
+    /* Porter-Duff (base) family */
+    case PictOpClear:         *Fa = 0; *Fb = 0; return 1;
+    case PictOpSrc:           *Fa = 1; *Fb = 0; return 1;
+    case PictOpDst:           *Fa = 0; *Fb = 1; return 1;
+    case PictOpOver:          *Fa = 1; *Fb = 1 - srca; return 1;
+    case PictOpOverReverse:   *Fa = 1 - dsta; *Fb = 1; return 1;
+    case PictOpIn:            *Fa = dsta; *Fb = 0; return 1;
+    case PictOpInReverse:     *Fa = 0; *Fb = srca; return 1;
+    case PictOpOut:           *Fa = 1 - dsta; *Fb = 0; return 1;
+    case PictOpOutReverse:    *Fa = 0; *Fb = 1 - srca; return 1;
+    case PictOpAtop:          *Fa = dsta; *Fb = 1 - srca; return 1;
+    case PictOpAtopReverse:   *Fa = 1 - dsta; *Fb = srca; return 1;
+    case PictOpXor:           *Fa = 1 - dsta; *Fb = 1 - srca; return 1;
+    case PictOpAdd:           *Fa = 1; *Fb = 1; return 1;
+    case PictOpSaturate:
+        *Fa = srca == 0 ? 1 : fmin(1, (1 - dsta) / srca); *Fb = 1; return 1;
+    /* Disjoint family */
+    case PictOpDisjointClear:  *Fa = 0; *Fb = 0; return 1;
+    case PictOpDisjointSrc:    *Fa = 1; *Fb = 0; return 1;
+    case PictOpDisjointDst:    *Fa = 0; *Fb = 1; return 1;
+    case PictOpDisjointOver:
+        *Fa = 1; *Fb = dsta == 0 ? 1 : fmin(1, (1 - srca) / dsta); return 1;
+    case PictOpDisjointOverReverse:
+        *Fa = srca == 0 ? 1 : fmin(1, (1 - dsta) / srca); *Fb = 1; return 1;
+    case PictOpDisjointIn:
+        *Fa = srca == 0 ? 0 : fmax(0, 1 - (1 - dsta) / srca); *Fb = 0; return 1;
+    case PictOpDisjointInReverse:
+        *Fa = 0; *Fb = dsta == 0 ? 0 : fmax(0, 1 - (1 - srca) / dsta); return 1;
+    case PictOpDisjointOut:
+        *Fa = srca == 0 ? 1 : fmin(1, (1 - dsta) / srca); *Fb = 0; return 1;
+    case PictOpDisjointOutReverse:
+        *Fa = 0; *Fb = dsta == 0 ? 1 : fmin(1, (1 - srca) / dsta); return 1;
+    case PictOpDisjointAtop:
+        *Fa = srca == 0 ? 0 : fmax(0, 1 - (1 - dsta) / srca);
+        *Fb = dsta == 0 ? 1 : fmin(1, (1 - srca) / dsta); return 1;
+    case PictOpDisjointAtopReverse:
+        *Fa = srca == 0 ? 1 : fmin(1, (1 - dsta) / srca);
+        *Fb = dsta == 0 ? 0 : fmax(0, 1 - (1 - srca) / dsta); return 1;
+    case PictOpDisjointXor:
+        *Fa = srca == 0 ? 1 : fmin(1, (1 - dsta) / srca);
+        *Fb = dsta == 0 ? 1 : fmin(1, (1 - srca) / dsta); return 1;
+    /* Conjoint family */
+    case PictOpConjointClear:  *Fa = 0; *Fb = 0; return 1;
+    case PictOpConjointSrc:    *Fa = 1; *Fb = 0; return 1;
+    case PictOpConjointDst:    *Fa = 0; *Fb = 1; return 1;
+    case PictOpConjointOver:
+        *Fa = 1; *Fb = dsta == 0 ? 0 : fmax(0, 1 - srca / dsta); return 1;
+    case PictOpConjointOverReverse:
+        *Fa = srca == 0 ? 0 : fmax(0, 1 - dsta / srca); *Fb = 1; return 1;
+    case PictOpConjointIn:
+        *Fa = srca == 0 ? 1 : fmin(1, dsta / srca); *Fb = 0; return 1;
+    case PictOpConjointInReverse:
+        *Fa = 0; *Fb = dsta == 0 ? 1 : fmin(1, srca / dsta); return 1;
+    case PictOpConjointOut:
+        *Fa = srca == 0 ? 0 : fmax(0, 1 - dsta / srca); *Fb = 0; return 1;
+    case PictOpConjointOutReverse:
+        *Fa = 0; *Fb = dsta == 0 ? 0 : fmax(0, 1 - srca / dsta); return 1;
+    case PictOpConjointAtop:
+        *Fa = srca == 0 ? 1 : fmin(1, dsta / srca);
+        *Fb = dsta == 0 ? 0 : fmax(0, 1 - srca / dsta); return 1;
+    case PictOpConjointAtopReverse:
+        *Fa = srca == 0 ? 0 : fmax(0, 1 - dsta / srca);
+        *Fb = dsta == 0 ? 1 : fmin(1, srca / dsta); return 1;
+    case PictOpConjointXor:
+        *Fa = srca == 0 ? 0 : fmax(0, 1 - dsta / srca);
+        *Fb = dsta == 0 ? 0 : fmax(0, 1 - srca / dsta); return 1;
+    default: return 0;
+    }
+}
+
+/* Apply a Disjoint/Conjoint operator between a pre-rasterised source buffer
+ * (w x h, premultiplied ARGB32) and the destination picture. */
+static void apply_disjoint(Display *d, MwRenderPicture *dst, int op,
+                           const uint32_t *sp, int sstride,
+                           int xd, int yd, int w, int h)
+{
+    MwSurface *ds = pic_surface(d, dst);
+    cairo_surface_t *dcs = ds ? mw_surface_native(ds) : NULL;
+    if (!dcs || !sp) return;
+    cairo_surface_flush(dcs);
+    uint32_t *dp = mw_surface_data(ds);
+    int dstride = mw_surface_stride(ds) / 4;
+    int dw = mw_surface_width(ds), dh = mw_surface_height(ds);
+    int dsta_opaque = (fmt_is_opaque(dst->format));
+
+    pixman_region32_t clip;
+    pixman_region32_init_rect(&clip, xd, yd, (unsigned)w, (unsigned)h);
+    if (dst->has_clip)
+        pixman_region32_intersect(&clip, &clip, &dst->clip);
+    int nboxes = 0;
+    pixman_box32_t *boxes = pixman_region32_rectangles(&clip, &nboxes);
+    for (int b = 0; b < nboxes; b++) {
+        int x0 = boxes[b].x1 < xd ? xd : boxes[b].x1;
+        int y0 = boxes[b].y1 < yd ? yd : boxes[b].y1;
+        int x1 = boxes[b].x2 > xd + w ? xd + w : boxes[b].x2;
+        int y1 = boxes[b].y2 > yd + h ? yd + h : boxes[b].y2;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > dw) x1 = dw;
+        if (y1 > dh) y1 = dh;
+        for (int yy = y0; yy < y1; yy++) {
+            for (int xx = x0; xx < x1; xx++) {
+                int i = xx - xd, j = yy - yd;
+                if (i < 0 || j < 0 || i >= w || j >= h) continue;
+                uint32_t sv = sp[(size_t)j * sstride + i];
+                uint32_t dv = dp[(size_t)yy * dstride + xx];
+                uint32_t dcanon = fmt_dst_rgb(dv, dst->format);
+                double sa = ((sv >> 24) & 0xff) / 255.0;
+                double sr = ((sv >> 16) & 0xff) / 255.0;
+                double sg = ((sv >>  8) & 0xff) / 255.0;
+                double sb = ((sv      ) & 0xff) / 255.0;
+                double da = dsta_opaque ? 1.0 : ((dv >> 24) & 0xff) / 255.0;
+                double dr = ((dcanon >> 16) & 0xff) / 255.0;
+                double dg = ((dcanon >>  8) & 0xff) / 255.0;
+                double db = ((dcanon      ) & 0xff) / 255.0;
+                double Fa = 0, Fb = 0;
+                op_factors(op, sa, da, &Fa, &Fb);
+                double ra = fmin(sa * Fa + da * Fb, 1.0);
+                double rr = fmin(sr * Fa + dr * Fb, 1.0);
+                double rg = fmin(sg * Fa + dg * Fb, 1.0);
+                double rb = fmin(sb * Fa + db * Fb, 1.0);
+                uint32_t ra8 = (uint32_t)lround(ra * 255.0);
+                uint32_t rr8 = (uint32_t)lround(rr * 255.0);
+                uint32_t rg8 = (uint32_t)lround(rg * 255.0);
+                uint32_t rb8 = (uint32_t)lround(rb * 255.0);
+                if (dsta_opaque) ra8 = 255;
+                dp[(size_t)yy * dstride + xx] =
+                    fmt_from_argb((ra8 << 24) | (rr8 << 16) | (rg8 << 8) | rb8,
+                                  dst->format);
+            }
+        }
+    }
+    pixman_region32_fini(&clip);
+    cairo_surface_mark_dirty(dcs);
+    MwWindow *win = pic_window(d, dst);
+    if (win) mw_window_damage(win);
+}
+
+static int is_disjoint_op(int op)
+{
+    return (op >= 0x10 && op <= 0x1b) || (op >= 0x20 && op <= 0x2b);
+}
+
+/* xRGB32/xBGR32 have no alpha channel and xBGR swaps red/blue; convert a
+ * rasterised surface between such a picture's layout and our canonical ARGB32,
+ * and back when storing. */
+static int fmt_legacy(int fmt) { return fmt == FMT_XRGB32 || fmt == FMT_XBGR32; }
+
+static void fmt_to_argb(uint32_t *px, size_t n, int fmt)
+{
+    if (fmt == FMT_XRGB32) {
+        for (size_t i = 0; i < n; i++) px[i] = 0xff000000u | (px[i] & 0x00ffffffu);
+    } else if (fmt == FMT_XBGR32) {
+        for (size_t i = 0; i < n; i++) {
+            uint32_t v = px[i];
+            px[i] = 0xff000000u | ((v & 0xff) << 16) | (v & 0xff00) | ((v >> 16) & 0xff);
+        }
+    }
+}
+
+static uint32_t fmt_from_argb(uint32_t v, int fmt)
+{
+    if (fmt == FMT_XBGR32)
+        return 0xff000000u | ((v & 0xff) << 16) | (v & 0xff00) | ((v >> 16) & 0xff);
+    if (fmt == FMT_XRGB32 || fmt == FMT_RGB24) return v | 0xff000000u;
+    return v;
+}
+
+/* Canonical 0x00RRGGBB from a destination pixel stored in the given format. */
+static uint32_t fmt_dst_rgb(uint32_t v, int fmt)
+{
+    if (fmt == FMT_XBGR32)
+        return ((v & 0xff) << 16) | (v & 0xff00) | ((v >> 16) & 0xff);
+    return v & 0x00ffffffu;
+}
+
+/* A software compositor used where cairo cannot express the Render semantics:
+ * the Disjoint/Conjoint operators, and component-alpha masks (where the mask's
+ * R/G/B/A channels weight the source's R/G/B/A independently).  Mirrors
+ * rendercheck's reference (ops.c do_composite) for every operator. */
+static void composite_manual(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
+                             MwRenderPicture *mask, int op,
+                             int xs, int ys, int xm, int ym,
+                             int xd, int yd, int w, int h)
+{
+    MwSurface *ds = pic_surface(d, dst);
+    cairo_surface_t *dcs = ds ? mw_surface_native(ds) : NULL;
+    if (!dcs || w <= 0 || h <= 0) return;
+    int component = mask && mask->component_alpha;
+
+    cairo_surface_t *stmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    cairo_t *sc = cairo_create(stmp);
+    cairo_set_operator(sc, CAIRO_OPERATOR_SOURCE);
+    set_source(d, sc, src, 0, 0, xs, ys);
+    cairo_paint(sc);
+    cairo_destroy(sc);
+    cairo_surface_flush(stmp);
+
+    cairo_surface_t *mtmp = NULL;
+    if (mask) {
+        MwSurface *ms = pic_surface(d, mask);
+        cairo_surface_t *mcs = ms ? mw_surface_native(ms) : NULL;
+        if (mcs) {
+            mtmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+            cairo_t *mc = cairo_create(mtmp);
+            cairo_set_operator(mc, CAIRO_OPERATOR_SOURCE);
+            cairo_pattern_t *mp = cairo_pattern_create_for_surface(mcs);
+            cairo_matrix_t mm;
+            cairo_matrix_init_translate(&mm, xm, ym);
+            if (mask->have_transform) {
+                cairo_matrix_t t, r;
+                xf_matrix(&t, &mask->xf);
+                cairo_matrix_multiply(&r, &mm, &t);
+                mm = r;
+            }
+            cairo_pattern_set_matrix(mp, &mm);
+            cairo_pattern_set_extend(mp, cairo_extend(mask->repeat));
+            cairo_pattern_set_filter(mp, picture_filter(mask));
+            cairo_set_source(mc, mp);
+            cairo_paint(mc);
+            cairo_pattern_destroy(mp);
+            cairo_destroy(mc);
+            cairo_surface_flush(mtmp);
+        }
+    }
+
+    const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(stmp);
+    int sstride = cairo_image_surface_get_stride(stmp) / 4;
+    if (src && fmt_legacy(src->format))
+        fmt_to_argb((uint32_t *)cairo_image_surface_get_data(stmp), (size_t)w * h, src->format);
+    if (mtmp && mask && fmt_legacy(mask->format))
+        fmt_to_argb((uint32_t *)cairo_image_surface_get_data(mtmp), (size_t)w * h, mask->format);
+    const uint32_t *mp_px = mtmp ? (const uint32_t *)cairo_image_surface_get_data(mtmp) : NULL;
+    int mstride = mtmp ? cairo_image_surface_get_stride(mtmp) / 4 : 0;
+
+    cairo_surface_flush(dcs);
+    uint32_t *dp = mw_surface_data(ds);
+    int dstride = mw_surface_stride(ds) / 4;
+    int dw = mw_surface_width(ds), dh = mw_surface_height(ds);
+    int dsta_opaque = (fmt_is_opaque(dst->format));
+
+    pixman_region32_t clip;
+    pixman_region32_init_rect(&clip, xd, yd, (unsigned)w, (unsigned)h);
+    if (dst->has_clip)
+        pixman_region32_intersect(&clip, &clip, &dst->clip);
+    int nboxes = 0;
+    pixman_box32_t *boxes = pixman_region32_rectangles(&clip, &nboxes);
+    for (int b = 0; b < nboxes; b++) {
+        int x0 = boxes[b].x1 < xd ? xd : boxes[b].x1;
+        int y0 = boxes[b].y1 < yd ? yd : boxes[b].y1;
+        int x1 = boxes[b].x2 > xd + w ? xd + w : boxes[b].x2;
+        int y1 = boxes[b].y2 > yd + h ? yd + h : boxes[b].y2;
+        if (x0 < 0) x0 = 0;
+        if (y0 < 0) y0 = 0;
+        if (x1 > dw) x1 = dw;
+        if (y1 > dh) y1 = dh;
+        for (int yy = y0; yy < y1; yy++) {
+            for (int xx = x0; xx < x1; xx++) {
+                int i = xx - xd, j = yy - yd;
+                if (i < 0 || j < 0 || i >= w || j >= h) continue;
+                uint32_t sv = sp[(size_t)j * sstride + i];
+                uint32_t dv = dp[(size_t)yy * dstride + xx];
+                uint32_t dcanon = fmt_dst_rgb(dv, dst->format);
+                double SR = ((sv >> 16) & 0xff) / 255.0;
+                double SG = ((sv >>  8) & 0xff) / 255.0;
+                double SB = ((sv      ) & 0xff) / 255.0;
+                double SA = ((sv >> 24) & 0xff) / 255.0;
+                double da = dsta_opaque ? 1.0 : ((dv >> 24) & 0xff) / 255.0;
+                double DR = ((dcanon >> 16) & 0xff) / 255.0;
+                double DG = ((dcanon >>  8) & 0xff) / 255.0;
+                double DB = ((dcanon      ) & 0xff) / 255.0;
+                double mr = 1, mg = 1, mb = 1, ma = 1;
+                if (mp_px) {
+                    uint32_t mv = mp_px[(size_t)j * mstride + i];
+                    mr = ((mv >> 16) & 0xff) / 255.0;
+                    mg = ((mv >>  8) & 0xff) / 255.0;
+                    mb = ((mv      ) & 0xff) / 255.0;
+                    ma = ((mv >> 24) & 0xff) / 255.0;
+                }
+                double R, G, B, A, Fa, Fb;
+                if (component) {
+                    op_factors(op, SA * mr, da, &Fa, &Fb);
+                    R = fmin(SR * mr * Fa + DR * Fb, 1.0);
+                    op_factors(op, SA * mg, da, &Fa, &Fb);
+                    G = fmin(SG * mg * Fa + DG * Fb, 1.0);
+                    op_factors(op, SA * mb, da, &Fa, &Fb);
+                    B = fmin(SB * mb * Fa + DB * Fb, 1.0);
+                    op_factors(op, SA * ma, da, &Fa, &Fb);
+                    A = fmin(SA * ma * Fa + da * Fb, 1.0);
+                } else {
+                    double svr = SR * ma, svg = SG * ma, svb = SB * ma, sva = SA * ma;
+                    op_factors(op, sva, da, &Fa, &Fb);
+                    R = fmin(svr * Fa + DR * Fb, 1.0);
+                    G = fmin(svg * Fa + DG * Fb, 1.0);
+                    B = fmin(svb * Fa + DB * Fb, 1.0);
+                    A = fmin(sva * Fa + da * Fb, 1.0);
+                }
+                uint32_t r8 = (uint32_t)lround(R * 255.0);
+                uint32_t g8 = (uint32_t)lround(G * 255.0);
+                uint32_t b8 = (uint32_t)lround(B * 255.0);
+                uint32_t a8 = (uint32_t)lround(A * 255.0);
+                if (dsta_opaque) a8 = 255;
+                dp[(size_t)yy * dstride + xx] =
+                    fmt_from_argb((a8 << 24) | (r8 << 16) | (g8 << 8) | b8,
+                                  dst->format);
+            }
+        }
+    }
+    pixman_region32_fini(&clip);
+    if (mtmp) cairo_surface_destroy(mtmp);
+    cairo_surface_destroy(stmp);
+    cairo_surface_mark_dirty(dcs);
+    MwWindow *win = pic_window(d, dst);
+    if (win) mw_window_damage(win);
+}
+
 /* The core Composite. */
 static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
                          MwRenderPicture *mask, int op,
@@ -313,6 +670,13 @@ static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
                          int xd, int yd, int w, int h)
 {
     if (!dst || w <= 0 || h <= 0) return;
+    /* Rendering *to* a gradient/solid picture is a BadDrawable, as on a real
+     * server; rendercheck checks for the error. */
+    if (dst->kind != PK_DRAWABLE) {
+        mw_deliver_error(d, BadDrawable, MWD(d)->render_req_type,
+                         X_RenderComposite, dst->id, 0);
+        return;
+    }
     if (getenv("MW_TRACE_RENDER"))
         fprintf(stderr, "MW: composite op=%d src=0x%lx(k%d drw=0x%lx fmt=%d) mask=0x%lx k%d op=%d "
                         "src=%d,%d mask=%d,%d dst=%d,%d %dx%d\n",
@@ -320,12 +684,17 @@ static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
                 src ? (unsigned long)src->drawable : 0, src ? src->format : -1,
                 mask ? (unsigned long)mask->id : 0UL, mask ? mask->kind : -1,
                 op, xs, ys, xm, ym, xd, yd, w, h);
+    if (is_disjoint_op(op) || mask ||
+        (src && fmt_legacy(src->format)) || fmt_legacy(dst->format)) {
+        composite_manual(d, dst, src, mask, op, xs, ys, xm, ym, xd, yd, w, h);
+        return;
+    }
     MwSurface *ds = pic_surface(d, dst);
     cairo_surface_t *dcs = ds ? mw_surface_native(ds) : NULL;
     if (!dcs) return;
 
     /* Make an alpha-less destination read as opaque for this composite. */
-    if (dst->format == FMT_RGB24) force_opaque(ds, xd, yd, w, h);
+    if (fmt_is_opaque(dst->format)) force_opaque(ds, xd, yd, w, h);
 
     cairo_t *cr = cairo_create(dcs);
     cairo_save(cr);
@@ -349,7 +718,7 @@ static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
                 cairo_matrix_init_translate(&mm, xm - xd, ym - yd);
                 cairo_pattern_set_matrix(mp, &mm);
                 cairo_pattern_set_extend(mp, cairo_extend(mask->repeat));
-                cairo_pattern_set_filter(mp, cairo_filter(mask->filter));
+                cairo_pattern_set_filter(mp, picture_filter(mask));
                 cairo_mask(cr, mp);
                 cairo_pattern_destroy(mp);
             } else {
@@ -365,7 +734,7 @@ static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_restore(cr);
     cairo_destroy(cr);
 
-    if (dst->format == FMT_RGB24) force_opaque(ds, xd, yd, w, h);
+    if (fmt_is_opaque(dst->format)) force_opaque(ds, xd, yd, w, h);
     mw_surface_mark_dirty(ds);
     MwWindow *win = pic_window(d, dst);
     if (win) mw_window_damage(win);
@@ -807,7 +1176,7 @@ static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     MwSurface *ds = pic_surface(d, dst);
     cairo_surface_t *dcs = ds ? mw_surface_native(ds) : NULL;
     if (!dcs) return;
-    if (dst->format == FMT_RGB24) force_opaque(ds, bx, by, w, h);
+    if (fmt_is_opaque(dst->format)) force_opaque(ds, bx, by, w, h);
     cairo_t *cr = cairo_create(dcs);
     cairo_save(cr);
     cairo_set_operator(cr, cairo_op(op));
@@ -819,7 +1188,7 @@ static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_mask_surface(cr, mw_surface_native(mask), bx, by);
     cairo_restore(cr);
     cairo_destroy(cr);
-    if (dst->format == FMT_RGB24) force_opaque(ds, bx, by, w, h);
+    if (fmt_is_opaque(dst->format)) force_opaque(ds, bx, by, w, h);
     mw_surface_mark_dirty(ds);
     MwWindow *win = pic_window(d, dst);
     if (win) mw_window_damage(win);
@@ -891,69 +1260,41 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
 
 /* --------------------------------------------------- traps / triangles */
 
-static void fill_poly(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
-                      int op, double *pts, int n, int xs, int ys, int use_mask)
+/* Render treats triangle/trapezoid geometry as an implicit mask on the source
+ * and applies the operator across the whole drawable -- outside the geometry
+ * the masked source is transparent, but operators such as Src/Clear still write
+ * there.  cairo_fill() only touches the interior, so build one coverage mask
+ * for the whole request, merge the shapes into it, then rasterise the source
+ * through that mask and composite. */
+static cairo_surface_t *poly_mask_new(MwSurface *ds, cairo_t **out)
 {
-    if (!dst || n < 3) return;
+    int mw = mw_surface_width(ds), mh = mw_surface_height(ds);
+    cairo_surface_t *mask = cairo_image_surface_create(CAIRO_FORMAT_A8, mw, mh);
+    cairo_t *c = cairo_create(mask);
+    cairo_set_source_rgba(c, 1, 1, 1, 1);
+    *out = c;
+    return mask;
+}
+
+static void apply_poly_mask(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
+                            int op, cairo_surface_t *mask, int xs, int ys)
+{
     MwSurface *ds = pic_surface(d, dst);
     cairo_surface_t *dcs = ds ? mw_surface_native(ds) : NULL;
-    if (!dcs) return;
-    if (dst->format == FMT_RGB24) {
-        double minx = pts[0], maxx = pts[0], miny = pts[1], maxy = pts[1];
-        for (int i = 1; i < n; i++) {
-            if (pts[i*2]   < minx) minx = pts[i*2];
-            if (pts[i*2]   > maxx) maxx = pts[i*2];
-            if (pts[i*2+1] < miny) miny = pts[i*2+1];
-            if (pts[i*2+1] > maxy) maxy = pts[i*2+1];
-        }
-        force_opaque(ds, (int)floor(minx), (int)floor(miny),
-                     (int)ceil(maxx - minx) + 1, (int)ceil(maxy - miny) + 1);
-    }
-    cairo_t *cr = cairo_create(dcs);
-    cairo_save(cr);
-    cairo_set_operator(cr, cairo_op(op));
-    apply_dst_transform(cr, dst);
-    apply_dst_clip(cr, dst);
-    /* The trapezoids are in destination coordinates, so source (xSrc,ySrc)
-     * maps to destination (0,0); honouring it keeps pattern sources
-     * (GIMP's canvas guide stipple) at the right phase. */
-    set_source(d, cr, src, 0, 0, xs, ys);
-    if (use_mask && cairo_surface_get_type(dcs) == CAIRO_SURFACE_TYPE_IMAGE) {
-        /* When the request names a mask format, Render builds an antialiased A8
-         * coverage mask from the geometry and composites the source through it,
-         * so boundary pixels are partial.  Filling the polygon directly gives
-         * hard edges; rendercheck's triangles tests compare those pixels. */
-        int mw = cairo_image_surface_get_width(dcs);
-        int mh = cairo_image_surface_get_height(dcs);
-        cairo_surface_t *mask = cairo_image_surface_create(CAIRO_FORMAT_A8, mw, mh);
-        cairo_t *mcr = cairo_create(mask);
-        cairo_set_source_rgba(mcr, 1, 1, 1, 1);
-        cairo_move_to(mcr, pts[0], pts[1]);
-        for (int i = 1; i < n; i++) cairo_line_to(mcr, pts[i*2], pts[i*2+1]);
-        cairo_close_path(mcr);
-        cairo_fill(mcr);
-        cairo_destroy(mcr);
-        cairo_mask_surface(cr, mask, 0, 0);
-        cairo_surface_destroy(mask);
-    } else {
-        cairo_move_to(cr, pts[0], pts[1]);
-        for (int i = 1; i < n; i++) cairo_line_to(cr, pts[i*2], pts[i*2+1]);
-        cairo_close_path(cr);
-        cairo_fill(cr);
-    }
-    cairo_restore(cr);
-    cairo_destroy(cr);
-    if (dst->format == FMT_RGB24) {
-        double minx = pts[0], maxx = pts[0], miny = pts[1], maxy = pts[1];
-        for (int i = 1; i < n; i++) {
-            if (pts[i*2]   < minx) minx = pts[i*2];
-            if (pts[i*2]   > maxx) maxx = pts[i*2];
-            if (pts[i*2+1] < miny) miny = pts[i*2+1];
-            if (pts[i*2+1] > maxy) maxy = pts[i*2+1];
-        }
-        force_opaque(ds, (int)floor(minx), (int)floor(miny),
-                     (int)ceil(maxx - minx) + 1, (int)ceil(maxy - miny) + 1);
-    }
+    if (!dcs || !mask) return;
+    int mw = mw_surface_width(ds), mh = mw_surface_height(ds);
+    cairo_surface_t *tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, mw, mh);
+    cairo_t *tc = cairo_create(tmp);
+    cairo_set_operator(tc, CAIRO_OPERATOR_SOURCE);
+    set_source(d, tc, src, 0, 0, xs, ys);
+    cairo_mask_surface(tc, mask, 0, 0);
+    cairo_destroy(tc);
+    cairo_surface_flush(tmp);
+    const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(tmp);
+    int sstride = cairo_image_surface_get_stride(tmp) / 4;
+
+    apply_disjoint(d, dst, op, sp, sstride, 0, 0, mw, mh);
+    cairo_surface_destroy(tmp);
     mw_surface_mark_dirty(ds);
     MwWindow *win = pic_window(d, dst);
     if (win) mw_window_damage(win);
@@ -975,16 +1316,22 @@ static void req_trapezoids(Display *d, const unsigned char *b, size_t len)
                 frac(t0.left.p1.x), frac(t0.left.p2.x),
                 frac(t0.right.p1.x), frac(t0.right.p2.x));
     }
+    MwSurface *ds = pic_surface(d, dst);
+    if (!ds) return;
+    cairo_t *mc = NULL;
+    cairo_surface_t *mask = poly_mask_new(ds, &mc);
     for (size_t i = 0; i < n; i++) {
         xTrapezoid t; memcpy(&t, p + i*sz_xTrapezoid, sz_xTrapezoid);
-        double pts[8] = {
-            frac(t.left.p1.x),  t.top / 65536.0,
-            frac(t.right.p1.x), t.top / 65536.0,
-            frac(t.right.p2.x), t.bottom / 65536.0,
-            frac(t.left.p2.x),  t.bottom / 65536.0,
-        };
-        fill_poly(d, dst, src, r->op, pts, 4, r->xSrc, r->ySrc, 0);
+        cairo_move_to(mc, frac(t.left.p1.x),  t.top / 65536.0);
+        cairo_line_to(mc, frac(t.right.p1.x), t.top / 65536.0);
+        cairo_line_to(mc, frac(t.right.p2.x), t.bottom / 65536.0);
+        cairo_line_to(mc, frac(t.left.p2.x),  t.bottom / 65536.0);
+        cairo_close_path(mc);
     }
+    cairo_fill(mc);
+    cairo_destroy(mc);
+    apply_poly_mask(d, dst, src, r->op, mask, r->xSrc, r->ySrc);
+    cairo_surface_destroy(mask);
 }
 
 static void req_triangles(Display *d, const unsigned char *b, size_t len)
@@ -1001,13 +1348,21 @@ static void req_triangles(Display *d, const unsigned char *b, size_t len)
                     (unsigned long)r->dst, (void*)dst, (unsigned long)r->src, (void*)src,
                     r->op, n, (unsigned)r->maskFormat);
     }
+    MwSurface *ds = pic_surface(d, dst);
+    if (!ds) return;
+    cairo_t *mc = NULL;
+    cairo_surface_t *mask = poly_mask_new(ds, &mc);
     for (size_t i = 0; i < n; i++) {
         xTriangle t; memcpy(&t, p + i*sz_xTriangle, sz_xTriangle);
-        double pts[6] = { frac(t.p1.x), frac(t.p1.y), frac(t.p2.x), frac(t.p2.y),
-                          frac(t.p3.x), frac(t.p3.y) };
-        fill_poly(d, dst, src, r->op, pts, 3, r->xSrc, r->ySrc,
-                  r->maskFormat != 0);
+        cairo_move_to(mc, frac(t.p1.x), frac(t.p1.y));
+        cairo_line_to(mc, frac(t.p2.x), frac(t.p2.y));
+        cairo_line_to(mc, frac(t.p3.x), frac(t.p3.y));
+        cairo_close_path(mc);
     }
+    cairo_fill(mc);
+    cairo_destroy(mc);
+    apply_poly_mask(d, dst, src, r->op, mask, r->xSrc, r->ySrc);
+    cairo_surface_destroy(mask);
 }
 
 /* TriStrip and TriFan share the Triangles header but take a bare point list and
@@ -1023,15 +1378,23 @@ static void req_tri_fan(Display *d, const unsigned char *b, size_t len)
     const unsigned char *p = b + sz_xRenderTriStripReq;
     if (n < 3) return;
     xPointFixed a; memcpy(&a, p, 8);
+    MwSurface *ds = pic_surface(d, dst);
+    if (!ds) return;
+    cairo_t *mc = NULL;
+    cairo_surface_t *mask = poly_mask_new(ds, &mc);
     for (size_t i = 1; i + 1 < n; i++) {
         xPointFixed q, c;
         memcpy(&q, p + i * 8, 8);
         memcpy(&c, p + (i + 1) * 8, 8);
-        double pts[6] = { frac(a.x), frac(a.y), frac(q.x), frac(q.y),
-                          frac(c.x), frac(c.y) };
-        fill_poly(d, dst, src, r->op, pts, 3, r->xSrc, r->ySrc,
-                  r->maskFormat != 0);
+        cairo_move_to(mc, frac(a.x), frac(a.y));
+        cairo_line_to(mc, frac(q.x), frac(q.y));
+        cairo_line_to(mc, frac(c.x), frac(c.y));
+        cairo_close_path(mc);
     }
+    cairo_fill(mc);
+    cairo_destroy(mc);
+    apply_poly_mask(d, dst, src, r->op, mask, r->xSrc, r->ySrc);
+    cairo_surface_destroy(mask);
 }
 
 static void req_tri_strip(Display *d, const unsigned char *b, size_t len)
@@ -1041,23 +1404,24 @@ static void req_tri_strip(Display *d, const unsigned char *b, size_t len)
     MwRenderPicture *dst = pic(d, r->dst), *src = pic(d, r->src);
     size_t n = (len - sz_xRenderTriStripReq) / 8;
     const unsigned char *p = b + sz_xRenderTriStripReq;
+    MwSurface *ds = pic_surface(d, dst);
+    if (!ds) return;
+    cairo_t *mc = NULL;
+    cairo_surface_t *mask = poly_mask_new(ds, &mc);
     for (size_t i = 0; i + 2 < n; i++) {
         xPointFixed p0, p1, p2;
         memcpy(&p0, p + i * 8, 8);
         memcpy(&p1, p + (i + 1) * 8, 8);
         memcpy(&p2, p + (i + 2) * 8, 8);
-        double pts[6];
-        if (i & 1) {   /* alternate winding */
-            pts[0] = frac(p1.x); pts[1] = frac(p1.y);
-            pts[2] = frac(p0.x); pts[3] = frac(p0.y);
-        } else {
-            pts[0] = frac(p0.x); pts[1] = frac(p0.y);
-            pts[2] = frac(p1.x); pts[3] = frac(p1.y);
-        }
-        pts[4] = frac(p2.x); pts[5] = frac(p2.y);
-        fill_poly(d, dst, src, r->op, pts, 3, r->xSrc, r->ySrc,
-                  r->maskFormat != 0);
+        cairo_move_to(mc, frac(p0.x), frac(p0.y));
+        cairo_line_to(mc, frac(p1.x), frac(p1.y));
+        cairo_line_to(mc, frac(p2.x), frac(p2.y));
+        cairo_close_path(mc);
     }
+    cairo_fill(mc);
+    cairo_destroy(mc);
+    apply_poly_mask(d, dst, src, r->op, mask, r->xSrc, r->ySrc);
+    cairo_surface_destroy(mask);
 }
 
 /* --------------------------------------------------------------- replies */
@@ -1066,7 +1430,7 @@ static void build_pict_formats(Display *d,
                                xRenderQueryPictFormatsReply *rep,
                                unsigned char **data, size_t *len)
 {
-    size_t nformats = 4;
+    size_t nformats = 6;
     size_t payload = nformats * sz_xPictFormInfo
                    + sz_xPictScreen + sz_xPictDepth + sz_xPictVisual
                    + 4 /* subpixel */;
@@ -1092,6 +1456,8 @@ static void build_pict_formats(Display *d,
     PUTFORM(FMT_RGB24,  24, 16, 0xff, 8, 0xff, 0, 0xff,  0, 0);
     PUTFORM(FMT_A8,      8,  0, 0,    0, 0,    0, 0,     0, 0xff);
     PUTFORM(FMT_A1,      1,  0, 0,    0, 0,    0, 0,     0, 0x01);
+    PUTFORM(FMT_XRGB32, 32, 16, 0xff, 8, 0xff, 0, 0xff,  0, 0);
+    PUTFORM(FMT_XBGR32, 32,  0, 0xff, 8, 0xff, 16, 0xff, 0, 0);
 #undef PUTFORM
 
     int vdepth = MWSCR(d)->root_depth ? MWSCR(d)->root_depth : 24;

@@ -254,6 +254,36 @@ void mw_paint(MwCanvas *c)
 
 void mw_fill_path(MwCanvas *c)
 {
+    /* GXinvert is a raw bitwise NOT of the destination; cairo has no operator
+     * for it (we used to approximate it with SOURCE, which painted the
+     * foreground instead -- LibreOffice's xRGB invert test caught that).  Apply
+     * it directly over the path's bounding box intersected with the clip. */
+    if (c->gx == 0xa && c->surface && c->surface->data) {
+        double x1, y1, x2, y2, cx1, cy1, cx2, cy2;
+        cairo_path_extents(c->cr, &x1, &y1, &x2, &y2);
+        cairo_clip_extents(c->cr, &cx1, &cy1, &cx2, &cy2);
+        {
+            MwSurface *s = c->surface;
+            int ix0 = (int)floor(fmax(x1, cx1));
+            int iy0 = (int)floor(fmax(y1, cy1));
+            int ix1 = (int)ceil(fmin(x2, cx2));
+            int iy1 = (int)ceil(fmin(y2, cy2));
+            int stride = s->stride / 4;
+            if (ix0 < 0) ix0 = 0;
+            if (iy0 < 0) iy0 = 0;
+            if (ix1 > s->w) ix1 = s->w;
+            if (iy1 > s->h) iy1 = s->h;
+            if (ix1 > ix0 && iy1 > iy0) {
+                cairo_surface_flush(s->cs);
+                uint32_t *px = s->data;
+                for (int y = iy0; y < iy1; y++)
+                    for (int x = ix0; x < ix1; x++)
+                        px[(size_t)y * stride + x] ^= 0xffffffffu;
+                cairo_surface_mark_dirty(s->cs);
+            }
+        }
+        return;
+    }
     cairo_fill(c->cr);
 }
 

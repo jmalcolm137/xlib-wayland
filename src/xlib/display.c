@@ -412,6 +412,7 @@ int XSync(Display *d, Bool discard)
     XDisplayImpl *dp = MWD(d);
     (void)discard;
     mw_render_drain(d);
+    mw_dispatch_errors(d);
     if (getenv("MW_TRACE")) fprintf(stderr, "MW: XSync\n");
     if (dp->wl_display) {
         wl_display_flush(dp->wl_display);

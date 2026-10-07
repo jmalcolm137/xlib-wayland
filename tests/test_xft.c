@@ -83,7 +83,12 @@ int main(void)
         t.p1.x = 0;        t.p1.y = 100 << 16;
         t.p2.x = 300 << 16; t.p2.y = 100 << 16;
         t.p3.x = 150 << 16; t.p3.y = 170 << 16;
-        XRenderCompositeTriangles(d, PictOpSrc, solid, dst, NULL, 0, 0, &t, 1);
+        /* Over, not Src: Render applies the operator across the whole clipped
+         * drawable with the triangle as a mask, so Src would clear everything
+         * inside the clip (that is what rendercheck's triangle tests require).
+         * Over paints only the triangle and leaves the text and red rectangle
+         * alone. */
+        XRenderCompositeTriangles(d, PictOpOver, solid, dst, NULL, 0, 0, &t, 1);
         XRenderFreePicture(d, solid);
     } else {
         printf("XFT:NOPICTURE\n");

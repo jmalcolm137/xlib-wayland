@@ -1097,5 +1097,6 @@ void          mw_set_io_error_handler(XIOErrorHandler h);
 XIOErrorHandler mw_io_error_handler_get(void);
 void          mw_deliver_error(Display *d, int code, int request, int minor,
                                XID resource, int type);
+void          mw_dispatch_errors(Display *d);
 
 #endif /* MW_XLIB_INTERNAL_H */

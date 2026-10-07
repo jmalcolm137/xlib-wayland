@@ -215,6 +215,16 @@ static XErrorEvent *pop_error(Display *d)
     return e;
 }
 
+/* Deliver any queued X errors to the error handler, as a synchronous Xlib call
+ * (XSync) does. */
+void mw_dispatch_errors(Display *d)
+{
+    if (!g_error_handler) return;
+    XErrorEvent *ee;
+    while ((ee = pop_error(d)))
+        g_error_handler(d, ee);
+}
+
 static bool pop_event(Display *d, XEvent *out)
 {
     XDisplayImpl *dp = MWD(d);
