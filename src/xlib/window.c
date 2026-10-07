@@ -302,7 +302,17 @@ MwWindow *mw_create_window(Display *d, Window parent, int x, int y, int w, int h
     win->x = x; win->y = y;
     win->w = w; win->h = h;
     win->border_width = border_width;
-    win->depth = depth;
+    /* CopyFromParent (0) means "take the parent's depth".  Storing 0 here made
+     * XGetImage build an 8-bit image for every window created with
+     * XCreateSimpleWindow (the common case), so readback kept only the low
+     * byte of each pixel -- rendercheck saw blue but red=green=0 on all its
+     * window destinations. */
+    if (depth == 0) {
+        MwWindow *par = mw_window(d, parent);
+        depth = par ? par->depth
+                    : (MWSCR(d)->root_depth ? MWSCR(d)->root_depth : 24);
+    }
+    win->depth = depth > 0 ? depth : 24;
     win->c_class = (int)c_class;
     win->input_only = (c_class == InputOnly);
     win->created = true;
