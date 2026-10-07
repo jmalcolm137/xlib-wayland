@@ -855,7 +855,7 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
 /* --------------------------------------------------- traps / triangles */
 
 static void fill_poly(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
-                      int op, double *pts, int n, int xs, int ys)
+                      int op, double *pts, int n, int xs, int ys, int use_mask)
 {
     if (!dst || n < 3) return;
     MwSurface *ds = pic_surface(d, dst);
@@ -870,10 +870,29 @@ static void fill_poly(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
      * maps to destination (0,0); honouring it keeps pattern sources
      * (GIMP's canvas guide stipple) at the right phase. */
     set_source(d, cr, src, 0, 0, xs, ys);
-    cairo_move_to(cr, pts[0], pts[1]);
-    for (int i = 1; i < n; i++) cairo_line_to(cr, pts[i*2], pts[i*2+1]);
-    cairo_close_path(cr);
-    cairo_fill(cr);
+    if (use_mask && cairo_surface_get_type(dcs) == CAIRO_SURFACE_TYPE_IMAGE) {
+        /* When the request names a mask format, Render builds an antialiased A8
+         * coverage mask from the geometry and composites the source through it,
+         * so boundary pixels are partial.  Filling the polygon directly gives
+         * hard edges; rendercheck's triangles tests compare those pixels. */
+        int mw = cairo_image_surface_get_width(dcs);
+        int mh = cairo_image_surface_get_height(dcs);
+        cairo_surface_t *mask = cairo_image_surface_create(CAIRO_FORMAT_A8, mw, mh);
+        cairo_t *mcr = cairo_create(mask);
+        cairo_set_source_rgba(mcr, 1, 1, 1, 1);
+        cairo_move_to(mcr, pts[0], pts[1]);
+        for (int i = 1; i < n; i++) cairo_line_to(mcr, pts[i*2], pts[i*2+1]);
+        cairo_close_path(mcr);
+        cairo_fill(mcr);
+        cairo_destroy(mcr);
+        cairo_mask_surface(cr, mask, 0, 0);
+        cairo_surface_destroy(mask);
+    } else {
+        cairo_move_to(cr, pts[0], pts[1]);
+        for (int i = 1; i < n; i++) cairo_line_to(cr, pts[i*2], pts[i*2+1]);
+        cairo_close_path(cr);
+        cairo_fill(cr);
+    }
     cairo_restore(cr);
     cairo_destroy(cr);
     mw_surface_mark_dirty(ds);
@@ -905,7 +924,7 @@ static void req_trapezoids(Display *d, const unsigned char *b, size_t len)
             frac(t.right.p2.x), t.bottom / 65536.0,
             frac(t.left.p2.x),  t.bottom / 65536.0,
         };
-        fill_poly(d, dst, src, r->op, pts, 4, r->xSrc, r->ySrc);
+        fill_poly(d, dst, src, r->op, pts, 4, r->xSrc, r->ySrc, 0);
     }
 }
 
@@ -927,7 +946,58 @@ static void req_triangles(Display *d, const unsigned char *b, size_t len)
         xTriangle t; memcpy(&t, p + i*sz_xTriangle, sz_xTriangle);
         double pts[6] = { frac(t.p1.x), frac(t.p1.y), frac(t.p2.x), frac(t.p2.y),
                           frac(t.p3.x), frac(t.p3.y) };
-        fill_poly(d, dst, src, r->op, pts, 3, r->xSrc, r->ySrc);
+        fill_poly(d, dst, src, r->op, pts, 3, r->xSrc, r->ySrc,
+                  r->maskFormat != 0);
+    }
+}
+
+/* TriStrip and TriFan share the Triangles header but take a bare point list and
+ * join consecutive points into triangles, as the Render extension (and GL)
+ * define them: a fan keeps the first point in every triangle, a strip slides a
+ * window along the list with the winding alternating. */
+static void req_tri_fan(Display *d, const unsigned char *b, size_t len)
+{
+    const xRenderTriStripReq *r = (const void *)b;
+    if (len < sz_xRenderTriStripReq) return;
+    MwRenderPicture *dst = pic(d, r->dst), *src = pic(d, r->src);
+    size_t n = (len - sz_xRenderTriStripReq) / 8;   /* xPointFixed */
+    const unsigned char *p = b + sz_xRenderTriStripReq;
+    if (n < 3) return;
+    xPointFixed a; memcpy(&a, p, 8);
+    for (size_t i = 1; i + 1 < n; i++) {
+        xPointFixed q, c;
+        memcpy(&q, p + i * 8, 8);
+        memcpy(&c, p + (i + 1) * 8, 8);
+        double pts[6] = { frac(a.x), frac(a.y), frac(q.x), frac(q.y),
+                          frac(c.x), frac(c.y) };
+        fill_poly(d, dst, src, r->op, pts, 3, r->xSrc, r->ySrc,
+                  r->maskFormat != 0);
+    }
+}
+
+static void req_tri_strip(Display *d, const unsigned char *b, size_t len)
+{
+    const xRenderTriStripReq *r = (const void *)b;
+    if (len < sz_xRenderTriStripReq) return;
+    MwRenderPicture *dst = pic(d, r->dst), *src = pic(d, r->src);
+    size_t n = (len - sz_xRenderTriStripReq) / 8;
+    const unsigned char *p = b + sz_xRenderTriStripReq;
+    for (size_t i = 0; i + 2 < n; i++) {
+        xPointFixed p0, p1, p2;
+        memcpy(&p0, p + i * 8, 8);
+        memcpy(&p1, p + (i + 1) * 8, 8);
+        memcpy(&p2, p + (i + 2) * 8, 8);
+        double pts[6];
+        if (i & 1) {   /* alternate winding */
+            pts[0] = frac(p1.x); pts[1] = frac(p1.y);
+            pts[2] = frac(p0.x); pts[3] = frac(p0.y);
+        } else {
+            pts[0] = frac(p0.x); pts[1] = frac(p0.y);
+            pts[2] = frac(p1.x); pts[3] = frac(p1.y);
+        }
+        pts[4] = frac(p2.x); pts[5] = frac(p2.y);
+        fill_poly(d, dst, src, r->op, pts, 3, r->xSrc, r->ySrc,
+                  r->maskFormat != 0);
     }
 }
 
@@ -1046,6 +1116,8 @@ static void handle_request(Display *d, const unsigned char *b, size_t len)
     case X_RenderCompositeGlyphs32:   req_composite_glyphs(d, b, len, 4); break;
     case X_RenderTrapezoids:          req_trapezoids(d, b, len); break;
     case X_RenderTriangles:           req_triangles(d, b, len); break;
+    case X_RenderTriStrip:            req_tri_strip(d, b, len); break;
+    case X_RenderTriFan:              req_tri_fan(d, b, len); break;
     default:
         if (getenv("MW_TRACE_RENDER"))
             fprintf(stderr, "MW: Render minor %d ignored (%zu bytes)\n", minor, len);
