@@ -41,6 +41,7 @@ Wayland compositor:
 | XSETTINGS `_XSETTINGS_S*` manager (theme/font/Xft from a config file) | ✅ done ([docs/XSETTINGS-STATUS.md](docs/XSETTINGS-STATUS.md)) |
 | Clipboard carries non-text (image/uri-list) both ways | ✅ done ([docs/CLIPBOARD-STATUS.md](docs/CLIPBOARD-STATUS.md)) |
 | PRIMARY selection (select-to-paste) bridged to Wayland | ✅ done ([docs/CLIPBOARD-STATUS.md](docs/CLIPBOARD-STATUS.md)) |
+| XDND drag-and-drop bridged to Wayland (both directions) | ✅ done ([docs/XDND-STATUS.md](docs/XDND-STATUS.md)); Motif DnD also bridged (`dnd.c`) |
 
 The GTK2 / MATE 1.10 / GIMP 2.10 targets are built and run by the
 [`gtk2-wayland`](https://github.com/jmalcolm137/gtk2-wayland) project; their
