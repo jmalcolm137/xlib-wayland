@@ -80,7 +80,8 @@ try:
     im = Image.open(sys.argv[1]).convert('RGB')
 except Exception:
     print(""); raise SystemExit
-print(len(set(im.getdata())), im.size[0], im.size[1])
+print(len(set(im.get_flattened_data() if hasattr(im, "get_flattened_data") else im.getdata())),
+      im.size[0], im.size[1])
 PY
 }
 

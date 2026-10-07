@@ -70,7 +70,8 @@ try:
     im = Image.open(sys.argv[1]).convert('RGB')
 except Exception:
     print("none"); raise SystemExit
-px = list(im.getdata())
+# Pillow 14 removes getdata(); get_flattened_data is its replacement.
+px = list(im.get_flattened_data() if hasattr(im, "get_flattened_data") else im.getdata())
 print("painted" if len(set(px[:: max(1, len(px)//4000)])) > 1 else "blank")
 PY
 )
