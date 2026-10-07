@@ -792,15 +792,15 @@ PY
         printf 'sleep 3500\nmotion 100 36\nsleep 300\nbutton press left\nbutton release left\nsleep 400\n'
         printf 'key press 29\nkey press 53\nkey release 53\nkey release 29\nsleep 600\n'
         printf 'key press 29\nkey press 46\nkey release 46\nkey release 29\nsleep 600\n'
-        printf 'sleep 4500\n'
+        printf 'sleep 6000\n'
         printf 'motion 250 36\nsleep 400\nbutton press left\nbutton release left\nsleep 500\n'
         printf 'key press 42\nsleep 100\nkey press 110\nkey release 110\nsleep 150\nkey release 42\n'
         printf 'sleep 3000\n'
     } > "$WORK/nepaste.input"
     printf 'hello\nworld\n' > "$WORK/nepaste.txt"
     NPSOCK="mwnepaste$$"
-    XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
-        --socket "$NPSOCK" --size 1400x900 --timeout 16 \
+    HC_TRACE=1 XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+        --socket "$NPSOCK" --size 1400x900 --timeout 20 \
         --output "$WORK/nepaste.png" --input "$WORK/nepaste.input" \
         >"$WORK/nepaste.ready" 2>"$WORK/nepaste.hc" &
     NPHC=$!
@@ -811,6 +811,16 @@ PY
         LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
         "$NEDIT_BIN" "$WORK/nepaste.txt" >"$WORK/nepaste.ne" 2>&1 &
     NPPID=$!
+    # The compositor gates the input script on the first window appearing, so
+    # NEdit's Ctrl+C lands ~4.8s after *that*, not after a fixed wall time.
+    # Offer the Wayland clipboard just after the copy (from the recorded script
+    # start) so the test really exercises "NEdit owned, another client copied";
+    # otherwise NEdit's own copy can win the race and it rightly pastes its own
+    # text.
+    for _ in $(seq 1 400); do
+        grep -q 'HC: script start' "$WORK/nepaste.hc" 2>/dev/null && break
+        sleep 0.05
+    done
     sleep 6.5
     XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$NPSOCK" \
         LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \

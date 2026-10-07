@@ -3056,6 +3056,8 @@ static void start_script(struct mw_compositor *comp)
 	if (comp->script_started || comp->action_count == 0)
 		return;
 	comp->script_started = 1;
+	if (getenv("HC_TRACE"))
+		fprintf(stderr, "HC: script start\n");
 	delay = comp->actions[0].delay_ms;
 	if (delay <= 0)
 		delay = SCRIPT_STEP_MS;
