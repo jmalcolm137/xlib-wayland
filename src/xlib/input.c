@@ -1114,6 +1114,24 @@ int XUngrabPointer(Display *d, Time time)
     return 1;
 }
 
+/* The compositor dismissed a popup (xdg_popup.popup_done): its Wayland grab is
+ * gone, so a modeled XGrabPointer on the dead popup must not keep stranding
+ * input on it.  Unlike XUngrabPointer this emits no crossing events -- the
+ * popup is being unmapped anyway -- it just stops routing presses to it. */
+void mw_pointer_drop_grab(Display *d, MwWindow *win)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (!win) return;
+    if (dp->ptr_grab_window == win) {
+        dp->ptr_grab_active = false;
+        dp->ptr_grab_temporary = false;
+        dp->ptr_grab_window = NULL;
+        dp->ptr_grab_owner = false;
+        dp->ptr_grab_mask = 0;
+    }
+    if (dp->implicit_grab == win) dp->implicit_grab = NULL;
+}
+
 int XGrabButton(Display *d, unsigned int button, unsigned int modifiers,
                 Window grab_window, Bool owner_events, unsigned int event_mask,
                 int pointer_mode, int keyboard_mode, Window confine_to,

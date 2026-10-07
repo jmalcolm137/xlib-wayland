@@ -325,12 +325,17 @@ say "menu interaction test (override-redirect popup + grab)"
         exit 1
     fi
     # Every posting must have been configured and painted.  Counting renders
-    # (rather than just selections) is what catches an invisible re-post.
+    # (rather than just selections) is what catches an invisible re-post.  The
+    # popup window id is read from the client rather than hard-coded: the shim's
+    # init-time allocation shifts it.
     n_cfg=$(grep -c 'popup configure placed' "$WORK/popup-remap.client" || true)
-    n_render=$(grep -c 'render 0x400006' "$WORK/popup-remap.client" || true)
-    if [ "$n_cfg" -lt "$n_post" ] || [ "$n_render" -lt "$n_post" ]; then
+    popup_id=$(sed -n 's/^POPUP:0x\([0-9a-f]*\).*/\1/p' "$WORK/popup-remap.client" | head -1)
+    n_render=0
+    [ -n "$popup_id" ] && \
+        n_render=$(grep -c "render 0x$popup_id" "$WORK/popup-remap.client" || true)
+    if [ -z "$popup_id" ] || [ "$n_cfg" -lt "$n_post" ] || [ "$n_render" -lt "$n_post" ]; then
         echo "  FAIL: re-posted menu was not rendered" \
-             "($n_cfg configures, $n_render renders for $n_post postings)"
+             "($n_cfg configures, $n_render renders of 0x${popup_id:-?} for $n_post postings)"
         exit 1
     fi
     echo "  ok   re-mapped the same popup $n_post times" \

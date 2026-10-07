@@ -125,6 +125,10 @@ static void create_menu(void)
                             POPUP_W, POPUP_H, 0, CopyFromParent,
                             InputOutput, CopyFromParent,
                             CWOverrideRedirect | CWBackPixel, &attr);
+    /* The runner counts renders of the popup by id; print it rather than
+     * hard-coding one, which shifts as the shim's init allocates windows. */
+    printf("POPUP:0x%lx\n", popup_w);
+    fflush(stdout);
     gc = XCreateGC(dpy, popup_w, 0, NULL);
     XSetFont(dpy, gc, XLoadFont(dpy, "fixed"));
 

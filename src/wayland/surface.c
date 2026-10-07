@@ -278,6 +278,9 @@ static void popup_done(void *data, struct xdg_popup *p)
      * well-defined point, just before the re-post. */
     tl->popup_dismissed = true;
     if (d) mw_unmap_window(d, tl->win);   /* dismissed: hidden, like X */
+    /* The compositor's popup grab is gone; a modeled XGrabPointer on this
+     * popup would otherwise strand the next press on the hidden window. */
+    if (d) mw_pointer_drop_grab(d, tl->win);
 }
 
 static void popup_repositioned(void *data, struct xdg_popup *p, uint32_t token)

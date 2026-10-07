@@ -851,6 +851,9 @@ void mw_pointer_update_cursor(Display *d, MwWindow *w);
 void mw_input_settle(Display *d);
 void mw_pointer_enter(Display *d, MwWindow *top, int x, int y);
 void mw_pointer_leave(Display *d, MwWindow *top);
+/* The compositor dismissed a popup (popup_done): stop routing input to a
+ * modeled pointer grab on the now-dead popup (input.c). */
+void mw_pointer_drop_grab(Display *d, MwWindow *win);
 /* Deliver a synthetic ButtonRelease to the current grab window.  A Wayland
  * drag makes the compositor swallow the real release, so Motif's own drag
  * would otherwise never end. */

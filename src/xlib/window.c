@@ -370,6 +370,19 @@ MwWindow *mw_create_window(Display *d, Window parent, int x, int y, int w, int h
     return win;
 }
 
+/* When a menu closes, the open menu becomes the parent menu it nested under --
+ * but a top-level menu's popup_parent is the ordinary toplevel it was anchored
+ * to, which is not a menu.  Only keep a parent that is itself a live menu, or
+ * the focus-deferral for "a menu is open" would outlive the menu. */
+static MwWindow *open_menu_after(MwWindow *win)
+{
+    MwWindow *par = win->popup_parent;
+    if (par && par->override_redirect && par->mapped &&
+        par->tl && par->tl->is_popup)
+        return par;
+    return NULL;
+}
+
 void mw_destroy_window(Display *d, MwWindow *win)
 {
     if (!win) return;
@@ -394,7 +407,7 @@ void mw_destroy_window(Display *d, MwWindow *win)
          * caught up still needs somewhere to anchor. */
         if (dp->active_toplevel == win)
             dp->active_toplevel = mw_any_mapped_toplevel(d, win);
-        if (dp->open_menu      == win) dp->open_menu      = win->popup_parent;
+        if (dp->open_menu      == win) dp->open_menu      = open_menu_after(win);
         if (dp->ptr_window     == win) dp->ptr_window     = NULL;
         if (dp->ptr_toplevel   == win) dp->ptr_toplevel   = NULL;
         if (dp->ptr_focus      == win) dp->ptr_focus      = NULL;
@@ -606,7 +619,7 @@ void mw_unmap_window(Display *d, MwWindow *win)
     if (MWD(d)->active_toplevel == win)
         MWD(d)->active_toplevel = mw_any_mapped_toplevel(d, win);
     if (MWD(d)->open_menu == win)
-        MWD(d)->open_menu = win->popup_parent;
+        MWD(d)->open_menu = open_menu_after(win);
     if (win->tl) mw_toplevel_unmap(win->tl);
     if (win->parent) {
         /* The parent is told about a child being unmapped whatever role the
