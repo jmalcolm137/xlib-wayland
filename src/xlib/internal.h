@@ -522,7 +522,8 @@ typedef struct _XDisplayImpl {
     int                         render_req_type;
     size_t                      render_req_len;
     unsigned char              *render_req;
-    int                         render_reply_pending;
+    int                         render_pending[8];  /* Render query replies, in */
+    int                         render_npending;   /* request order (FIFO)      */
     unsigned char              *render_reply_data;
     size_t                      render_reply_len;
     size_t                      render_reply_off;
@@ -1075,6 +1076,9 @@ void mw_render_finish(Display *d);
 int  mw_render_reply(Display *d, void *rep);
 int  mw_render_read(Display *d, char *data, size_t size);
 void mw_render_drain(Display *d);
+/* Deliver replies for Render queries the caller is not waiting for to the
+ * display's async handlers (see render.c). */
+void mw_render_dispatch_async(Display *d);
 void mw_render_init(Display *d);
 
 /* render marker for a window (surface.c) */

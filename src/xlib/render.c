@@ -1007,7 +1007,6 @@ static void handle_request(Display *d, const unsigned char *b, size_t len)
         fprintf(stderr, "\n");
     }
     XDisplayImpl *dp = MWD(d);
-    dp->render_reply_pending = 0;
     if (dp->render_reply_data) { free(dp->render_reply_data);
         dp->render_reply_data = NULL; dp->render_reply_len = dp->render_reply_off = 0; }
 
@@ -1016,7 +1015,14 @@ static void handle_request(Display *d, const unsigned char *b, size_t len)
     case X_RenderQueryPictFormats:
     case X_RenderQueryFilters:
     case X_RenderQueryPictIndexValues:
-        dp->render_reply_pending = minor;
+        /* Queue, don't overwrite: several queries can be drained before their
+         * replies are read, and _XReply must answer them in request order. */
+        if (dp->render_npending < (int)(sizeof dp->render_pending /
+                                        sizeof dp->render_pending[0]))
+            dp->render_pending[dp->render_npending++] = minor;
+        if (getenv("MW_TRACE_RENDER"))
+            fprintf(stderr, "MW: query queued minor=%d (npending=%d)\n",
+                    minor, dp->render_npending);
         break;
     case X_RenderCreatePicture:       req_create_picture(d, b, len); break;
     case X_RenderChangePicture:       req_change_picture(d, b, len); break;
@@ -1091,11 +1097,11 @@ void mw_render_drain(Display *d)
 
 void mw_render_finish(Display *d) { mw_render_drain(d); }
 
-int mw_render_reply(Display *d, void *rep)
+/* Fill one Render query reply.  Shared by the awaited reply and by the replies
+ * delivered to async handlers. */
+static void mw_render_build(Display *d, int minor, void *rep)
 {
     XDisplayImpl *dp = MWD(d);
-    if (!dp->render_reply_pending) return 0;
-    int minor = dp->render_reply_pending;
     unsigned char *r = rep;
     memset(r, 0, 32);
     r[0] = 1;   /* X_Reply */
@@ -1123,8 +1129,62 @@ int mw_render_reply(Display *d, void *rep)
     default:
         break;
     }
-    dp->render_reply_pending = 0;
+}
+
+/* The reply _XReply is waiting for: the last queued query. */
+int mw_render_reply(Display *d, void *rep)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (dp->render_npending <= 0) return 0;
+    int minor = dp->render_pending[0];
+    dp->render_npending--;
+    if (dp->render_npending > 0)
+        memmove(dp->render_pending, dp->render_pending + 1,
+                (size_t)dp->render_npending * sizeof dp->render_pending[0]);
+    mw_render_build(d, minor, rep);
+    if (getenv("MW_TRACE_RENDER"))
+        fprintf(stderr, "MW: render_reply minor=%d (pending now %d)\n",
+                minor, dp->render_npending);
     return 1;
+}
+
+/* Xlib's async-handler list (struct _XInternalAsync in Xlibint.h).  Replies for
+ * Render queries the caller is not waiting for are delivered here, matched by
+ * request sequence.  libXrender sends QueryVersion and QueryPictFormats back to
+ * back and reads only the latter's reply, so the version reaches Xft only
+ * through this path -- without it XRenderQueryVersion returns stale info and
+ * Xft's feature detection (CreateSolidFill) is wrong, which drops it onto a
+ * fallback source picture that does not draw. */
+typedef struct MwAsyncHandler {
+    struct MwAsyncHandler *next;
+    Bool (*handler)(Display *, void *, char *, int, XPointer);
+    XPointer data;
+} MwAsyncHandler;
+
+void mw_render_dispatch_async(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    while (dp->render_npending > 1) {
+        int minor = dp->render_pending[0];
+        dp->render_npending--;
+        memmove(dp->render_pending, dp->render_pending + 1,
+                (size_t)dp->render_npending * sizeof dp->render_pending[0]);
+        unsigned char rep[32];
+        mw_render_build(d, minor, rep);
+        /* Xlib sets last_request_read to the sequence of the reply it is
+         * handing over; the handler matches on it. */
+        dp->last_request_read = dp->request;
+        if (getenv("MW_TRACE_RENDER"))
+            fprintf(stderr, "MW: dispatch minor=%d (request=%lu last_read=%lu)\n",
+                    minor, dp->request, dp->last_request_read);
+        for (MwAsyncHandler *h = dp->async_handlers; h; h = h->next) {
+            Bool took = h->handler(d, rep, NULL, 0, h->data);
+            if (getenv("MW_TRACE_RENDER"))
+                fprintf(stderr, "MW:   handler=%p took=%d\n", (void *)h->handler,
+                        (int)took);
+            if (took) break;
+        }
+    }
 }
 
 int mw_render_read(Display *d, char *data, size_t size)

@@ -121,6 +121,9 @@ int _XReply(Display *d, void *rep, int extra, Bool discard)
     /* Dispatch the buffered request(s); the last, if it wants a reply, is
      * answered here before falling back to the generic zero reply. */
     mw_render_drain(d);
+    /* Replies for Render queries sent before the one _XReply waits for belong
+     * to async handlers (libXrender reads only the last of a pipelined pair). */
+    mw_render_dispatch_async(d);
     if (rep && mw_render_reply(d, rep)) return 1;
     if (rep && mw_xi2_reply(d, rep)) return 1;
     /* A reply is 32 bytes.  Zeroing sizeof(long)*8 (64) instead overwrote the
@@ -194,8 +197,23 @@ void _XInitImageFuncPtrs(XImage *image) { (void)image; }
 int _XReadEvents(Display *d) { mw_process_events(d, false); return 1; }
 
 int _XDeqAsyncHandler(Display *d, void *handler) { (void)d; (void)handler; return 0; }
-int _XGetAsyncReply(Display *d, void *rep, void *buf, int len, int extra, Bool discard)
-{ (void)d; (void)rep; (void)buf; (void)len; (void)extra; (void)discard; return 1; }
+/* Copy a synthesised reply into the caller's buffer, the way Xlib does when it
+ * reads one off the wire: the fixed 32-byte reply, then any extra words.  The
+ * async handler libXrender registers for QueryVersion calls this and then
+ * reads the version fields, so returning without copying left it with garbage
+ * (varies run to run) and Xft fell back to a source picture that does not
+ * draw. */
+char *_XGetAsyncReply(Display *d, char *replbuf, void *rep, char *buf,
+                      int len, int extra, Bool discard)
+{
+    (void)d; (void)len; (void)discard;
+    if (!replbuf) return NULL;
+    if (rep) memcpy(replbuf, rep, 32);
+    else     memset(replbuf, 0, 32);
+    if (extra > 0 && buf)
+        memcpy(replbuf + 32, buf, (size_t)extra * 4);
+    return replbuf;
+}
 
 /* Xlib's asynchronous-reply machinery, resolved by libXtst and therefore by
  * every program that links it (xdpyinfo among them).  The reference version
