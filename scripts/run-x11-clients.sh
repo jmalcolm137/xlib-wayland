@@ -39,6 +39,10 @@ RUNTIME="${MW_RUNTIME:-${TMPDIR:-/tmp}/xlib-wayland-runtime}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# Transport is Wayland; DISPLAY is only an informational name.  Clear it so a
+# host X server (Xwayland) can never be picked up by mistake.
+unset DISPLAY
+
 # name|expected|arguments.  Keep in rough order of how much API they exercise.
 # xclock/xlogo/xload/xcalc come from the xorg-apps packages; when they are not
 # installed system-wide, unpacking them under $MW_PREFIX/bin is enough (see

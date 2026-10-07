@@ -14,6 +14,11 @@ RUNTIME="${MW_RUNTIME:-${TMPDIR:-/tmp}/mw-runtime}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# The shim talks to the compositor over Wayland; DISPLAY is only an informational
+# display *name*.  Clear it so a host X server (Xwayland, on a desktop session)
+# can never be mistaken for the transport under test.
+unset DISPLAY
+
 say() { printf '\n=== %s ===\n' "$*"; }
 
 say "configure + build"
@@ -1067,6 +1072,40 @@ else
     sed 's/^/  /' "$WORK/repeat.client" | head
     exit 1
 fi
+
+say "Xft text, pictures and Region clipping"
+# The matrix only reaches Xft through xclock's face.  This covers Xft text
+# (glyph sets; upstream libXft picks its source from XRenderQueryVersion, which
+# only arrives through Xlib's async reply handler), XftDrawRect, and
+# XftDrawPicture/XftDrawSrcPicture + XRenderSetPictureClipRegion (libXrender
+# reads the private Region layout as BOX, so a mirror stored as XRectangle gave
+# a degenerate clip and blanked the drawing).
+cc -o "$BUILD/test_xft" "$ROOT/tests/test_xft.c" \
+    -I"$PREFIX/include" $(pkg-config --cflags freetype2 2>/dev/null) \
+    -L"$PREFIX/lib" -lXft -lXrender -lX11 \
+    -Wl,-rpath,"$PREFIX/lib"
+HC_TIMEOUT=4 run_headless xft mwxft 360x260 "$WORK/xft.png" "$BUILD/test_xft"
+python3 - "$WORK/xft.png" <<'PY'
+import sys
+from PIL import Image
+im = Image.open(sys.argv[1]).convert('RGB')
+w, h = im.size
+dark = lambda p: sum(p) < 3 * 128
+red  = lambda p: p[0] > 150 and p[1] < 100 and p[2] < 100
+def ink(x0, x1, y0, y1, pred):
+    return sum(1 for y in range(y0, min(y1, h)) for x in range(x0, min(x1, w))
+               if pred(im.getpixel((x, y))))
+text = ink(0, w, 0, 55, dark)
+redbox = ink(0, w, 55, 85, red)
+inside = ink(0, 150, 100, 175, dark)
+outside = ink(150, w, 100, 175, dark)
+ok = text > 100 and redbox > 200 and inside > 500 and outside == 0
+print(("  ok   " if ok else "  FAIL ") +
+      "Xft text, XftDrawRect and a Region-clipped triangle "
+      "(text=%d red=%d inside=%d outside=%d)" %
+      (text, redbox, inside, outside))
+sys.exit(0 if ok else 1)
+PY
 
 say "xdpyinfo queries the shim"
 # xdpyinfo drives the display/screen/visual and extension queries through
