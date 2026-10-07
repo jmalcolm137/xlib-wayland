@@ -668,17 +668,27 @@ PY
     HC_SMALL=1 HC_TIMEOUT=12 \
         INPUT="$WORK/backspace.input" \
         run_headless backspace mwbs 800x600 "$WORK/backspace.png" "$BUILD/test_xm_kbd"
-    python3 - "$WORK/backspace.png" <<'PY'
+    # The field moves and shrinks with the font, so take its geometry from the
+    # test (GEO:DLGTEXT) and clamp to the captured image.  The old fixed
+    # 16..250 scan indexed off the end of the now-244px-wide dialog.
+    read -r DTX DTY DTW DTH < <(awk -F'[ =,]+' \
+        '/^GEO:DLGTEXT /{printf "%d %d %d %d\n", $7, $8, $3, $5; exit}' \
+        "$WORK/backspace.client")
+    python3 - "$WORK/backspace.png" "${DTX:-11}" "${DTY:-30}" "${DTW:-222}" "${DTH:-33}" <<'PY'
 import sys
 from PIL import Image
 im = Image.open(sys.argv[1]).convert('RGB')
-# Look at the field interior, past the 2px border.  Four characters reach
-# about x=57; with them deleted only the cursor remains, near x=30.  A
-# character left behind by backspace would keep the rightmost ink well out.
-cols = [x for x in range(16, 250)
-        if any(sum(im.getpixel((x, y))) < 3 * 128 for y in range(41, 68))]
+fx, fy, fw, fh = (int(a) for a in sys.argv[2:6])
+# Look at the field interior, past the 2px border.  Four characters reach a
+# little past the text origin; with them deleted only the cursor remains at
+# the origin.  A character left behind by backspace would keep the rightmost
+# ink well out.  fx defaults match the test's fallback if it printed nothing.
+x0, x1 = fx + 5, min(fx + fw - 2, im.size[0])
+y0, y1 = fy + 6, min(fy + fh - 5, im.size[1])
+cols = [x for x in range(x0, x1)
+        if any(sum(im.getpixel((x, y))) < 3 * 128 for y in range(y0, y1))]
 right = max(cols) if cols else 0
-ok = right < 45
+ok = right < fx + 34
 print(("  ok   " if ok else "  FAIL ") +
       "field empty after deleting all typed characters (ink ends at x=%d)" % right)
 sys.exit(0 if ok else 1)
