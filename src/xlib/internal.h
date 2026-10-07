@@ -191,10 +191,14 @@ struct MwSelection {
 /* ------------------------------------------------- Wayland clipboard bridge */
 
 /* A data offer advertised by the compositor (clipboard content owned by a
- * Wayland client).  We keep only the best text MIME type. */
+ * Wayland client).  We keep the best text MIME (for the text paths) and the
+ * full MIME list (so non-text targets -- image/png, text/uri-list, ... -- can
+ * be matched and fetched). */
 typedef struct MwWlOffer {
     struct wl_data_offer *offer;
     char                 *mime;      /* best text MIME, or NULL */
+    char                **mimes;     /* every MIME offered */
+    int                   nmimes, mimecap;
     char                 *motif_drag; /* x-motif drag payload, or NULL */
     Display              *d;         /* owning display */
     struct MwWlOffer     *next;
@@ -214,6 +218,7 @@ typedef struct MwWlSource {
 typedef struct MwClipFetch {
     bool           active;
     bool           is_dnd;       /* a drag drop rather than a clipboard paste */
+    bool           latin1;       /* serve as Latin-1 (X STRING/TEXT), not UTF-8 */
     int            fd;           /* read end of the pipe, -1 when none */
     unsigned char *data;
     size_t         len, cap;
@@ -231,6 +236,7 @@ typedef struct MwClipServe {
     int      fd;                 /* write end of the peer's pipe */
     bool     to_utf8;            /* translate Latin-1 to UTF-8 before sending */
     Atom     selection, property;
+    Atom     target;             /* X target to convert for the peer */
     uint64_t deadline_ms;
 } MwClipServe;
 

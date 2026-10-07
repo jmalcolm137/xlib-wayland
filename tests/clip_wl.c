@@ -19,6 +19,7 @@ static struct wl_data_device_manager *mgr;
 
 static struct wl_data_offer *cur_offer;
 static char *offer_mime;
+static const char *want_mime;   /* receive-mime: which MIME to look for */
 static int selected;
 
 static void reg_global(void *data, struct wl_registry *reg, uint32_t name,
@@ -50,8 +51,12 @@ static int is_text_mime(const char *m)
 static void offer_mime_ev(void *data, struct wl_data_offer *offer, const char *mime)
 {
     (void)data; (void)offer;
-    if (!offer_mime && is_text_mime(mime))
+    if (want_mime) {
+        if (!offer_mime && strcasecmp(mime, want_mime) == 0)
+            offer_mime = strdup(mime);
+    } else if (!offer_mime && is_text_mime(mime)) {
         offer_mime = strdup(mime);
+    }
 }
 
 static const struct wl_data_offer_listener offer_listener = {
@@ -162,7 +167,8 @@ int main(int argc, char **argv)
     wl_data_device_add_listener(dev, &dd_listener, NULL);
     wl_display_roundtrip(disp);
 
-    if (strcmp(argv[1], "receive") == 0) {
+    if (strcmp(argv[1], "receive") == 0 || strcmp(argv[1], "receive-mime") == 0) {
+        if (strcmp(argv[1], "receive-mime") == 0 && argc >= 3) want_mime = argv[2];
         /* Wait for the compositor to hand us the clipboard offer. */
         for (int i = 0; i < 200 && !selected; i++)
             dispatch_timeout(disp, 50);
@@ -206,6 +212,20 @@ int main(int argc, char **argv)
 
         /* Stay alive long enough for the X side to paste (and to answer any
          * repeated requests the toolkit makes). */
+        for (int i = 0; i < 200; i++)
+            dispatch_timeout(disp, 50);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "offer-mime") == 0) {
+        if (argc < 4) return 2;
+        offer_text = argv[3];
+        struct wl_data_source *src = wl_data_device_manager_create_data_source(mgr);
+        wl_data_source_add_listener(src, &src_listener, NULL);
+        wl_data_source_offer(src, argv[2]);
+        wl_data_device_set_selection(dev, src, 0);
+        wl_display_flush(disp);
+        printf("OFFERED\n");
         for (int i = 0; i < 200; i++)
             dispatch_timeout(disp, 50);
         return 0;

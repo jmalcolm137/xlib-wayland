@@ -144,6 +144,28 @@ else
     exit 1
 fi
 
+say "clipboard bridge: non-text (image/png), Wayland -> X"
+# The offer carries more than text: an X client converts the mime atom directly
+# and gets the bytes back unchanged.
+if run_clip_case binwltox 8 "$BUILD/clip_wl offer-mime image/png PNGDATA-wayland-42" \
+        "$BUILD/clip_x convert-target image/png" "GOT:PNGDATA-wayland-42"; then
+    echo "  ok   an X client received the compositor's image/png"
+else
+    echo "  FAIL: X client did not get the non-text clipboard"
+    cat "$WORK/binwltox.client"
+    exit 1
+fi
+
+say "clipboard bridge: non-text (image/png), X -> Wayland"
+if run_clip_case binxtowl 8 "$BUILD/clip_x own-mime image/png PNGDATA-x11-7" \
+        "$BUILD/clip_wl receive-mime image/png" "GOT:PNGDATA-x11-7"; then
+    echo "  ok   a Wayland client received the X owner's image/png"
+else
+    echo "  FAIL: Wayland peer did not get the X non-text selection"
+    cat "$WORK/binxtowl.client"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys

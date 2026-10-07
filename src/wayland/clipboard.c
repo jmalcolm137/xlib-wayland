@@ -150,6 +150,106 @@ char *mw_clipboard_from_utf8(const unsigned char *in, size_t inlen, size_t *outl
 
 static void sync_x_owner(Display *d);
 
+/* Non-text MIME types we advertise on behalf of an X selection owner, so a
+ * Wayland peer can paste an image, a file list or HTML the owner can serve.
+ * source_send() converts the matching X target; if the owner cannot serve it,
+ * the peer simply receives nothing. */
+static const char *extra_mime[] = {
+    "image/png",
+    "image/jpeg",
+    "image/bmp",
+    "image/tiff",
+    "image/x-xpixmap",
+    "text/html",
+    "text/uri-list",
+    "application/x-color",
+    NULL
+};
+
+static Atom a_targets(Display *d) { return mw_intern_atom(d, "TARGETS", False); }
+
+static void post_selection_notify(Display *d, Window requestor, Atom selection,
+                                  Atom target, Atom property, Time time)
+{
+    XSelectionEvent se;
+    memset(&se, 0, sizeof se);
+    se.type = SelectionNotify;
+    se.display = d;
+    se.requestor = requestor;
+    se.selection = selection;
+    se.target = target;
+    se.property = property;
+    se.time = time;
+    mw_put_event(d, (XEvent *)&se);
+}
+
+static void targets_add(Display *d, Atom **list, int *n, int *cap, Atom a)
+{
+    (void)d;
+    for (int i = 0; i < *n; i++) if ((*list)[i] == a) return;
+    if (*n == *cap) {
+        int c = *cap ? *cap * 2 : 8;
+        *list = realloc(*list, (size_t)c * sizeof(Atom));
+        if (!*list) return;
+        *cap = c;
+    }
+    (*list)[(*n)++] = a;
+}
+
+/* The X targets a Wayland offer can serve: every advertised MIME interned by
+ * name, plus the text aliases when a text MIME is present. */
+static Atom *offer_targets(Display *d, MwWlOffer *o, int *out_n)
+{
+    Atom *list = NULL;
+    int n = 0, cap = 0;
+    bool text = o->mime != NULL;
+    for (int i = 0; i < o->nmimes; i++) {
+        targets_add(d, &list, &n, &cap, mw_intern_atom(d, o->mimes[i], False));
+        if (mime_rank(o->mimes[i]) >= 0) text = true;
+    }
+    if (text) {
+        targets_add(d, &list, &n, &cap, mw_intern_atom(d, "UTF8_STRING", False));
+        targets_add(d, &list, &n, &cap, XA_STRING);
+        targets_add(d, &list, &n, &cap, mw_intern_atom(d, "TEXT", False));
+        targets_add(d, &list, &n, &cap, mw_intern_atom(d, "COMPOUND_TEXT", False));
+    }
+    *out_n = n;
+    return list;
+}
+
+/* Map an X target to an offered MIME.  *latin1 is set when the requestor wants
+ * Latin-1 (X STRING/TEXT/COMPOUND_TEXT) rather than the offer's UTF-8. */
+static const char *offer_mime_for_target(Display *d, MwWlOffer *o, Atom target,
+                                         bool *latin1)
+{
+    *latin1 = false;
+    char *name = XGetAtomName(d, target);
+    if (!name) return NULL;
+
+    for (int i = 0; i < o->nmimes; i++)
+        if (strcasecmp(o->mimes[i], name) == 0) {
+            const char *m = o->mimes[i];
+            XFree(name);
+            return m;
+        }
+
+    bool is_utf8 = strcasecmp(name, "UTF8_STRING") == 0;
+    bool is_latin1 = strcasecmp(name, "STRING") == 0 ||
+                     strcasecmp(name, "TEXT") == 0 ||
+                     strcasecmp(name, "COMPOUND_TEXT") == 0;
+    XFree(name);
+    if (!is_utf8 && !is_latin1) return NULL;
+
+    if (is_utf8) {
+        for (int i = 0; i < o->nmimes; i++)
+            if (mime_wants_utf8(o->mimes[i])) return o->mimes[i];
+    }
+    if (o->mime) { *latin1 = is_latin1; return o->mime; }
+    for (int i = 0; i < o->nmimes; i++)
+        if (mime_rank(o->mimes[i]) >= 0) { *latin1 = is_latin1; return o->mimes[i]; }
+    return NULL;
+}
+
 /* ------------------------------------------------------------- wl offers */
 
 static void offer_free(MwWlOffer *o)
@@ -157,8 +257,26 @@ static void offer_free(MwWlOffer *o)
     if (!o) return;
     if (o->offer) wl_data_offer_destroy(o->offer);
     free(o->mime);
+    for (int i = 0; i < o->nmimes; i++) free(o->mimes[i]);
+    free(o->mimes);
     free(o->motif_drag);
     free(o);
+}
+
+/* Remember every MIME an offer advertises, so non-text targets can be matched
+ * later (the `mime` field keeps only the best text type for the text paths). */
+static void offer_add_mime(MwWlOffer *o, const char *mime)
+{
+    for (int i = 0; i < o->nmimes; i++)
+        if (strcasecmp(o->mimes[i], mime) == 0) return;
+    if (o->nmimes == o->mimecap) {
+        int cap = o->mimecap ? o->mimecap * 2 : 8;
+        char **n = realloc(o->mimes, (size_t)cap * sizeof *n);
+        if (!n) return;
+        o->mimes = n;
+        o->mimecap = cap;
+    }
+    o->mimes[o->nmimes++] = strdup(mime);
 }
 
 /* Bridge payload advertised by another shim on a Motif drag: the initiator's
@@ -175,17 +293,17 @@ static void offer_mime(void *data, struct wl_data_offer *offer, const char *mime
         o->motif_drag = strdup(mime + strlen(MOTIF_DRAG_MIME_PREFIX));
         return;
     }
+    offer_add_mime(o, mime);
     int r = mime_rank(mime);
-    if (r < 0) return;
-    int cur = o->mime ? mime_rank(o->mime) : 1000;
-    if (r < cur) {
+    if (r >= 0 && r < (o->mime ? mime_rank(o->mime) : 1000)) {
         free(o->mime);
         o->mime = strdup(mime);
-        /* A compositor is permitted to send the selection before the MIME
-         * list; once we know this offer is text, re-evaluate ownership. */
-        if (o->d && o == MWD(o->d)->wayland_offer)
-            sync_x_owner(o->d);
     }
+    /* A compositor is permitted to send the selection before the MIME list, or
+     * the selection may be non-text; re-evaluate ownership either way so X
+     * clients see an owner they can paste from. */
+    if (o->d && o == MWD(o->d)->wayland_offer)
+        sync_x_owner(o->d);
 }
 
 static void dnd_offer_source_actions(void *data, struct wl_data_offer *offer,
@@ -251,12 +369,21 @@ static void source_send(void *data, struct wl_data_source *src, const char *mime
     if (sv->active) { close(fd); return; }
     sv->active = true;
     sv->fd = fd;
-    sv->to_utf8 = mime_wants_utf8(mime);
     sv->selection = s->selection;
     sv->property = mw_intern_atom(d, "MW_CLIP_DATA", False);
+    if (mime_rank(mime) >= 0 || mime_wants_utf8(mime)) {
+        /* A text request: pull X STRING (Latin-1) and convert to UTF-8 when the
+         * peer asked for UTF-8. */
+        sv->target = XA_STRING;
+        sv->to_utf8 = mime_wants_utf8(mime);
+    } else {
+        /* Non-text: convert the X target atom named by the MIME itself. */
+        sv->target = mw_intern_atom(d, mime, False);
+        sv->to_utf8 = false;
+    }
     sv->deadline_ms = now_ms() + CLIP_SERVE_TIMEOUT_MS;
 
-    XConvertSelection(d, s->selection, XA_STRING, sv->property,
+    XConvertSelection(d, s->selection, sv->target, sv->property,
                       mw_clip_window(d), CurrentTime);
     wl_display_flush(MWD(d)->wl_display);
 }
@@ -302,10 +429,11 @@ static void sync_x_owner(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
     Atom clip = clipboard_atom(d);
-    bool has_text = dp->wayland_offer && dp->wayland_offer->mime;
+    bool has_data = dp->wayland_offer &&
+                    (dp->wayland_offer->mime || dp->wayland_offer->nmimes > 0);
     bool we_published = source_find(d, clip) != NULL;
 
-    if (has_text && !we_published) {
+    if (has_data && !we_published) {
         /* A Wayland client owns the compositor clipboard: X clients must see
          * us as the owner so their paste is routed through the bridge. */
         Window want = mw_clip_window(d);
@@ -472,6 +600,7 @@ static void dd_drop(void *data, struct wl_data_device *dd)
     MwClipFetch *f = &dp->clip_fetch;
     f->active = true;
     f->is_dnd = true;
+    f->latin1 = false;
     f->fd = fds[0];
     f->data = NULL;
     f->len = f->cap = 0;
@@ -569,11 +698,10 @@ static void fetch_finish(Display *d)
         return;
     }
 
-    if (f->target == XA_STRING) {
-        /* The offer's bytes are UTF-8; the requestor asked for STRING. */
+    if (f->latin1) {
+        /* The offer's bytes are UTF-8; the requestor asked for STRING/TEXT. */
         conv = (unsigned char *)mw_clipboard_from_utf8(f->data, f->len, &outlen);
         out = conv;
-        type = XA_STRING;
     }
 
     if (f->fd >= 0) close(f->fd);
@@ -640,10 +768,29 @@ bool mw_clipboard_xconvert(Display *d, Atom selection, Atom target,
                            Atom property, Window requestor, Time time)
 {
     XDisplayImpl *dp = MWD(d);
+    MwWlOffer *o = dp->wayland_offer;
     if (selection != clipboard_atom(d)) return false;
-    if (!dp->wayland_offer || !dp->wayland_offer->mime) return false;
-    if (dp->clip_fetch.active) return false;
+    if (!o || (!o->mime && o->nmimes == 0)) return false;
     if (dp->data_device == NULL) return false;
+
+    Atom prop = property == None ? target : property;
+
+    /* TARGETS: answer from the offer's MIME list; nothing to fetch. */
+    if (target == a_targets(d)) {
+        int n = 0;
+        Atom *list = offer_targets(d, o, &n);
+        XChangeProperty(d, requestor, prop, XA_ATOM, 32, PropModeReplace,
+                        (const unsigned char *)list, n);
+        free(list);
+        post_selection_notify(d, requestor, selection, target, prop, time);
+        return true;
+    }
+
+    if (dp->clip_fetch.active) return false;
+
+    bool latin1 = false;
+    const char *m = offer_mime_for_target(d, o, target, &latin1);
+    if (!m) return false;
 
     int fds[2];
     if (pipe(fds) != 0) return false;
@@ -653,19 +800,20 @@ bool mw_clipboard_xconvert(Display *d, Atom selection, Atom target,
 
     /* The compositor hands the write end to the source and we read the data.
      * receive() takes ownership of the fd, so we must not close it ourselves. */
-    wl_data_offer_receive(dp->wayland_offer->offer, dp->wayland_offer->mime, fds[1]);
+    wl_data_offer_receive(o->offer, m, fds[1]);
     close(fds[1]);
     wl_display_flush(dp->wl_display);
 
     MwClipFetch *f = &dp->clip_fetch;
     f->active = true;
     f->is_dnd = false;
+    f->latin1 = latin1;
     f->fd = fds[0];
     f->data = NULL;
     f->len = f->cap = 0;
     f->selection = selection;
     f->target = target;
-    f->property = property == None ? target : property;
+    f->property = prop;
     f->requestor = requestor;
     f->time = time;
     f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
@@ -738,6 +886,10 @@ void mw_clipboard_owner_changed(Display *d, Atom selection, Window owner)
     wl_data_source_add_listener(s->source, &source_listener, d);
     for (int i = 0; mime_priority[i]; i++)
         wl_data_source_offer(s->source, mime_priority[i]);
+    /* Non-text types too: source_send() converts the matching X target, and an
+     * owner that cannot serve one simply yields nothing. */
+    for (int i = 0; extra_mime[i]; i++)
+        wl_data_source_offer(s->source, extra_mime[i]);
     s->next = dp->wl_sources;
     dp->wl_sources = s;
 
