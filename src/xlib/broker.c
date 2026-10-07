@@ -76,6 +76,7 @@ typedef struct MwBroker {
     int      nsets;
     Atom     proxy_prop;
     unsigned proxy_seq;   /* makes each serve's property name unique */
+    unsigned xfer_id_seq; /* request ids */
 
     /* A connection accepted whose request has not fully arrived yet.  Kept
      * rather than dropped, so the peer's write does not fail. */
@@ -94,6 +95,7 @@ typedef struct MwBroker {
         bool     active;
         int      fd;
         int      retries;
+        unsigned id;         /* request id; replies must echo it */
         Atom     selection, target, property;
         Window   requestor;
         Time     time;
@@ -106,6 +108,7 @@ typedef struct MwBroker {
     struct {
         bool           active;
         int            fd;
+        unsigned       id;   /* echoed back so the peer can match the reply */
         Atom           selection, target, property;
         Window         proxy_win;
         bool           got_prop;
@@ -449,7 +452,8 @@ static bool xfer_start(Display *d, Atom selection, Atom target, Atom property,
     hexenc(tname ? tname : "", ht, sizeof ht);
     hexenc(pname ? pname : "", hp, sizeof hp);
     char msg[1700];
-    int  mlen = snprintf(msg, sizeof msg, "C %s %s %s\n", hs, ht, hp);
+    unsigned id = ++b->xfer_id_seq;
+    int  mlen = snprintf(msg, sizeof msg, "C %u %s %s %s\n", id, hs, ht, hp);
     ssize_t wn = send(fd, msg, (size_t)mlen, MSG_NOSIGNAL);
     TR("convert %s -> pid %d\n", selname, owner_pid);
     XFree((char *)selname);
@@ -461,6 +465,7 @@ static bool xfer_start(Display *d, Atom selection, Atom target, Atom property,
     b->xfer.fd = fd;
     b->xfer_fd = fd;
     b->xfer.retries = 0;
+    b->xfer.id = id;
     b->xfer.selection = selection;
     b->xfer.target = target;
     b->xfer.property = property;
@@ -543,6 +548,15 @@ static void serve_finish(Display *d, bool refuse)
         if (sn && strncmp(sn, "_MOTIF_ATOM_", 12) == 0) motif = true;
         if (sn) XFree((char *)sn);
     }
+    {
+        const char *sn = XGetAtomName(d, b->serve.selection);
+        const char *tn = XGetAtomName(d, b->serve.target);
+        TR("serve finish fd=%d refuse=%d sel=%s tgt=%s bytes=%zu\n",
+           b->serve.fd, refuse, sn ? sn : "?", tn ? tn : "?",
+           b->serve.pnbytes);
+        if (sn) XFree((char *)sn);
+        if (tn) XFree((char *)tn);
+    }
 
     if (b->serve.fd >= 0) {
         if (refuse || !b->serve.got_prop) {
@@ -557,7 +571,8 @@ static void serve_finish(Display *d, bool refuse)
             if (sn) XFree((char *)sn);
             if (tn) XFree((char *)tn);
             if (pn) XFree((char *)pn);
-            int l = snprintf(msg, sizeof msg, "R %s %s %s\n", hs, ht, hp);
+            int l = snprintf(msg, sizeof msg, "R %u %s %s %s\n", b->serve.id,
+                             hs, ht, hp);
             ssize_t n = send(b->serve.fd, msg, (size_t)l, MSG_NOSIGNAL); (void)n;
         } else {
             const char *sn = XGetAtomName(d, b->serve.selection);
@@ -574,8 +589,8 @@ static void serve_finish(Display *d, bool refuse)
             if (pn) XFree((char *)pn);
             if (yn) XFree((char *)yn);
             char head[1700];
-            int hl = snprintf(head, sizeof head, "D %s %s %s %s %d %lu %zu\n",
-                              hs, ht, hp, hy, b->serve.pformat,
+            int hl = snprintf(head, sizeof head, "D %u %s %s %s %s %d %lu %zu\n",
+                              b->serve.id, hs, ht, hp, hy, b->serve.pformat,
                               b->serve.pnitems, b->serve.pnbytes);
             ssize_t n1 = send(b->serve.fd, head, (size_t)hl, MSG_NOSIGNAL);
             char *hex = malloc(b->serve.pnbytes * 2 + 2);
@@ -649,8 +664,9 @@ static void serve_read(Display *d)
     if (!complete) { close(fd); b->accept_fd = -1; b->accept_len = 0; return; }
 
     char hs[512] = "", ht[512] = "", hp[512] = "";
+    unsigned id = 0;
     if (b->accept_buf[0] != 'C' || b->accept_buf[1] != ' ' ||
-        sscanf(b->accept_buf + 2, "%511s %511s %511s", hs, ht, hp) != 3) {
+        sscanf(b->accept_buf + 2, "%u %511s %511s %511s", &id, hs, ht, hp) != 4) {
         close(fd);
         b->accept_fd = -1;
         b->accept_len = 0;
@@ -665,6 +681,7 @@ static void serve_read(Display *d)
     Atom sel = XInternAtom(d, selname, False);
     Atom tgt = XInternAtom(d, tname, False);
     Atom prop = pname[0] ? XInternAtom(d, pname, False) : None;
+    TR("serve request fd=%d sel=%s tgt=%s prop=%s\n", fd, selname, tname, pname);
     Window owner = XGetSelectionOwner(d, sel);
     if (owner == None || (dp->clip_window != None && owner == dp->clip_window)) {
         close(fd);
@@ -690,6 +707,7 @@ static void serve_read(Display *d)
 
     b->serve.active = true;
     b->serve.fd = fd;
+    b->serve.id = id;
     b->accept_fd = -1;          /* ownership moved to serve */
     b->accept_len = 0;
     b->serve.selection = sel;
@@ -698,18 +716,16 @@ static void serve_read(Display *d)
     b->serve.got_prop = false;
     b->serve.deadline_ms = now_ms() + MWB_DEADLINE_MS;
 
-    XSelectionRequestEvent re;
-    memset(&re, 0, sizeof re);
-    re.type = SelectionRequest;
-    re.display = d;
-    re.owner = owner;
-    re.requestor = b->serve.proxy_win;
-    re.selection = sel;
-    re.target = tgt;
-    re.property = b->proxy_prop;
-    re.time = CurrentTime;
-    TR("posting SelectionRequest sel=%lu target=%lu\n", sel, tgt);
-    mw_put_event(d, (XEvent *)&re);
+    /* Ask the local owner for the data through the normal XConvertSelection
+     * path -- the same one the clipboard bridge uses -- rather than
+     * synthesising a raw SelectionRequestEvent.  The owner is a real X client
+     * (Motif's drop converter, the colour server); going through
+     * XConvertSelection posts it a SelectionRequest the toolkit actually
+     * dispatches, and its reply comes back as a SelectionNotify that
+     * mw_broker_serve_notify() completes. */
+    TR("posting XConvertSelection sel=%lu target=%lu\n", sel, tgt);
+    XConvertSelection(d, sel, tgt, b->proxy_prop, b->serve.proxy_win,
+                      CurrentTime);
 }
 
 /* The owner's converter wrote the property: capture it. */
@@ -732,7 +748,9 @@ bool mw_broker_capture_prop(Display *d, Window w, Atom property, Atom type,
     b->serve.pformat = format;
     b->serve.pnitems = nitems;
     b->serve.got_prop = true;
-    TR("captured prop type=%lu fmt=%d n=%lu\n", type, format, nitems);
+    TR("captured prop w=0x%lx prop=%lu type=%lu fmt=%d n=%lu\n",
+       (unsigned long)w, (unsigned long)property, (unsigned long)type, format,
+       nitems);
     return true;
 }
 
@@ -795,6 +813,18 @@ static void xfer_read(Display *d)
     Window req = b->xfer.requestor;
     Time t = b->xfer.time;
 
+    /* Every reply echoes the request id; anything else is a stale reply from a
+     * previous conversion (sockets are reused), so ignore it and keep waiting
+     * for the one that matches. */
+    {
+        unsigned rid = 0;
+        if (sscanf(buf + 2, "%u", &rid) != 1 || rid != b->xfer.id) {
+            TR("xfer ignoring reply id=%u (want %u)\n", rid, b->xfer.id);
+            b->xfer.len = 0;
+            return;
+        }
+    }
+
     if (buf[0] == 'R') {
         /* refused */
     } else if (buf[0] == 'D') {
@@ -802,10 +832,11 @@ static void xfer_read(Display *d)
         int  fmt = 8;
         unsigned long nit = 0;
         size_t nbytes = 0;
+        unsigned rid = 0;
         char *p = buf + 2;
-        /* D <sel> <target> <prop> <type> <format> <nitems> <nbytes> <hex>\n */
-        if (sscanf(p, "%511s %511s %511s %511s %d %lu %zu",
-                   hs, ht, hp, hy, &fmt, &nit, &nbytes) == 7) {
+        /* D <id> <sel> <target> <prop> <type> <format> <nitems> <nbytes> <hex>\n */
+        if (sscanf(p, "%u %511s %511s %511s %511s %d %lu %zu",
+                   &rid, hs, ht, hp, hy, &fmt, &nit, &nbytes) == 8) {
             char *hx = strchr(nl, '\n');
             (void)hx;
             char *hex = nl + 1;
@@ -817,40 +848,6 @@ static void xfer_read(Display *d)
             TR("xfer D target=%s type=%s fmt=%d nitems=%lu nbytes=%zu hexlen=%zu\n",
                tgname, tname, fmt, nit, nbytes, strlen(hex));
 
-            /* Replies echo the request's target in the first field of the
-             * header.  If it does not match what we asked for, this is a stale
-             * reply (an earlier conversion's) that arrived on this socket;
-             * ignore it and ask the owner again rather than handing the wrong
-             * bytes to the application. */
-            const char *rn = XGetAtomName(d, b->xfer.target);
-            char reqname[128] = "";
-            if (rn) { snprintf(reqname, sizeof reqname, "%s", rn); XFree((char *)rn); }
-            if (reqname[0] && strcmp(reqname, tgname) != 0) {
-                TR("xfer stale reply (want %s); retry %d\n", reqname, b->xfer.retries);
-                free(data);
-                Atom s = b->xfer.selection, tg = b->xfer.target;
-                Atom pr = b->xfer.property;
-                Window rq = b->xfer.requestor;
-                Time tm = b->xfer.time;
-                int tries = ++b->xfer.retries;
-                close(b->xfer.fd);
-                b->xfer_fd = -1; b->xfer.fd = -1; b->xfer.active = false;
-                b->xfer.len = 0;
-                if (tries <= 3 &&
-                    (xfer_start(d, s, tg, pr, rq, tm),
-                     b->xfer.active)) {
-                    b->xfer.retries = tries;   /* xfer_start resets it */
-                    return;
-                }
-                XSelectionEvent se;
-                memset(&se, 0, sizeof se);
-                se.type = SelectionNotify; se.display = d;
-                se.requestor = rq; se.selection = s; se.target = tg;
-                se.property = None; se.time = tm;
-                mw_put_event(d, (XEvent *)&se);
-                xfer_next(d);
-                return;
-            }
             if (data) {
                 size_t got = hexdec(hex, data, nbytes);
                 TR("xfer data target=%s type=%s fmt=%d nitems=%lu nbytes=%zu got=%zu\n",
@@ -914,8 +911,6 @@ void mw_broker_handle_ready(Display *d)
     XDisplayImpl *dp = MWD(d);
     MwBroker *b = dp->broker;
     if (!b) return;
-    if (b->xfer.active || b->serve.active || b->accept_fd >= 0)
-        TR("handle_ready xfer=%d serve=%d\n", b->xfer.active, b->serve.active);
     if (b->xfer.active) xfer_read(d);
     if (b->accept_fd >= 0) serve_read(d);
     /* Drop a stalled serve before accepting anything new: otherwise one

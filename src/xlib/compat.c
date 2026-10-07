@@ -60,7 +60,10 @@ Status XmbTextListToTextProperty(Display *d, char **list, int count,
     tp->encoding = XA_STRING;
     tp->format = 8;
     tp->nitems = o;
-    return Success;
+    /* Non-zero on success, like the reference implementation.  CDE's Dt file
+     * drag checks `status == 0` for failure, so returning Success (0) made it
+     * refuse every file drop. */
+    return 1;
 }
 
 Status Xutf8TextListToTextProperty(Display *d, char **list, int count,
@@ -150,7 +153,8 @@ Status XTextPropertyToStringList(XTextProperty *tp, char ***list_rtrn,
     v[n] = NULL;
     *list_rtrn = v;
     *count_rtrn = n;
-    return Success;
+    /* Non-zero on success, as the reference implementation. */
+    return 1;
 }
 
 Status XStringListToTextProperty(char **list, int count, XTextProperty *tp)
@@ -171,7 +175,7 @@ Status XStringListToTextProperty(char **list, int count, XTextProperty *tp)
     tp->encoding = XA_STRING;
     tp->format = 8;
     tp->nitems = o;
-    return Success;
+    return 1;
 }
 
 void XFreeStringList(char **list)

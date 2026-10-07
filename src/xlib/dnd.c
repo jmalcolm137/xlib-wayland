@@ -411,6 +411,14 @@ void mw_dnd_wl_enter(Display *d, struct wl_surface *s, double sx, double sy,
     (void)s; (void)mime;
     MwDnd *x = MWD(d)->dnd;
     if (!x) return;
+    /* Our own drag coming back: the compositor also delivers enter to the
+     * source surface (the pointer starts on it).  Do not stand in as the
+     * initiator here -- our Motif still owns the icc handle and its own drag
+     * handles the transfer; taking the selection over broke it. */
+    if (MWD(d)->dnd_src) {
+        TR("enter: our own drag, ignoring\n");
+        return;
+    }
     Window shell = MWD(d)->drag_window;
     if (shell == None) return;
     MwWindow *w = mw_window(d, shell);
