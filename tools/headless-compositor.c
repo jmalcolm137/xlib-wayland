@@ -290,6 +290,14 @@ struct mw_compositor {
 	struct wl_list primary_devices;   /* hc_data_device (primary) */
 	struct hc_data_source *primary_selection; /* primary selection owner */
 
+	/* Minimal drag-and-drop: the source sets a data source, the pointer
+	 * entering a surface gets a drag offer, and a button release drops. */
+	struct hc_data_source *drag_source;
+	struct mw_surface     *drag_surface;
+	struct wl_resource    *drag_device;
+	struct wl_resource    *drag_offer;
+	int                    drag_active;
+
 	struct mw_surface *last_toplevel; /* last mapped toplevel */
 	struct mw_surface *input_surface; /* input focus target */
 	struct mw_surface *popup_surface; /* currently mapped xdg_popup, if any */
@@ -1927,14 +1935,104 @@ static void broadcast_selection(struct mw_compositor *comp)
 		send_offer_to(dev->resource, 1, comp->primary_selection);
 }
 
+/* --- minimal drag-and-drop --- */
+
+static struct wl_resource *data_device_for_client(struct mw_compositor *comp,
+						  struct wl_client *client)
+{
+	struct hc_data_device *dev;
+	wl_list_for_each(dev, &comp->data_devices, link)
+		if (wl_resource_get_client(dev->resource) == client)
+			return dev->resource;
+	return NULL;
+}
+
+static void drag_leave(struct mw_compositor *comp)
+{
+	if (comp->drag_device)
+		wl_data_device_send_leave(comp->drag_device);
+	if (comp->drag_offer)
+		wl_resource_destroy(comp->drag_offer);
+	comp->drag_device = NULL;
+	comp->drag_offer = NULL;
+	comp->drag_surface = NULL;
+}
+
+static void drag_enter(struct mw_compositor *comp, struct mw_surface *surface,
+		       int x, int y)
+{
+	if (!comp->drag_source || !surface)
+		return;
+	struct wl_resource *dev = data_device_for_client(comp,
+			wl_resource_get_client(surface->resource));
+	if (!dev)
+		return;
+
+	struct hc_data_offer *offer = calloc(1, sizeof *offer);
+	if (!offer)
+		return;
+	offer->source = comp->drag_source;
+	offer->primary = 0;
+	wl_list_insert(&comp->drag_source->offers, &offer->link);
+
+	struct wl_resource *offer_res = wl_resource_create(
+			wl_resource_get_client(surface->resource),
+			&wl_data_offer_interface, wl_resource_get_version(dev), 0);
+	wl_resource_set_implementation(offer_res, &data_offer_implementation,
+				       offer, data_offer_destroyed);
+
+	wl_data_device_send_data_offer(dev, offer_res);
+	char **mime;
+	wl_array_for_each(mime, &comp->drag_source->mimes)
+		wl_data_offer_send_offer(offer_res, *mime);
+	wl_data_device_send_enter(dev, wl_display_next_serial(comp->display),
+				  surface->resource, wl_fixed_from_int(x),
+				  wl_fixed_from_int(y), offer_res);
+
+	comp->drag_device = dev;
+	comp->drag_offer = offer_res;
+	comp->drag_surface = surface;
+}
+
+static void drag_motion(struct mw_compositor *comp, int x, int y)
+{
+	if (!comp->drag_device)
+		return;
+	wl_data_device_send_motion(comp->drag_device, now_ms(),
+				   wl_fixed_from_int(x), wl_fixed_from_int(y));
+}
+
+static void drag_drop(struct mw_compositor *comp)
+{
+	if (comp->drag_device)
+		wl_data_device_send_drop(comp->drag_device);
+	if (comp->drag_source && comp->drag_source->resource)
+		wl_data_source_send_dnd_finished(comp->drag_source->resource);
+	comp->drag_active = 0;
+	comp->drag_source = NULL;
+	comp->drag_device = NULL;
+	comp->drag_surface = NULL;
+	/* Keep comp->drag_offer and its source alive: the target fetches the data
+	 * with wl_data_offer.receive after the drop, so the offer must outlive the
+	 * drop (as it does on a real compositor).  It is freed when the client
+	 * destroys it, or leaks until the next drag replaces it. */
+}
+
 static void data_device_start_drag(struct wl_client *client,
 				   struct wl_resource *resource,
 				   struct wl_resource *source,
 				   struct wl_resource *origin,
 				   struct wl_resource *icon, uint32_t serial)
 {
-	(void)client; (void)resource; (void)source; (void)origin;
-	(void)icon; (void)serial;
+	(void)client; (void)resource; (void)origin; (void)icon; (void)serial;
+	struct hc_data_device *dev = wl_resource_get_user_data(resource);
+	struct mw_compositor *comp = dev ? dev->comp : NULL;
+	if (!comp) return;
+	comp->drag_source = source ? wl_resource_get_user_data(source) : NULL;
+	comp->drag_active = comp->drag_source != NULL;
+	comp->drag_surface = NULL;
+	comp->drag_device = NULL;
+	comp->drag_offer = NULL;
 }
 
 static void data_device_set_selection(struct wl_client *client,
@@ -2914,6 +3012,14 @@ static void execute_action(struct mw_compositor *comp, struct mw_action *a)
 				       wl_fixed_from_int(a->x),
 				       wl_fixed_from_int(a->y));
 		wl_pointer_send_frame(dev->resource);
+		if (comp->drag_active) {
+			if (surface != comp->drag_surface) {
+				drag_leave(comp);
+				drag_enter(comp, surface, a->x, a->y);
+			} else {
+				drag_motion(comp, a->x, a->y);
+			}
+		}
 		break;
 	}
 	case ACT_BUTTON: {
@@ -2922,6 +3028,10 @@ static void execute_action(struct mw_compositor *comp, struct mw_action *a)
 
 		if (!dev || !surface)
 			return;
+		if (comp->drag_active && a->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+			drag_drop(comp);
+			break;
+		}
 		/* Clicking outside an open popup dismisses it: the compositor
 		 * sends xdg_popup.popup_done and the client is expected to take
 		 * the popup down.  Without this the popup would stay up forever

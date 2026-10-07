@@ -102,6 +102,10 @@ int XConvertSelection(Display *d, Atom selection, Atom target, Atom property,
     if (owner != None && mw_dnd_owns_window(d, owner) &&
         mw_dnd_xconvert(d, selection, target, property, requestor, time))
         return 1;
+    /* Our synthetic XDND source window: the drop site converts XdndSelection. */
+    if (owner != None && mw_xdnd_owns_window(d, owner) &&
+        mw_xdnd_xconvert(d, selection, target, property, requestor, time))
+        return 1;
     MwWindow *owner_win = mw_window(d, owner);
     if (!owner_win) return 0;
     XSelectionRequestEvent re;

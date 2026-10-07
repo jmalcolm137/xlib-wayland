@@ -186,6 +186,47 @@ else
     exit 1
 fi
 
+say "XDND: a Wayland drag drops onto an X XDND target"
+# The drag source (clip_wl) starts a Wayland drag; the target is a real X client
+# advertising XdndAware.  The shim presents the drag as XDND (Enter/Position/
+# Drop), serves XdndSelection from the dragged bytes, and the target prints what
+# it received.  The compositor's input script moves over the target and releases
+# to drop; it gates the script on the target's window, so wait for that.
+XDNDSOCK="mwxdnd$$"
+printf 'sleep 1500\nmotion 100 50\nsleep 800\nbutton press left\nbutton release left\nsleep 1500\n' \
+    > "$WORK/xdnd.input"
+HC_TRACE=1 XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+    --socket "$XDNDSOCK" --size 400x300 --timeout 8 \
+    --output "$WORK/xdnd.png" --input "$WORK/xdnd.input" \
+    >"$WORK/xdnd.ready" 2>"$WORK/xdnd.hc" &
+XDNDHC=$!
+for _ in $(seq 1 100); do
+    grep -q READY "$WORK/xdnd.ready" 2>/dev/null && break; sleep 0.05
+done
+XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XDNDSOCK" \
+    LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    "$BUILD/xdnd_x" >"$WORK/xdnd.target" 2>&1 &
+XDNDTX=$!
+for _ in $(seq 1 200); do
+    grep -q 'HC: script start' "$WORK/xdnd.hc" 2>/dev/null && break; sleep 0.05
+done
+XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XDNDSOCK" \
+    LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    "$BUILD/clip_wl" drag text/uri-list "file:///tmp/xdnd-target" >"$WORK/xdnd.wl" 2>&1 &
+XDNDWL=$!
+for _ in $(seq 1 200); do
+    grep -q 'XDND:GOT\|XDND:NONE' "$WORK/xdnd.target" 2>/dev/null && break; sleep 0.05
+done
+kill "$XDNDTX" "$XDNDWL" "$XDNDHC" 2>/dev/null || true
+wait "$XDNDHC" 2>/dev/null || true
+if grep -q 'XDND:GOT file:///tmp/xdnd-target' "$WORK/xdnd.target"; then
+    echo "  ok   the X XDND target received the Wayland drag's data"
+else
+    echo "  FAIL: XDND drop did not deliver"
+    sed 's/^/  /' "$WORK/xdnd.target"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys

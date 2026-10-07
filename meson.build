@@ -78,7 +78,7 @@ xlib_sources = files(
   'src/xlib/xim.c', 'src/xlib/xi2.c', 'src/xlib/xkb.c', 'src/xlib/xmb.c', 'src/xlib/xtcompat.c', 'src/xlib/xlibint.c',
   'src/xlib/xresources.c', 'src/xlib/xftbridge.c', 'src/xlib/render.c',
   'src/xlib/xshape.c', 'src/xlib/broker.c', 'src/xlib/smprops.c', 'src/xlib/dnd.c',
-  'src/xlib/xsettings.c')
+  'src/xlib/xsettings.c', 'src/xlib/xdnd.c')
 
 # Installed as libX11.so.6 so that -lX11, dlopen("libX11.so.6") and the
 # transitive dependency of libXext/libXrender/libcairo all resolve to us.
@@ -199,6 +199,12 @@ if get_option('tests')
   executable('clip_wl', 'tests/clip_wl.c', client_protos,
     include_directories: inc,
     dependencies: [wl_dep],
+    install: false)
+
+  # X XDND drop target for the XDND bridge test.
+  executable('xdnd_x', 'tests/xdnd_x.c',
+    include_directories: inc,
+    link_with: libx11,
     install: false)
 
   # Drag source for the Motif DnD bridge: a Wayland toplevel that starts a

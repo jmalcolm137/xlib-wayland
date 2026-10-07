@@ -673,8 +673,18 @@ static void dd_enter(void *data, struct wl_data_device *dd, uint32_t serial,
             WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
     wl_display_flush(dp->wl_display);
 
-    mw_dnd_wl_enter(d, s, wl_fixed_to_double(x), wl_fixed_to_double(y),
-                    o->mime, o->motif_drag);
+    double fx = wl_fixed_to_double(x), fy = wl_fixed_to_double(y);
+    dp->drag_xdnd = false;
+    if (o->motif_drag) {
+        mw_dnd_wl_enter(d, s, fx, fy, o->mime, o->motif_drag);
+    } else if (mw_xdnd_aware(d, dp->drag_window)) {
+        /* The X window under the drag accepts XDND; present the Wayland offer as
+         * an XDND source to it. */
+        dp->drag_xdnd = true;
+        mw_xdnd_wl_enter(d, s, fx, fy);
+    } else {
+        mw_dnd_wl_enter(d, s, fx, fy, o->mime, o->motif_drag);
+    }
 }
 
 static void dd_leave(void *data, struct wl_data_device *dd)
@@ -688,10 +698,13 @@ static void dd_leave(void *data, struct wl_data_device *dd)
     dp->drag_window = None;
     offer_free(dp->drag_offer);
     dp->drag_offer = NULL;
-    /* The compositor sends leave right after drop, but the dropped bytes are
-     * still arriving on the pipe.  Keep the Motif drop open until they do. */
-    if (!(dp->clip_fetch.active && dp->clip_fetch.is_dnd))
+    if (dp->drag_xdnd) {
+        if (!(dp->clip_fetch.active && dp->clip_fetch.is_dnd))
+            mw_xdnd_wl_leave(d);
+        dp->drag_xdnd = false;
+    } else if (!(dp->clip_fetch.active && dp->clip_fetch.is_dnd)) {
         mw_dnd_wl_leave(d);
+    }
 }
 
 static void dd_motion(void *data, struct wl_data_device *dd, uint32_t time,
@@ -706,7 +719,10 @@ static void dd_motion(void *data, struct wl_data_device *dd, uint32_t time,
     if (dp->drag_offer && dp->drag_offer->mime)
         wl_data_offer_accept(dp->drag_offer->offer, dp->drag_serial,
                              dp->drag_offer->mime);
-    mw_dnd_wl_motion(d, dp->drag_x, dp->drag_y);
+    if (dp->drag_xdnd)
+        mw_xdnd_wl_motion(d, dp->drag_x, dp->drag_y);
+    else
+        mw_dnd_wl_motion(d, dp->drag_x, dp->drag_y);
 }
 
 static void dd_drop(void *data, struct wl_data_device *dd)
@@ -720,6 +736,41 @@ static void dd_drop(void *data, struct wl_data_device *dd)
      * the selection broker.  Just start the drop at the site. */
     if (dp->drag_offer && dp->drag_offer->motif_drag) {
         mw_dnd_wl_drop(d, NULL, 0);
+        return;
+    }
+
+    /* XDND: fetch the dropped bytes now, before the Wayland offer is torn down
+     * with the drag, and tell the target it may drop once they are in hand. */
+    if (dp->drag_xdnd) {
+        MwWlOffer *o = dp->drag_offer;
+        const char *m = o ? (o->mime ? o->mime : (o->nmimes ? o->mimes[0] : NULL)) : NULL;
+        if (!m || dp->clip_fetch.active || !o || !o->offer) {
+            mw_xdnd_wl_drop(d);
+            return;
+        }
+        int fds[2];
+        if (pipe(fds) != 0) { mw_xdnd_wl_drop(d); return; }
+        fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+        fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+        fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+        wl_data_offer_receive(o->offer, m, fds[1]);
+        close(fds[1]);
+        wl_display_flush(dp->wl_display);
+
+        MwClipFetch *f = &dp->clip_fetch;
+        f->active = true;
+        f->is_dnd = true;
+        f->latin1 = false;
+        f->xdnd = true;
+        f->fd = fds[0];
+        f->data = NULL;
+        f->len = f->cap = 0;
+        f->selection = None;
+        f->target = None;
+        f->property = None;
+        f->requestor = None;
+        f->time = CurrentTime;
+        f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
         return;
     }
 
@@ -841,16 +892,18 @@ static void fetch_finish(Display *d)
     Atom type = f->target;
 
     if (f->is_dnd) {
-        /* A dropped drag: hand the bytes to the Motif DnD bridge, which
-         * delivers them to the drop site under the drag. */
+        /* A dropped drag: hand the bytes to the Motif DnD bridge, or stash them
+         * for the XDND target to convert. */
         if (f->fd >= 0) close(f->fd);
         f->fd = -1;
-        mw_dnd_wl_drop(d, out, outlen);
+        if (f->xdnd) mw_xdnd_store_drop(d, out, outlen);
+        else         mw_dnd_wl_drop(d, out, outlen);
         free(f->data);
         f->data = NULL;
         f->len = f->cap = 0;
         f->active = false;
         f->is_dnd = false;
+        f->xdnd = false;
         return;
     }
 
@@ -919,6 +972,42 @@ void mw_clipboard_handle_ready(Display *d)
 }
 
 /* ----------------------------------------------------- Wayland -> X serve */
+
+/* Start fetching `mime` from a Wayland offer and serving it to an X requestor. */
+bool mw_clipboard_fetch_from_offer(Display *d, struct wl_data_offer *offer,
+                                   const char *mime, Atom selection, Atom target,
+                                   Atom property, Window requestor, Time time,
+                                   bool latin1)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (!offer || !mime) return false;
+    if (dp->clip_fetch.active) return false;
+
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+
+    wl_data_offer_receive(offer, mime, fds[1]);
+    close(fds[1]);
+    wl_display_flush(dp->wl_display);
+
+    MwClipFetch *f = &dp->clip_fetch;
+    f->active = true;
+    f->is_dnd = false;
+    f->latin1 = latin1;
+    f->fd = fds[0];
+    f->data = NULL;
+    f->len = f->cap = 0;
+    f->selection = selection;
+    f->target = target;
+    f->property = property;
+    f->requestor = requestor;
+    f->time = time;
+    f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
+    return true;
+}
 
 /* Serve an X PRIMARY convert from the current Wayland primary offer. */
 static bool prim_xconvert(Display *d, Atom target, Atom property,

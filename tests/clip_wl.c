@@ -17,6 +17,7 @@
 
 static struct wl_seat *seat;
 static struct wl_data_device_manager *mgr;
+static struct wl_compositor *compositor;
 static struct zwp_primary_selection_device_manager_v1 *pmgr;
 static struct zwp_primary_selection_device_v1 *pdev;
 
@@ -38,6 +39,9 @@ static void reg_global(void *data, struct wl_registry *reg, uint32_t name,
     else if (strcmp(iface, zwp_primary_selection_device_manager_v1_interface.name) == 0 && !pmgr)
         pmgr = wl_registry_bind(reg, name,
                                 &zwp_primary_selection_device_manager_v1_interface, 1);
+    else if (strcmp(iface, wl_compositor_interface.name) == 0 && !compositor)
+        compositor = wl_registry_bind(reg, name, &wl_compositor_interface,
+                                      version < 4 ? version : 4);
 }
 
 static void reg_global_remove(void *data, struct wl_registry *reg, uint32_t name)
@@ -343,6 +347,23 @@ int main(int argc, char **argv)
         zwp_primary_selection_device_v1_set_selection(pdev, src, 0);
         wl_display_flush(disp);
         printf("OFFERED\n");
+        for (int i = 0; i < 200; i++)
+            dispatch_timeout(disp, 50);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "drag") == 0) {
+        if (argc < 4) return 2;
+        if (!compositor) { fprintf(stderr, "clip_wl: no compositor\n"); return 2; }
+        offer_text = argv[3];
+        struct wl_surface *os = wl_compositor_create_surface(compositor);
+        struct wl_data_source *src = wl_data_device_manager_create_data_source(mgr);
+        wl_data_source_add_listener(src, &src_listener, NULL);
+        wl_data_source_offer(src, argv[2]);
+        wl_data_source_set_actions(src, WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY);
+        wl_data_device_start_drag(dev, src, os, NULL, 0);
+        wl_display_flush(disp);
+        printf("DRAGGING\n");
         for (int i = 0; i < 200; i++)
             dispatch_timeout(disp, 50);
         return 0;

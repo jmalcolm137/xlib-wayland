@@ -249,6 +249,7 @@ Display *XOpenDisplay(_Xconst char *display_name)
     mw_keymap_init(d, NULL);
     mw_init_selection(d);
     mw_clipboard_init(d);
+    mw_xdnd_init(d);
     mw_broker_init(d);
     mw_cursor_init(d);
     mw_xim_init(d);
@@ -342,6 +343,7 @@ int XCloseDisplay(Display *d)
     pthread_mutex_unlock(&display_list_lock);
 
     mw_cursor_fini(d);
+    mw_xdnd_fini(d);
     mw_xsettings_fini(d);
     mw_fini_selection(d);
     mw_keymap_fini(d);

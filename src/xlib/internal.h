@@ -222,6 +222,7 @@ typedef struct MwClipFetch {
     bool           active;
     bool           is_dnd;       /* a drag drop rather than a clipboard paste */
     bool           latin1;       /* serve as Latin-1 (X STRING/TEXT), not UTF-8 */
+    bool           xdnd;         /* an XDND drop: stash the bytes for XdndSelection */
     int            fd;           /* read end of the pipe, -1 when none */
     unsigned char *data;
     size_t         len, cap;
@@ -481,11 +482,15 @@ typedef struct _XDisplayImpl {
     bool                         drag_active;    /* a drag is over one of ours */
     uint32_t                     drag_serial;    /* serial of the enter */
     Window                       drag_window;    /* X toplevel it is over */
+    bool                         drag_xdnd;      /* the current drag is XDND */
     struct wl_data_source       *dnd_src;        /* our active drag source, or NULL */
     Atom                         dnd_src_sel;    /* X selection it is serving */
 
     /* Motif DnD bridge (xlib/dnd.c); opaque here. */
     struct MwDnd                *dnd;
+
+    /* XDND bridge (xlib/xdnd.c); opaque here. */
+    struct MwXdnd               *xdnd;
 
     /* XSETTINGS manager so GDK clients read theme/font/Xft settings even
      * though there is no settings daemon in this process (xlib/xsettings.c). */
@@ -998,6 +1003,39 @@ bool      mw_dnd_source_send(Display *d, const char *mime, int fd);
 /* cursor (cursor.c) */
 void      mw_cursor_init(Display *d);
 void      mw_cursor_fini(Display *d);
+
+/* XDND (xdnd.c): bridge the XDND drag-and-drop protocol to the Wayland data
+ * device, the same way the Motif bridge does for Motif DnD.  As the X side, the
+ * shim is the XDND *source* to its own X clients: it sends Enter/Position/Drop
+ * and serves XdndSelection from the Wayland offer, and the target replies
+ * XdndStatus / XdndFinished. */
+void      mw_xdnd_init(Display *d);
+void      mw_xdnd_fini(Display *d);
+/* A Wayland drag entered / moved over / left one of our surfaces. */
+void      mw_xdnd_wl_enter(Display *d, struct wl_surface *s, double sx, double sy);
+void      mw_xdnd_wl_motion(Display *d, double sx, double sy);
+void      mw_xdnd_wl_leave(Display *d);
+void      mw_xdnd_wl_drop(Display *d);
+/* Whether the X window under a drag advertises XdndAware. */
+bool      mw_xdnd_aware(Display *d, Window win);
+/* Whether `w` is this bridge's synthetic XDND source window. */
+bool      mw_xdnd_owns_window(Display *d, Window w);
+/* Answer a convert on XdndSelection (the shim is the source to its X target). */
+bool      mw_xdnd_xconvert(Display *d, Atom selection, Atom target, Atom property,
+                           Window requestor, Time time);
+/* A ClientMessage from the target (XdndStatus / XdndFinished) to our source
+ * window.  Returns true when it was ours and should not be queued. */
+bool      mw_xdnd_client_message(Display *d, XClientMessageEvent *cm);
+/* The dropped bytes have arrived: stash them and tell the target it may drop. */
+void      mw_xdnd_store_drop(Display *d, const unsigned char *data, size_t len);
+Atom      mw_xdnd_selection(Display *d);
+
+/* Start fetching `mime` from a Wayland offer and serving it to an X requestor
+ * as `selection`/`target` (clipboard.c). */
+bool      mw_clipboard_fetch_from_offer(Display *d, struct wl_data_offer *offer,
+                                         const char *mime, Atom selection, Atom target,
+                                         Atom property, Window requestor, Time time,
+                                         bool latin1);
 
 /* XSETTINGS (xsettings.c): the shim is the _XSETTINGS_S<n> manager, publishing
  * theme/font/Xft settings from a config file so GDK clients see them. */

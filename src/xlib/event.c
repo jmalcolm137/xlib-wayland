@@ -530,6 +530,13 @@ int XSendEvent(Display *d, Window w, Bool propagate, long event_mask, XEvent *ev
      * Motif processed its own messages as an initiator, corrupting the drop
      * transfer (the dropped file list never got requested). */
     if (mw_dnd_owns_window(d, w)) return 1;
+    /* Our synthetic XDND source window: the drop site's XdndStatus/XdndFinished
+     * comes here; consume it rather than looping it back. */
+    if (mw_xdnd_owns_window(d, w)) {
+        if (event->type == ClientMessage)
+            mw_xdnd_client_message(d, &event->xclient);
+        return 1;
+    }
     /* A client asking the window manager to change a window state sends an
      * EWMH _NET_WM_STATE ClientMessage to the root window; we *are* the
      * window manager, so consume it and act on it rather than handing it
