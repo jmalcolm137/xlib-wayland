@@ -58,6 +58,25 @@ static void fsb_ok_or_cancel(Widget w, XtPointer client, XtPointer call)
     st->done = True;
 }
 
+/* Print the dialog's OK button geometry so the input script can aim at it
+ * rather than a hardcoded point that goes stale with the font. */
+static void report_ok_geometry(XtPointer c, XtIntervalId *id)
+{
+    Widget fsb = (Widget)c;
+    Widget ok = XmFileSelectionBoxGetChild(fsb, XmDIALOG_OK_BUTTON);
+    Dimension w = 0, h = 0;
+    Position x = 0, y = 0;
+    (void)id;
+    if (!ok) {
+        printf("GEO:OK missing\n");
+        fflush(stdout);
+        return;
+    }
+    XtVaGetValues(ok, XtNwidth, &w, XtNheight, &h, XtNx, &x, XtNy, &y, NULL);
+    printf("GEO:OK w=%u h=%u rel=%d,%d\n", w, h, x, y);
+    fflush(stdout);
+}
+
 static void on_open(Widget w, XtPointer client, XtPointer call)
 {
     struct fsb_state st;
@@ -85,6 +104,12 @@ static void on_open(Widget w, XtPointer client, XtPointer call)
     XtManageChild(fsb);
     printf("FSB:SHOWN step=%d\n", step);
     fflush(stdout);
+
+    /* Report the OK button once the shell has settled, so the input script can
+     * aim at it: the button's geometry comes from the font, and a hardcoded
+     * click goes stale when fonts change (it did). */
+    XtAppAddTimeOut(XtWidgetToApplicationContext(fsb), 500,
+                    report_ok_geometry, (XtPointer)fsb);
 
     /* NEdit's nested event loop. */
     while (!st.done)

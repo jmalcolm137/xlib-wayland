@@ -545,7 +545,41 @@ PY
     cc -o "$BUILD/test_xm_flow" "$ROOT/tests/test_xm_flow.c" \
         -I"$PREFIX/include" -L"$PREFIX/lib" -lXm -lXt -lX11 \
         -Wl,-rpath,"$PREFIX/lib"
-    INPUT="$ROOT/tests/flow.input" HC_TIMEOUT=12 \
+    # The dialog's OK button moves with the font, so probe the geometry the
+    # test prints once the dialog is up and click the button's centre instead
+    # of a hardcoded point (the old dialog-local 52,435 went stale and OK was
+    # never pressed, wedging the nested loop).  The menu steps around it are
+    # stable.
+    FLOW_OPEN='sleep 1500\nmotion 31 19\nsleep 400\nbutton press left\nsleep 700\nmotion 26 15\nsleep 400\nbutton release left\nsleep 2000\n'
+    printf "$FLOW_OPEN"'sleep 4000\n' > "$WORK/flow-probe.input"
+    FLOW_PROBE=mwflowprobe
+    XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+        --socket "$FLOW_PROBE" --size 500x400 --timeout 6 \
+        --output "$WORK/flow-probe.png" --input "$WORK/flow-probe.input" \
+        >"$WORK/flow-probe.ready" 2>/dev/null &
+    FLOW_HC=$!
+    for _ in $(seq 1 100); do
+        grep -q READY "$WORK/flow-probe.ready" 2>/dev/null && break; sleep 0.05
+    done
+    XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$FLOW_PROBE" \
+        LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+        timeout 8 "$BUILD/test_xm_flow" >"$WORK/flow-probe.client" 2>&1 || true
+    wait "$FLOW_HC" 2>/dev/null || true
+    # GEO:OK w=74 h=43 rel=11,346  ->  centre 48,367
+    read -r OKX OKY < <(awk -F'[ =,]+' '/^GEO:OK /{printf "%d %d\n", $7+$3/2, $8+$5/2}' \
+        "$WORK/flow-probe.client")
+    if [ -z "${OKX:-}" ]; then
+        echo "  FAIL: the dialog never reported OK's geometry"
+        sed 's/^/  /' "$WORK/flow-probe.client" | head
+        exit 1
+    fi
+    {
+        printf "$FLOW_OPEN"
+        printf 'motion %d %d\nsleep 500\nbutton press left\nsleep 300\nbutton release left\nsleep 2000\n' \
+            "$OKX" "$OKY"
+        printf 'motion 31 19\nsleep 500\nbutton press left\nsleep 700\nmotion 26 43\nsleep 400\nbutton release left\nsleep 2000\n'
+    } > "$WORK/flow.input"
+    INPUT="$WORK/flow.input" HC_TIMEOUT=12 \
         run_headless flow mwflow 500x400 "$WORK/flow.png" \
             "$BUILD/test_xm_flow"
     sed 's/^/  /' "$WORK/flow.client" || true
