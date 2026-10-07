@@ -150,7 +150,7 @@ XImage *XGetImage(Display *d, Drawable dr, int x, int y,
     int dw, dh, depth;
     MwSurface *s = mw_drawable_surface(d, dr, &dw, &dh, &depth);
     if (!s) return NULL;
-    XImage *img = XCreateImage(d, &MWD(d)->visual, 24,
+    XImage *img = XCreateImage(d, &MWD(d)->visual, (unsigned int)depth,
                                format == XYPixmap ? ZPixmap : format,
                                0, NULL, width, height, 32, 0);
     uint32_t *tmp = calloc((size_t)width * height, 4);
@@ -158,7 +158,12 @@ XImage *XGetImage(Display *d, Drawable dr, int x, int y,
     for (unsigned int j = 0; j < height; j++)
         for (unsigned int i = 0; i < width; i++) {
             uint32_t px = tmp[(size_t)j * width + i];
-            img_put_pixel(img, (int)i, (int)j, px & 0xffffff);
+            /* A depth-32 drawable carries alpha; masking it off lost the
+             * channel entirely (rendercheck reads ARGB destinations back to
+             * check alpha, and every gradient looked transparent).  Shallower
+             * drawables have no alpha to keep. */
+            img_put_pixel(img, (int)i, (int)j,
+                          depth >= 32 ? px : (px & 0xffffffu));
         }
     free(tmp);
     return img;
