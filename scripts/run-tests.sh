@@ -425,7 +425,36 @@ if [ -f "$PREFIX/lib/libXm.so.4" ] && [ -f "$PREFIX/lib/libXt.so" ]; then
     cc -o "$BUILD/test_xm_filesel" "$ROOT/tests/test_xm_filesel.c" \
         -I"$PREFIX/include" -L"$PREFIX/lib" -lXm -lXt -lX11 \
         -Wl,-rpath,"$PREFIX/lib"
-    INPUT="$ROOT/tests/filesel.input" HC_TIMEOUT=8 \
+    # Aim at the Cancel button from the geometry the test prints rather than a
+    # fixed point.  The dialog is laid out from the font metrics, so Cancel
+    # moves when fonts change, and the old hardcoded click (216,435) had become
+    # stale: it landed below the now-318x400 dialog and the callback never
+    # fired.  The probe run only lets the test report GEO:CANCEL; the real run
+    # then clicks its centre.
+    FSB_PROBE=mwfsbprobe
+    XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+        --socket "$FSB_PROBE" --size 900x700 --timeout 2 \
+        --output "$WORK/filesel-probe.png" \
+        >"$WORK/filesel-probe.ready" 2>/dev/null &
+    FSB_HC=$!
+    for _ in $(seq 1 100); do
+        grep -q READY "$WORK/filesel-probe.ready" 2>/dev/null && break; sleep 0.05
+    done
+    XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$FSB_PROBE" \
+        LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+        timeout 3 "$BUILD/test_xm_filesel" >"$WORK/filesel-probe.client" 2>&1 || true
+    wait "$FSB_HC" 2>/dev/null || true
+    # GEO:CANCEL w=74 h=43 rel=159,346  ->  centre 196,367
+    read -r FSB_X FSB_Y < <(awk -F'[ =,]+' '/^GEO:CANCEL /{printf "%d %d\n", $7+$3/2, $8+$5/2}' \
+        "$WORK/filesel-probe.client")
+    if [ -z "${FSB_X:-}" ]; then
+        echo "  FAIL: the dialog never reported Cancel's geometry"
+        sed 's/^/  /' "$WORK/filesel-probe.client" | head
+        exit 1
+    fi
+    printf 'sleep 900\nmotion %d %d\nsleep 200\nbutton press left\nbutton release left\nsleep 800\nscreenshot\n' \
+        "$FSB_X" "$FSB_Y" > "$WORK/filesel.input"
+    INPUT="$WORK/filesel.input" HC_TIMEOUT=8 \
         run_headless filesel mwfsb 900x700 "$WORK/filesel.png" \
             "$BUILD/test_xm_filesel"
     sed 's/^/  /' "$WORK/filesel.client" || true
@@ -471,8 +500,17 @@ if [ -f "$PREFIX/lib/libXm.so.4" ] && [ -f "$PREFIX/lib/libXt.so" ]; then
     INPUT="$ROOT/tests/resize.input" HC_TIMEOUT=8 MW_TRACE=1 \
         run_headless resize mwrs 700x600 "$WORK/resize.png" \
             "$BUILD/test_xm_menubar"
-    # The menu bar is 38px tall, so the work area below it is 500x362.
-    grep -q 'xwindow=500x362' "$WORK/resize.client" || {
+    # The work area is the 500x400 window less the menu bar, and the bar's
+    # height follows the font, so derive it from what the test reports rather
+    # than hardcoding 362 (the bar was 38px once, now 33px, which makes the
+    # work area 500x367).
+    MENUBAR_H=$(awk -F'[ =]+' '/^SIZE:menubar /{print $3; exit}' "$WORK/resize.client")
+    if [ -z "${MENUBAR_H:-}" ]; then
+        sed 's/^/  /' "$WORK/resize.client"
+        echo "  FAIL: the test never reported the menu bar height"
+        exit 1
+    fi
+    grep -q "xwindow=500x$((400 - MENUBAR_H))" "$WORK/resize.client" || {
         sed 's/^/  /' "$WORK/resize.client"
         echo "  FAIL: the X window did not adopt the compositor's size"
         exit 1

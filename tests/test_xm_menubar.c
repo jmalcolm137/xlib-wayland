@@ -28,6 +28,7 @@ static XtAppContext app;
 static int selected;
 static Widget cascades[NCASCADE];
 static Widget work_widget;
+static Widget menubar;
 static const char *cascade_names[NCASCADE] = { "File", "Edit" };
 static const char *item_names[NCASCADE][2] = {
     { "Alpha", "Beta" },
@@ -60,6 +61,7 @@ static void report_sizes(XtPointer c, XtIntervalId *id)
     Window wwin = 0, troot = 0;
     int wx = 0, wy = 0;
     unsigned int xw = 0, xh = 0, bw = 0, dep = 0;
+    static int menubar_reported;
     (void)id;
     if (work_widget) {
         XtVaGetValues(work_widget, XtNwidth, &ww, XtNheight, &wh, NULL);
@@ -67,6 +69,16 @@ static void report_sizes(XtPointer c, XtIntervalId *id)
         if (wwin)
             XGetGeometry(XtDisplay(work_widget), wwin, &troot, &wx, &wy,
                          &xw, &xh, &bw, &dep);
+    }
+    /* Report the menu bar height too: the work area is the toplevel less the
+     * menu bar, and the bar's height follows the font, so a test cannot assert
+     * an absolute work-area height without going stale when fonts change. */
+    if (!menubar_reported && menubar) {
+        Dimension mh = 0;
+        XtVaGetValues(menubar, XtNheight, &mh, NULL);
+        printf("SIZE:menubar h=%u\n", mh);
+        fflush(stdout);
+        menubar_reported = 1;
     }
     {
         static unsigned int pw, ph, pxw, pxh;
@@ -108,7 +120,7 @@ int main(int argc, char **argv)
     Widget mainw = XmCreateMainWindow(top, "main", a, n);
     XtManageChild(mainw);
 
-    Widget menubar = XmCreateMenuBar(mainw, "menubar", NULL, 0);
+    menubar = XmCreateMenuBar(mainw, "menubar", NULL, 0);
     XtManageChild(menubar);
 
     for (int i = 0; i < NCASCADE; i++) {
