@@ -284,6 +284,7 @@ void mw_block_for_events(Display *d)
     mw_broker_handle_ready(d);
     mw_kbd_repeat_pump(d);
     mw_dnd_pump(d);
+    mw_xsettings_pump(d);
 }
 
 void mw_process_events(Display *d, bool block)
@@ -304,6 +305,7 @@ void mw_process_events(Display *d, bool block)
     mw_flush_damage_deferred(d);
     mw_kbd_repeat_pump(d);
     mw_dnd_pump(d);
+    mw_xsettings_pump(d);
 
     if (block && dp->qcount == 0) {
         mw_block_for_events(d);

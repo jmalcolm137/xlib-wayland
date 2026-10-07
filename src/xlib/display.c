@@ -252,6 +252,7 @@ Display *XOpenDisplay(_Xconst char *display_name)
     mw_broker_init(d);
     mw_cursor_init(d);
     mw_xim_init(d);
+    mw_xsettings_init(d);
     mw_shape_init(d);
 
     /* The keymap comes from the compositor, but keymap-aware clients read the
@@ -341,6 +342,7 @@ int XCloseDisplay(Display *d)
     pthread_mutex_unlock(&display_list_lock);
 
     mw_cursor_fini(d);
+    mw_xsettings_fini(d);
     mw_fini_selection(d);
     mw_keymap_fini(d);
     mw_wl_disconnect(dp);

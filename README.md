@@ -38,6 +38,7 @@ Wayland compositor:
 | MATE 1.10 applications built unmodified (29 components) | ✅ done |
 | GIMP 2.10.24 built unmodified; runs and renders with no XWayland | ✅ done |
 | EWMH window-manager messages (`_NET_WM_STATE` fullscreen/maximize) | ✅ done |
+| XSETTINGS `_XSETTINGS_S*` manager (theme/font/Xft from a config file) | ✅ done ([docs/XSETTINGS-STATUS.md](docs/XSETTINGS-STATUS.md)) |
 
 The GTK2 / MATE 1.10 / GIMP 2.10 targets are built and run by the
 [`gtk2-wayland`](https://github.com/jmalcolm137/gtk2-wayland) project; their

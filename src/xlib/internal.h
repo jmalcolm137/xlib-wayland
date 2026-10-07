@@ -471,6 +471,10 @@ typedef struct _XDisplayImpl {
     /* Motif DnD bridge (xlib/dnd.c); opaque here. */
     struct MwDnd                *dnd;
 
+    /* XSETTINGS manager so GDK clients read theme/font/Xft settings even
+     * though there is no settings daemon in this process (xlib/xsettings.c). */
+    struct MwXSettings         *xsettings;
+
     int                         output_w, output_h;   /* logical size, pixels */
     int                         output_pw, output_ph; /* physical size, mm */
     int                         output_mode_w, output_mode_h; /* mode, physical px */
@@ -975,6 +979,13 @@ bool      mw_dnd_source_send(Display *d, const char *mime, int fd);
 /* cursor (cursor.c) */
 void      mw_cursor_init(Display *d);
 void      mw_cursor_fini(Display *d);
+
+/* XSETTINGS (xsettings.c): the shim is the _XSETTINGS_S<n> manager, publishing
+ * theme/font/Xft settings from a config file so GDK clients see them. */
+void      mw_xsettings_init(Display *d);
+void      mw_xsettings_fini(Display *d);
+/* Re-read the config when it changes (called from the event pump). */
+void      mw_xsettings_pump(Display *d);
 
 /* XIM (xim.c) */
 void      mw_xim_init(Display *d);
