@@ -142,6 +142,11 @@ XImage *XGetImage(Display *d, Drawable dr, int x, int y,
                   unsigned long plane_mask, int format)
 {
     (void)plane_mask;
+    /* Render requests are buffered until something reads the drawable: apply
+     * them before reading it back, or the image misses everything the client
+     * has just drawn through Render (rendercheck draws with Render and reads
+     * back with XGetImage). */
+    mw_render_drain(d);
     int dw, dh, depth;
     MwSurface *s = mw_drawable_surface(d, dr, &dw, &dh, &depth);
     if (!s) return NULL;
