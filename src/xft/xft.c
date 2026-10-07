@@ -600,30 +600,55 @@ FcBool XftInitFtLibrary(void) { return 1; }
 
 /* ------------------------------------------------ Render-level entry points
  *
- * These composite through Render Pictures.  XftDrawPicture() now hands out a
- * real picture, but these upload glyphs through Render glyph sets, which the
- * shim does not implement, so they remain stubs; pangoxft only reaches them when
- * a caller has explicitly installed a source Picture with
+ * These composite through Render Pictures.  XftDrawPicture() hands out a real
+ * picture, but these upload glyphs through Render glyph sets, which the shim
+ * does not implement, so they remain stubs; pangoxft only reaches them when a
+ * caller has explicitly installed a source Picture with
  * pango_xft_renderer_set_source(); its normal path draws through the draw-level
  * API above, which is implemented.  They exist so pangoxft (marco and
- * mate-panel) links, and draw nothing if actually called.
+ * mate-panel) links.  Each says so once on stderr: a toolkit that needs one
+ * should show up as "missing text" in triage, not as a silent blank.
  */
 void XftGlyphSpecRender(Display *dpy, int op, Picture src, XftFont *pub,
                         Picture dst, int srcx, int srcy,
                         _Xconst XftGlyphSpec *glyphs, int nglyphs)
-{ (void)dpy; (void)op; (void)src; (void)pub; (void)dst; (void)srcx; (void)srcy; (void)glyphs; (void)nglyphs; }
+{
+    static int warned;
+    if (!warned++)
+        fprintf(stderr, "MW: XftGlyphSpecRender is a stub: Render glyph-set "
+                        "upload is not implemented, so its text is missing\n");
+    (void)dpy; (void)op; (void)src; (void)pub; (void)dst; (void)srcx; (void)srcy; (void)glyphs; (void)nglyphs;
+}
 
 void XftCharSpecRender(Display *dpy, int op, Picture src, XftFont *pub,
                        Picture dst, int srcx, int srcy,
                        _Xconst XftCharSpec *chars, int len)
-{ (void)dpy; (void)op; (void)src; (void)pub; (void)dst; (void)srcx; (void)srcy; (void)chars; (void)len; }
+{
+    static int warned;
+    if (!warned++)
+        fprintf(stderr, "MW: XftCharSpecRender is a stub: Render glyph-set "
+                        "upload is not implemented, so its text is missing\n");
+    (void)dpy; (void)op; (void)src; (void)pub; (void)dst; (void)srcx; (void)srcy; (void)chars; (void)len;
+}
 
 void XftGlyphFontSpecRender(Display *dpy, int op, Picture src, Picture dst,
                             int srcx, int srcy,
                             _Xconst XftGlyphFontSpec *glyphs, int nglyphs)
-{ (void)dpy; (void)op; (void)src; (void)dst; (void)srcx; (void)srcy; (void)glyphs; (void)nglyphs; }
+{
+    static int warned;
+    if (!warned++)
+        fprintf(stderr, "MW: XftGlyphFontSpecRender is a stub: Render glyph-set "
+                        "upload is not implemented, so its text is missing\n");
+    (void)dpy; (void)op; (void)src; (void)dst; (void)srcx; (void)srcy; (void)glyphs; (void)nglyphs;
+}
 
 void XftCharFontSpecRender(Display *dpy, int op, Picture src, Picture dst,
                            int srcx, int srcy,
                            _Xconst XftCharFontSpec *chars, int len)
-{ (void)dpy; (void)op; (void)src; (void)dst; (void)srcx; (void)srcy; (void)chars; (void)len; }
+{
+    static int warned;
+    if (!warned++)
+        fprintf(stderr, "MW: XftCharFontSpecRender is a stub: Render glyph-set "
+                        "upload is not implemented, so its text is missing\n");
+    (void)dpy; (void)op; (void)src; (void)dst; (void)srcx; (void)srcy; (void)chars; (void)len;
+}
