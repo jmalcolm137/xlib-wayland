@@ -50,6 +50,12 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name,
          * receive preedit/commit from a compositor-run IME (xim.c). */
         dp->text_input_mgr = wl_registry_bind(reg, name,
                           &zwp_text_input_manager_v3_interface, 1);
+    } else if (strcmp(interface, zwp_primary_selection_device_manager_v1_interface.name) == 0 &&
+               dp->primary_mgr == NULL) {
+        /* PRIMARY selection (select-to-paste); bridged to the X PRIMARY
+         * selection in clipboard.c. */
+        dp->primary_mgr = wl_registry_bind(reg, name,
+                          &zwp_primary_selection_device_manager_v1_interface, 1);
     }
 }
 
@@ -198,6 +204,8 @@ void mw_wl_disconnect(XDisplayImpl *dp)
     if (dp->wl_seat) mw_input_fini((Display *)dp);
     if (dp->text_input) zwp_text_input_v3_destroy(dp->text_input);
     if (dp->text_input_mgr) zwp_text_input_manager_v3_destroy(dp->text_input_mgr);
+    if (dp->primary_device) zwp_primary_selection_device_v1_destroy(dp->primary_device);
+    if (dp->primary_mgr) zwp_primary_selection_device_manager_v1_destroy(dp->primary_mgr);
     if (dp->data_device) wl_data_device_destroy(dp->data_device);
     if (dp->dnd_mgr) wl_data_device_manager_destroy(dp->dnd_mgr);
     if (dp->viewporter) wp_viewporter_destroy(dp->viewporter);

@@ -23,6 +23,7 @@ xdg_xml  = proto_dir / 'stable/xdg-shell/xdg-shell.xml'
 deco_xml = proto_dir / 'unstable/xdg-decoration/xdg-decoration-unstable-v1.xml'
 viewp_xml = proto_dir / 'stable/viewporter/viewporter.xml'
 textinput_xml = proto_dir / 'unstable/text-input/text-input-unstable-v3.xml'
+primary_xml = proto_dir / 'unstable/primary-selection/primary-selection-unstable-v1.xml'
 
 client_protos = [
   custom_target('xdg-shell-client-header',
@@ -52,6 +53,14 @@ client_protos = [
     command: [wl_scan, 'client-header', '@INPUT@', '@OUTPUT@']),
   custom_target('text-input-client-code',
     input: textinput_xml, output: 'text-input-protocol.c',
+    command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
+  # PRIMARY selection (select-to-paste) on top of the primary-selection
+  # protocol; the X PRIMARY selection is bridged in clipboard.c.
+  custom_target('primary-selection-client-header',
+    input: primary_xml, output: 'primary-selection-unstable-v1-client-protocol.h',
+    command: [wl_scan, 'client-header', '@INPUT@', '@OUTPUT@']),
+  custom_target('primary-selection-client-code',
+    input: primary_xml, output: 'primary-selection-protocol.c',
     command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
 ]
 
@@ -187,7 +196,7 @@ if get_option('tests')
     link_with: libx11,
     install: false)
 
-  executable('clip_wl', 'tests/clip_wl.c',
+  executable('clip_wl', 'tests/clip_wl.c', client_protos,
     include_directories: inc,
     dependencies: [wl_dep],
     install: false)
@@ -226,6 +235,12 @@ if get_option('tools')
       command: [wl_scan, 'server-header', '@INPUT@', '@OUTPUT@']),
     custom_target('text-input-server-code',
       input: textinput_xml, output: 'text-input-protocol-server.c',
+      command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
+    custom_target('primary-selection-server-header',
+      input: primary_xml, output: 'primary-selection-unstable-v1-server-protocol.h',
+      command: [wl_scan, 'server-header', '@INPUT@', '@OUTPUT@']),
+    custom_target('primary-selection-server-code',
+      input: primary_xml, output: 'primary-selection-protocol-server.c',
       command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
   ]
   wl_server_dep = dependency('wayland-server')

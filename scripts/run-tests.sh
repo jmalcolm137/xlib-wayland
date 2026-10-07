@@ -166,6 +166,26 @@ else
     exit 1
 fi
 
+say "primary selection: non-text (image/png), Wayland -> X"
+if run_clip_case primwltox 8 "$BUILD/clip_wl primary-offer-mime image/png PRIMDATA-wl-9" \
+        "$BUILD/clip_x primary-convert image/png" "GOT:PRIMDATA-wl-9"; then
+    echo "  ok   an X client received the compositor's PRIMARY image/png"
+else
+    echo "  FAIL: X client did not get the Wayland PRIMARY"
+    cat "$WORK/primwltox.client"
+    exit 1
+fi
+
+say "primary selection: text, X -> Wayland"
+if run_clip_case primtxt 8 "$BUILD/clip_x primary-own-mime STRING x-primary-text" \
+        "$BUILD/clip_wl primary-receive" "GOT:x-primary-text"; then
+    echo "  ok   a Wayland client received the X PRIMARY text"
+else
+    echo "  FAIL: Wayland peer did not get the X PRIMARY text"
+    cat "$WORK/primtxt.client"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys

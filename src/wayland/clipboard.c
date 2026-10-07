@@ -149,6 +149,7 @@ char *mw_clipboard_from_utf8(const unsigned char *in, size_t inlen, size_t *outl
 }
 
 static void sync_x_owner(Display *d);
+static void sync_x_owner_primary(Display *d);
 
 /* Non-text MIME types we advertise on behalf of an X selection owner, so a
  * Wayland peer can paste an image, a file list or HTML the owner can serve.
@@ -189,8 +190,9 @@ static void targets_add(Display *d, Atom **list, int *n, int *cap, Atom a)
     for (int i = 0; i < *n; i++) if ((*list)[i] == a) return;
     if (*n == *cap) {
         int c = *cap ? *cap * 2 : 8;
-        *list = realloc(*list, (size_t)c * sizeof(Atom));
-        if (!*list) return;
+        Atom *nl = realloc(*list, (size_t)c * sizeof(Atom));
+        if (!nl) return;
+        *list = nl;
         *cap = c;
     }
     (*list)[(*n)++] = a;
@@ -198,14 +200,15 @@ static void targets_add(Display *d, Atom **list, int *n, int *cap, Atom a)
 
 /* The X targets a Wayland offer can serve: every advertised MIME interned by
  * name, plus the text aliases when a text MIME is present. */
-static Atom *offer_targets(Display *d, MwWlOffer *o, int *out_n)
+static Atom *targets_from_mimes(Display *d, char **mimes, int nmimes,
+                                const char *best, int *out_n)
 {
     Atom *list = NULL;
     int n = 0, cap = 0;
-    bool text = o->mime != NULL;
-    for (int i = 0; i < o->nmimes; i++) {
-        targets_add(d, &list, &n, &cap, mw_intern_atom(d, o->mimes[i], False));
-        if (mime_rank(o->mimes[i]) >= 0) text = true;
+    bool text = best != NULL;
+    for (int i = 0; i < nmimes; i++) {
+        targets_add(d, &list, &n, &cap, mw_intern_atom(d, mimes[i], False));
+        if (mime_rank(mimes[i]) >= 0) text = true;
     }
     if (text) {
         targets_add(d, &list, &n, &cap, mw_intern_atom(d, "UTF8_STRING", False));
@@ -219,16 +222,16 @@ static Atom *offer_targets(Display *d, MwWlOffer *o, int *out_n)
 
 /* Map an X target to an offered MIME.  *latin1 is set when the requestor wants
  * Latin-1 (X STRING/TEXT/COMPOUND_TEXT) rather than the offer's UTF-8. */
-static const char *offer_mime_for_target(Display *d, MwWlOffer *o, Atom target,
-                                         bool *latin1)
+static const char *mime_for_target(Display *d, char **mimes, int nmimes,
+                                   const char *best, Atom target, bool *latin1)
 {
     *latin1 = false;
     char *name = XGetAtomName(d, target);
     if (!name) return NULL;
 
-    for (int i = 0; i < o->nmimes; i++)
-        if (strcasecmp(o->mimes[i], name) == 0) {
-            const char *m = o->mimes[i];
+    for (int i = 0; i < nmimes; i++)
+        if (strcasecmp(mimes[i], name) == 0) {
+            const char *m = mimes[i];
             XFree(name);
             return m;
         }
@@ -240,15 +243,110 @@ static const char *offer_mime_for_target(Display *d, MwWlOffer *o, Atom target,
     XFree(name);
     if (!is_utf8 && !is_latin1) return NULL;
 
-    if (is_utf8) {
-        for (int i = 0; i < o->nmimes; i++)
-            if (mime_wants_utf8(o->mimes[i])) return o->mimes[i];
-    }
-    if (o->mime) { *latin1 = is_latin1; return o->mime; }
-    for (int i = 0; i < o->nmimes; i++)
-        if (mime_rank(o->mimes[i]) >= 0) { *latin1 = is_latin1; return o->mimes[i]; }
+    if (is_utf8)
+        for (int i = 0; i < nmimes; i++)
+            if (mime_wants_utf8(mimes[i])) return mimes[i];
+    if (best) { *latin1 = is_latin1; return best; }
+    for (int i = 0; i < nmimes; i++)
+        if (mime_rank(mimes[i]) >= 0) { *latin1 = is_latin1; return mimes[i]; }
     return NULL;
 }
+
+/* ------------------------------------------- PRIMARY selection transport */
+
+/* PRIMARY uses its own protocol (zwp_primary_selection_v1): the same shape as
+ * the clipboard offer/source, but a different interface without drag-and-drop. */
+typedef struct MwPrimOffer MwPrimOffer;
+
+struct MwPrimOffer {
+    struct zwp_primary_selection_offer_v1 *offer;
+    char  *mime;
+    char **mimes;
+    int    nmimes, mimecap;
+    Display *d;
+};
+
+static void prim_add(MwPrimOffer *o, const char *mime)
+{
+    for (int i = 0; i < o->nmimes; i++)
+        if (strcasecmp(o->mimes[i], mime) == 0) return;
+    if (o->nmimes == o->mimecap) {
+        int cap = o->mimecap ? o->mimecap * 2 : 8;
+        char **n = realloc(o->mimes, (size_t)cap * sizeof *n);
+        if (!n) return;
+        o->mimes = n;
+        o->mimecap = cap;
+    }
+    o->mimes[o->nmimes++] = strdup(mime);
+}
+
+static void prim_offer_free(MwPrimOffer *o)
+{
+    if (!o) return;
+    if (o->offer) zwp_primary_selection_offer_v1_destroy(o->offer);
+    free(o->mime);
+    for (int i = 0; i < o->nmimes; i++) free(o->mimes[i]);
+    free(o->mimes);
+    free(o);
+}
+
+static void prim_offer_mime(void *data, struct zwp_primary_selection_offer_v1 *offer,
+                            const char *mime)
+{
+    (void)offer;
+    MwPrimOffer *o = data;
+    prim_add(o, mime);
+    int r = mime_rank(mime);
+    if (r >= 0 && r < (o->mime ? mime_rank(o->mime) : 1000)) {
+        free(o->mime);
+        o->mime = strdup(mime);
+    }
+    if (o->d && o == MWD(o->d)->primary_offer)
+        sync_x_owner_primary(o->d);
+}
+
+static const struct zwp_primary_selection_offer_v1_listener prim_offer_listener = {
+    .offer = prim_offer_mime,
+};
+
+static void pd_data_offer(void *data, struct zwp_primary_selection_device_v1 *dd,
+                          struct zwp_primary_selection_offer_v1 *id)
+{
+    (void)dd;
+    Display *d = data;
+    XDisplayImpl *dp = MWD(d);
+    MwPrimOffer *o = calloc(1, sizeof *o);
+    if (!o) return;
+    o->offer = id;
+    o->d = d;
+    zwp_primary_selection_offer_v1_add_listener(id, &prim_offer_listener, o);
+    prim_offer_free(dp->primary_pending);
+    dp->primary_pending = o;
+}
+
+static void pd_selection(void *data, struct zwp_primary_selection_device_v1 *dd,
+                         struct zwp_primary_selection_offer_v1 *id)
+{
+    (void)dd;
+    Display *d = data;
+    XDisplayImpl *dp = MWD(d);
+    if (id && dp->primary_pending && dp->primary_pending->offer == id) {
+        prim_offer_free(dp->primary_offer);
+        dp->primary_offer = dp->primary_pending;
+        dp->primary_pending = NULL;
+    } else {
+        prim_offer_free(dp->primary_pending);
+        dp->primary_pending = NULL;
+        prim_offer_free(dp->primary_offer);
+        dp->primary_offer = NULL;
+    }
+    sync_x_owner_primary(d);
+}
+
+static const struct zwp_primary_selection_device_v1_listener primary_device_listener = {
+    .data_offer = pd_data_offer,
+    .selection = pd_selection,
+};
 
 /* ------------------------------------------------------------- wl offers */
 
@@ -342,29 +440,39 @@ static void source_free(Display *d, MwWlSource *s)
     MwWlSource **pp = &MWD(d)->wl_sources;
     while (*pp && *pp != s) pp = &(*pp)->next;
     if (*pp) *pp = s->next;
-    if (s->source) wl_data_source_destroy(s->source);
+    if (s->source) {
+        if (s->selection == XA_PRIMARY)
+            zwp_primary_selection_source_v1_destroy(s->source);
+        else
+            wl_data_source_destroy(s->source);
+    }
     free(s);
 }
 
-static void source_target(void *data, struct wl_data_source *src, const char *mime)
-{ (void)data; (void)src; (void)mime; }
-
-static void source_send(void *data, struct wl_data_source *src, const char *mime, int32_t fd)
+static MwWlSource *source_by_proxy(Display *d, void *proxy)
 {
-    Display *d = data;
-    MwWlSource *s = source_find(d, MWD(d)->clip_serve.selection);
-    /* Find the source this request belongs to (there is at most one per
-     * selection atom). */
-    if (!s || s->source != src) {
-        for (s = MWD(d)->wl_sources; s; s = s->next)
-            if (s->source == src) break;
-    }
+    for (MwWlSource *s = MWD(d)->wl_sources; s; s = s->next)
+        if (s->source == proxy) return s;
+    return NULL;
+}
+
+static void source_offer(MwWlSource *s, const char *mime)
+{
+    if (s->selection == XA_PRIMARY)
+        zwp_primary_selection_source_v1_offer(s->source, mime);
+    else
+        wl_data_source_offer(s->source, mime);
+}
+
+/* A peer asked a source of ours for `mime`.  XConvertSelection() cannot be
+ * answered synchronously here (the X owner only handles the SelectionRequest on
+ * its next trip round the event loop), so queue the transfer and finish it when
+ * the owner's SelectionNotify arrives. */
+static void source_handle_send(Display *d, void *proxy, const char *mime, int32_t fd)
+{
+    MwWlSource *s = source_by_proxy(d, proxy);
     if (!s) { close(fd); return; }
 
-    /* XConvertSelection() cannot be answered synchronously here: it posts a
-     * SelectionRequest that the X owner only handles on its next trip round
-     * Xt's event loop, and we are inside that loop right now.  Queue the
-     * transfer and finish it when the owner's SelectionNotify arrives. */
     MwClipServe *sv = &MWD(d)->clip_serve;
     if (sv->active) { close(fd); return; }
     sv->active = true;
@@ -388,16 +496,24 @@ static void source_send(void *data, struct wl_data_source *src, const char *mime
     wl_display_flush(MWD(d)->wl_display);
 }
 
-static void source_cancelled(void *data, struct wl_data_source *src)
+static void source_handle_cancel(Display *d, void *proxy)
 {
-    Display *d = data;
-    for (MwWlSource *s = MWD(d)->wl_sources; s; s = s->next)
-        if (s->source == src) { source_free(d, s); break; }
-    /* Losing our source means some other client took the compositor
-     * clipboard; re-evaluate who should own the X selection.  This also covers
-     * a compositor that delivers `selection` before `cancelled`. */
+    MwWlSource *s = source_by_proxy(d, proxy);
+    if (s) source_free(d, s);
+    /* Losing our source means some other client took the selection;
+     * re-evaluate who should own the X selection(s). */
     sync_x_owner(d);
+    sync_x_owner_primary(d);
 }
+
+static void source_target(void *data, struct wl_data_source *src, const char *mime)
+{ (void)data; (void)src; (void)mime; }
+
+static void source_send(void *data, struct wl_data_source *src, const char *mime, int32_t fd)
+{ source_handle_send((Display *)data, src, mime, fd); }
+
+static void source_cancelled(void *data, struct wl_data_source *src)
+{ source_handle_cancel((Display *)data, src); }
 
 static void source_drop(void *data, struct wl_data_source *src)
 { (void)data; (void)src; }
@@ -413,6 +529,18 @@ static const struct wl_data_source_listener source_listener = {
     .dnd_drop_performed = source_drop,
     .dnd_finished = source_finished,
     .action = source_action,
+};
+
+static void prim_source_send(void *data, struct zwp_primary_selection_source_v1 *src,
+                             const char *mime, int32_t fd)
+{ source_handle_send((Display *)data, src, mime, fd); }
+
+static void prim_source_cancelled(void *data, struct zwp_primary_selection_source_v1 *src)
+{ source_handle_cancel((Display *)data, src); }
+
+static const struct zwp_primary_selection_source_v1_listener prim_source_listener = {
+    .send = prim_source_send,
+    .cancelled = prim_source_cancelled,
 };
 
 /* ----------------------------------------------------------- data device */
@@ -448,6 +576,25 @@ static void sync_x_owner(Display *d)
     if (!we_published && dp->clip_window != None &&
         XGetSelectionOwner(d, clip) == dp->clip_window)
         XSetSelectionOwner(d, clip, None, CurrentTime);
+}
+
+/* The same, for the X PRIMARY selection and the Wayland primary offer. */
+static void sync_x_owner_primary(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    bool has_data = dp->primary_offer &&
+                    (dp->primary_offer->mime || dp->primary_offer->nmimes > 0);
+    bool we_published = source_find(d, XA_PRIMARY) != NULL;
+
+    if (has_data && !we_published) {
+        Window want = mw_clip_window(d);
+        if (XGetSelectionOwner(d, XA_PRIMARY) != want)
+            XSetSelectionOwner(d, XA_PRIMARY, want, CurrentTime);
+        return;
+    }
+    if (!we_published && dp->clip_window != None &&
+        XGetSelectionOwner(d, XA_PRIMARY) == dp->clip_window)
+        XSetSelectionOwner(d, XA_PRIMARY, None, CurrentTime);
 }
 
 static void dd_data_offer(void *data, struct wl_data_device *dd, struct wl_data_offer *id)
@@ -634,6 +781,12 @@ void mw_clipboard_init(Display *d)
         dp->data_device = wl_data_device_manager_get_data_device(dp->dnd_mgr, dp->wl_seat);
         wl_data_device_add_listener(dp->data_device, &device_listener, d);
     }
+    if (dp->primary_mgr && dp->wl_seat && !dp->primary_device) {
+        dp->primary_device = zwp_primary_selection_device_manager_v1_get_device(
+                                 dp->primary_mgr, dp->wl_seat);
+        zwp_primary_selection_device_v1_add_listener(dp->primary_device,
+                                                     &primary_device_listener, d);
+    }
     mw_dnd_init(d);
 }
 
@@ -656,11 +809,14 @@ void mw_clipboard_fini(Display *d)
     offer_free(dp->pending_offer);
     offer_free(dp->drag_offer);
     dp->wayland_offer = dp->pending_offer = dp->drag_offer = NULL;
-    while (dp->wl_sources) {
-        MwWlSource *s = dp->wl_sources;
-        dp->wl_sources = s->next;
-        if (s->source) wl_data_source_destroy(s->source);
-        free(s);
+    prim_offer_free(dp->primary_offer);
+    prim_offer_free(dp->primary_pending);
+    dp->primary_offer = dp->primary_pending = NULL;
+    while (dp->wl_sources)
+        source_free(d, dp->wl_sources);
+    if (dp->primary_device) {
+        zwp_primary_selection_device_v1_destroy(dp->primary_device);
+        dp->primary_device = NULL;
     }
     if (dp->data_device) { wl_data_device_destroy(dp->data_device); dp->data_device = NULL; }
 }
@@ -764,10 +920,66 @@ void mw_clipboard_handle_ready(Display *d)
 
 /* ----------------------------------------------------- Wayland -> X serve */
 
+/* Serve an X PRIMARY convert from the current Wayland primary offer. */
+static bool prim_xconvert(Display *d, Atom target, Atom property,
+                          Window requestor, Time time)
+{
+    XDisplayImpl *dp = MWD(d);
+    MwPrimOffer *o = dp->primary_offer;
+    if (!o || (!o->mime && o->nmimes == 0)) return false;
+    if (dp->primary_device == NULL) return false;
+
+    Atom prop = property == None ? target : property;
+
+    if (target == a_targets(d)) {
+        int n = 0;
+        Atom *list = targets_from_mimes(d, o->mimes, o->nmimes, o->mime, &n);
+        XChangeProperty(d, requestor, prop, XA_ATOM, 32, PropModeReplace,
+                        (const unsigned char *)list, n);
+        free(list);
+        post_selection_notify(d, requestor, XA_PRIMARY, target, prop, time);
+        return true;
+    }
+
+    if (dp->clip_fetch.active) return false;
+
+    bool latin1 = false;
+    const char *m = mime_for_target(d, o->mimes, o->nmimes, o->mime, target, &latin1);
+    if (!m) return false;
+
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+
+    zwp_primary_selection_offer_v1_receive(o->offer, m, fds[1]);
+    close(fds[1]);
+    wl_display_flush(dp->wl_display);
+
+    MwClipFetch *f = &dp->clip_fetch;
+    f->active = true;
+    f->is_dnd = false;
+    f->latin1 = latin1;
+    f->fd = fds[0];
+    f->data = NULL;
+    f->len = f->cap = 0;
+    f->selection = XA_PRIMARY;
+    f->target = target;
+    f->property = prop;
+    f->requestor = requestor;
+    f->time = time;
+    f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
+    return true;
+}
+
 bool mw_clipboard_xconvert(Display *d, Atom selection, Atom target,
                            Atom property, Window requestor, Time time)
 {
     XDisplayImpl *dp = MWD(d);
+    if (selection == XA_PRIMARY)
+        return prim_xconvert(d, target, property, requestor, time);
+
     MwWlOffer *o = dp->wayland_offer;
     if (selection != clipboard_atom(d)) return false;
     if (!o || (!o->mime && o->nmimes == 0)) return false;
@@ -778,7 +990,7 @@ bool mw_clipboard_xconvert(Display *d, Atom selection, Atom target,
     /* TARGETS: answer from the offer's MIME list; nothing to fetch. */
     if (target == a_targets(d)) {
         int n = 0;
-        Atom *list = offer_targets(d, o, &n);
+        Atom *list = targets_from_mimes(d, o->mimes, o->nmimes, o->mime, &n);
         XChangeProperty(d, requestor, prop, XA_ATOM, 32, PropModeReplace,
                         (const unsigned char *)list, n);
         free(list);
@@ -789,7 +1001,7 @@ bool mw_clipboard_xconvert(Display *d, Atom selection, Atom target,
     if (dp->clip_fetch.active) return false;
 
     bool latin1 = false;
-    const char *m = offer_mime_for_target(d, o, target, &latin1);
+    const char *m = mime_for_target(d, o->mimes, o->nmimes, o->mime, target, &latin1);
     if (!m) return false;
 
     int fds[2];
@@ -869,33 +1081,48 @@ bool mw_clipboard_serve_notify(Display *d, XSelectionEvent *se)
 void mw_clipboard_owner_changed(Display *d, Atom selection, Window owner)
 {
     XDisplayImpl *dp = MWD(d);
-    if (selection != clipboard_atom(d)) return;
+    bool is_prim = (selection == XA_PRIMARY);
+    if (!is_prim && selection != clipboard_atom(d)) return;
     if (dp->clip_window != None && owner == dp->clip_window)
         return;   /* our own proxy ownership */
-    if (!dp->data_device || !dp->dnd_mgr) return;
+    if (is_prim) {
+        if (!dp->primary_mgr || !dp->primary_device) return;
+    } else {
+        if (!dp->data_device || !dp->dnd_mgr) return;
+    }
 
     /* Drop any previous source for this selection. */
     MwWlSource *old = source_find(d, selection);
     if (old) source_free(d, old);
 
-    if (owner == None) return;
+    if (owner == None) {
+        if (is_prim) sync_x_owner_primary(d); else sync_x_owner(d);
+        return;
+    }
 
     MwWlSource *s = calloc(1, sizeof *s);
     s->selection = selection;
-    s->source = wl_data_device_manager_create_data_source(dp->dnd_mgr);
-    wl_data_source_add_listener(s->source, &source_listener, d);
-    for (int i = 0; mime_priority[i]; i++)
-        wl_data_source_offer(s->source, mime_priority[i]);
+    if (is_prim) {
+        s->source = zwp_primary_selection_device_manager_v1_create_source(dp->primary_mgr);
+        zwp_primary_selection_source_v1_add_listener(s->source, &prim_source_listener, d);
+    } else {
+        s->source = wl_data_device_manager_create_data_source(dp->dnd_mgr);
+        wl_data_source_add_listener(s->source, &source_listener, d);
+    }
+    for (int i = 0; mime_priority[i]; i++) source_offer(s, mime_priority[i]);
     /* Non-text types too: source_send() converts the matching X target, and an
      * owner that cannot serve one simply yields nothing. */
-    for (int i = 0; extra_mime[i]; i++)
-        wl_data_source_offer(s->source, extra_mime[i]);
+    for (int i = 0; extra_mime[i]; i++) source_offer(s, extra_mime[i]);
     s->next = dp->wl_sources;
     dp->wl_sources = s;
 
     /* set_selection() is only honoured with a serial from recent input; the
-     * user has just clicked a menu or pressed Ctrl+C. */
-    wl_data_device_set_selection(dp->data_device, s->source, dp->last_input_serial);
+     * user has just selected or pressed the paste shortcut. */
+    if (is_prim)
+        zwp_primary_selection_device_v1_set_selection(dp->primary_device, s->source,
+                                                      dp->last_input_serial);
+    else
+        wl_data_device_set_selection(dp->data_device, s->source, dp->last_input_serial);
     wl_display_flush(dp->wl_display);
-    sync_x_owner(d);
+    if (is_prim) sync_x_owner_primary(d); else sync_x_owner(d);
 }

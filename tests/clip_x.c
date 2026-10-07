@@ -185,6 +185,28 @@ int main(int argc, char **argv)
         return do_convert_target(d, win, clip, XInternAtom(d, argv[2], False));
     }
 
+    if (strcmp(argv[1], "primary-own-mime") == 0) {
+        if (argc < 4) {
+            fprintf(stderr, "usage: clip_x primary-own-mime <mime> <payload>\n");
+            return 2;
+        }
+        serve_target_atom = XInternAtom(d, argv[2], False);
+        XSetSelectionOwner(d, XA_PRIMARY, win, CurrentTime);
+        XFlush(d);
+        if (XGetSelectionOwner(d, XA_PRIMARY) != win) {
+            fprintf(stderr, "clip_x: could not take PRIMARY\n");
+            return 1;
+        }
+        printf("OWNING\n");
+        pump_serving(d, win, argv[3], 6000);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "primary-convert") == 0) {
+        Atom t = argc > 2 ? XInternAtom(d, argv[2], False) : XA_STRING;
+        return do_convert_target(d, win, XA_PRIMARY, t);
+    }
+
     fprintf(stderr, "clip_x: unknown mode %s\n", argv[1]);
     return 2;
 }

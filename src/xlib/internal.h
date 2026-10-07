@@ -36,6 +36,7 @@
 #include "xdg-decoration-client-protocol.h"
 #include "viewporter-client-protocol.h"
 #include "text-input-unstable-v3-client-protocol.h"
+#include "primary-selection-unstable-v1-client-protocol.h"
 
 /* ------------------------------------------------------------------ utility */
 
@@ -204,9 +205,11 @@ typedef struct MwWlOffer {
     struct MwWlOffer     *next;
 } MwWlOffer;
 
-/* A data source we advertised because an X client owns a selection. */
+/* A data source we advertised because an X client owns a selection.  `source`
+ * is a wl_data_source for CLIPBOARD or a zwp_primary_selection_source_v1 for
+ * PRIMARY (the selection atom says which). */
 typedef struct MwWlSource {
-    struct wl_data_source *source;
+    void                  *source;
     Atom                   selection;
     struct MwWlSource     *next;
 } MwWlSource;
@@ -439,6 +442,13 @@ typedef struct _XDisplayImpl {
     struct wp_viewporter              *viewporter;   /* may be NULL */
     struct wl_data_device_manager     *dnd_mgr;
     struct wl_data_device             *data_device;
+
+    /* PRIMARY selection (zwp_primary_selection_v1); the X PRIMARY selection is
+     * mirrored onto it and vice versa.  MwPrimOffer is defined in clipboard.c. */
+    struct zwp_primary_selection_device_manager_v1 *primary_mgr;
+    struct zwp_primary_selection_device_v1         *primary_device;
+    struct MwPrimOffer                             *primary_offer;
+    struct MwPrimOffer                             *primary_pending;
 
     /* Input method bridge (xim.c): the client side of zwp_text_input_v3.
      * A single text-input object per display/seat; text_input_ic points at the

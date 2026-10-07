@@ -100,6 +100,14 @@
 #  endif
 #endif
 
+#if defined(__has_include)
+#  if __has_include("primary-selection-unstable-v1-server-protocol.h")
+#    include "primary-selection-unstable-v1-server-protocol.h"
+#  elif __has_include(<primary-selection-unstable-v1-server-protocol.h>)
+#    include <primary-selection-unstable-v1-server-protocol.h>
+#  endif
+#endif
+
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
     (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
 #  define MW_LITTLE_ENDIAN 1
@@ -279,6 +287,8 @@ struct mw_compositor {
 	struct wl_list outputs;           /* mw_device */
 	struct wl_list data_devices;      /* hc_data_device */
 	struct hc_data_source *data_selection; /* compositor clipboard owner */
+	struct wl_list primary_devices;   /* hc_data_device (primary) */
+	struct hc_data_source *primary_selection; /* primary selection owner */
 
 	struct mw_surface *last_toplevel; /* last mapped toplevel */
 	struct mw_surface *input_surface; /* input focus target */
@@ -1671,17 +1681,20 @@ struct hc_data_source {
 	struct wl_array        mimes;      /* char * */
 	struct mw_compositor  *comp;
 	struct wl_list         offers;     /* hc_data_offer referencing us */
+	int                    primary;    /* a zwp_primary_selection_source_v1 */
 };
 
 struct hc_data_device {
 	struct wl_resource   *resource;
 	struct wl_list        link;
 	struct mw_compositor *comp;
+	int                   primary;
 };
 
 struct hc_data_offer {
 	struct hc_data_source *source;     /* NULL once the source is gone */
 	struct wl_list         link;
+	int                    primary;
 };
 
 static void broadcast_selection(struct mw_compositor *comp);
@@ -1698,7 +1711,10 @@ static void data_source_destroyed(struct wl_resource *resource)
 	 * touch freed memory. */
 	wl_list_for_each(offer, &src->offers, link)
 		offer->source = NULL;
-	if (src->comp && src->comp->data_selection == src) {
+	if (src->comp && src->primary && src->comp->primary_selection == src) {
+		src->comp->primary_selection = NULL;
+		broadcast_selection(src->comp);
+	} else if (src->comp && src->comp->data_selection == src) {
 		src->comp->data_selection = NULL;
 		broadcast_selection(src->comp);
 	}
@@ -1757,8 +1773,13 @@ static void data_offer_receive(struct wl_client *client,
 	struct hc_data_offer *offer = wl_resource_get_user_data(resource);
 	(void)client;
 
-	if (offer && offer->source && offer->source->resource)
-		wl_data_source_send_send(offer->source->resource, mime_type, fd);
+	if (offer && offer->source && offer->source->resource) {
+		if (offer->primary)
+			zwp_primary_selection_source_v1_send_send(offer->source->resource,
+								  mime_type, fd);
+		else
+			wl_data_source_send_send(offer->source->resource, mime_type, fd);
+	}
 	close(fd);
 }
 
@@ -1799,7 +1820,54 @@ static void data_offer_destroyed(struct wl_resource *resource)
 	free(offer);
 }
 
-static void send_offer_to(struct wl_resource *device,
+/* --- primary selection (no drag-and-drop) --- */
+
+static void primary_device_set_selection(struct wl_client *client,
+					 struct wl_resource *resource,
+					 struct wl_resource *source, uint32_t serial)
+{
+	struct hc_data_device *dev = wl_resource_get_user_data(resource);
+	struct mw_compositor *comp = dev ? dev->comp : NULL;
+	struct hc_data_source *sel = source
+		? wl_resource_get_user_data(source) : NULL;
+	(void)client; (void)serial;
+	if (!comp) return;
+
+	if (comp->primary_selection && comp->primary_selection != sel &&
+	    comp->primary_selection->resource)
+		zwp_primary_selection_source_v1_send_cancelled(
+			comp->primary_selection->resource);
+
+	comp->primary_selection = sel;
+	broadcast_selection(comp);
+}
+
+static void primary_device_destroy(struct wl_client *client,
+				   struct wl_resource *resource)
+{
+	(void)client;
+	wl_resource_destroy(resource);
+}
+
+static const struct zwp_primary_selection_device_v1_interface
+primary_device_implementation = {
+	.set_selection = primary_device_set_selection,
+	.destroy = primary_device_destroy,
+};
+
+static const struct zwp_primary_selection_source_v1_interface
+primary_source_implementation = {
+	.offer = data_source_offer,
+	.destroy = data_source_destroy,
+};
+
+static const struct zwp_primary_selection_offer_v1_interface
+primary_offer_implementation = {
+	.receive = data_offer_receive,
+	.destroy = data_offer_destroy,
+};
+
+static void send_offer_to(struct wl_resource *device, int primary,
 			  struct hc_data_source *src)
 {
 	struct wl_client *client = wl_resource_get_client(device);
@@ -1809,32 +1877,44 @@ static void send_offer_to(struct wl_resource *device,
 	char **mime;
 
 	if (!src) {
-		wl_data_device_send_selection(device, NULL);
+		if (primary) zwp_primary_selection_device_v1_send_selection(device, NULL);
+		else         wl_data_device_send_selection(device, NULL);
 		return;
 	}
 
 	offer = calloc(1, sizeof *offer);
 	if (!offer) {
-		wl_data_device_send_selection(device, NULL);
+		if (primary) zwp_primary_selection_device_v1_send_selection(device, NULL);
+		else         wl_data_device_send_selection(device, NULL);
 		return;
 	}
 	offer->source = src;
+	offer->primary = primary;
 	wl_list_insert(&src->offers, &offer->link);
 
 	/* id 0 lets libwayland allocate a server-side id; the client learns it
 	 * from the selection event. */
-	offer_res = wl_resource_create(client, &wl_data_offer_interface,
-				       version, 0);
-	wl_resource_set_implementation(offer_res, &data_offer_implementation,
-				       offer, data_offer_destroyed);
+	offer_res = wl_resource_create(client,
+			primary ? (const struct wl_interface *)&zwp_primary_selection_offer_v1_interface
+				: &wl_data_offer_interface, version, 0);
+	wl_resource_set_implementation(offer_res,
+			primary ? (const void *)&primary_offer_implementation
+				: (const void *)&data_offer_implementation,
+			offer, data_offer_destroyed);
 
 	/* The data_offer event introduces the object; only then may the offer's
 	 * MIME types and the selection event reference it. */
-	wl_data_device_send_data_offer(device, offer_res);
-	wl_array_for_each(mime, &src->mimes)
-		wl_data_offer_send_offer(offer_res, *mime);
-
-	wl_data_device_send_selection(device, offer_res);
+	if (primary) {
+		zwp_primary_selection_device_v1_send_data_offer(device, offer_res);
+		wl_array_for_each(mime, &src->mimes)
+			zwp_primary_selection_offer_v1_send_offer(offer_res, *mime);
+		zwp_primary_selection_device_v1_send_selection(device, offer_res);
+	} else {
+		wl_data_device_send_data_offer(device, offer_res);
+		wl_array_for_each(mime, &src->mimes)
+			wl_data_offer_send_offer(offer_res, *mime);
+		wl_data_device_send_selection(device, offer_res);
+	}
 }
 
 static void broadcast_selection(struct mw_compositor *comp)
@@ -1842,7 +1922,9 @@ static void broadcast_selection(struct mw_compositor *comp)
 	struct hc_data_device *dev;
 
 	wl_list_for_each(dev, &comp->data_devices, link)
-		send_offer_to(dev->resource, comp->data_selection);
+		send_offer_to(dev->resource, 0, comp->data_selection);
+	wl_list_for_each(dev, &comp->primary_devices, link)
+		send_offer_to(dev->resource, 1, comp->primary_selection);
 }
 
 static void data_device_start_drag(struct wl_client *client,
@@ -1920,7 +2002,7 @@ static void manager_get_data_device(struct wl_client *client,
 
 	/* A device joining after the clipboard was set still needs the offer. */
 	if (comp->data_selection)
-		send_offer_to(dev->resource, comp->data_selection);
+		send_offer_to(dev->resource, 0, comp->data_selection);
 }
 
 static void manager_create_data_source(struct wl_client *client,
@@ -1951,6 +2033,65 @@ static void bind_data_device_manager(struct wl_client *client, void *data,
 			&wl_data_device_manager_interface, MIN(version, 3), id);
 	wl_resource_set_implementation(resource, &manager_implementation, data,
 				       NULL);
+}
+
+/* --- primary selection manager --- */
+
+static void primary_manager_get_device(struct wl_client *client,
+				       struct wl_resource *resource,
+				       uint32_t id, struct wl_resource *seat)
+{
+	struct mw_compositor *comp = wl_resource_get_user_data(resource);
+	struct hc_data_device *dev = calloc(1, sizeof *dev);
+	(void)seat;
+	if (!dev)
+		return;
+	dev->comp = comp;
+	dev->primary = 1;
+	dev->resource = wl_resource_create(client,
+			&zwp_primary_selection_device_v1_interface,
+			wl_resource_get_version(resource), id);
+	wl_resource_set_implementation(dev->resource, &primary_device_implementation,
+				       dev, data_device_destroyed);
+	wl_list_insert(&comp->primary_devices, &dev->link);
+
+	if (comp->primary_selection)
+		send_offer_to(dev->resource, 1, comp->primary_selection);
+}
+
+static void primary_manager_create_source(struct wl_client *client,
+					  struct wl_resource *resource,
+					  uint32_t id)
+{
+	struct hc_data_source *src = calloc(1, sizeof *src);
+	if (!src)
+		return;
+	wl_array_init(&src->mimes);
+	wl_list_init(&src->offers);
+	src->comp = wl_resource_get_user_data(resource);
+	src->primary = 1;
+	src->resource = wl_resource_create(client,
+			&zwp_primary_selection_source_v1_interface,
+			wl_resource_get_version(resource), id);
+	wl_resource_set_implementation(src->resource,
+				       &primary_source_implementation, src,
+				       data_source_destroyed);
+}
+
+static const struct zwp_primary_selection_device_manager_v1_interface
+primary_manager_implementation = {
+	.create_source = primary_manager_create_source,
+	.get_device = primary_manager_get_device,
+};
+
+static void bind_primary_manager(struct wl_client *client, void *data,
+				 uint32_t version, uint32_t id)
+{
+	struct wl_resource *resource = wl_resource_create(client,
+			&zwp_primary_selection_device_manager_v1_interface,
+			MIN(version, 1), id);
+	wl_resource_set_implementation(resource, &primary_manager_implementation,
+				       data, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -3102,6 +3243,7 @@ int main(int argc, char **argv)
 	wl_list_init(&comp.keyboards);
 	wl_list_init(&comp.outputs);
 	wl_list_init(&comp.data_devices);
+	wl_list_init(&comp.primary_devices);
 	wl_list_init(&comp.pending_frame_cbs);
 
 	comp.display = wl_display_create();
@@ -3136,6 +3278,10 @@ int main(int argc, char **argv)
 	wl_global_create(comp.display, &wl_seat_interface, 7, &comp, bind_seat);
 	wl_global_create(comp.display, &wl_data_device_manager_interface, 3,
 			 &comp, bind_data_device_manager);
+	if (!getenv("HC_NO_PRIMARY"))
+		wl_global_create(comp.display,
+				 &zwp_primary_selection_device_manager_v1_interface,
+				 1, &comp, bind_primary_manager);
 	wl_global_create(comp.display, &wp_viewporter_interface, 1, &comp,
 			 bind_viewporter);
 	/* Text-input v3 (the shim's XIM bridge).  HC_NO_TEXTINPUT mimics a
