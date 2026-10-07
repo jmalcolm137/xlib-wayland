@@ -15,6 +15,7 @@ fc_dep      = dependency('fontconfig')
 pixman_dep  = dependency('pixman-1')
 protos_dep  = dependency('wayland-protocols')
 threads_dep = dependency('threads')
+xrender_dep = dependency('xrender')
 m_dep       = cc.find_library('m', required: false)
 
 wl_scan = find_program('wayland-scanner')
@@ -112,7 +113,7 @@ pkg.generate(libx11,
 libxft = shared_library('Xft',
   'src/xft/xft.c',
   include_directories: inc,
-  dependencies: [fc_dep, ft_dep, cairo_dep, m_dep],
+  dependencies: [fc_dep, ft_dep, cairo_dep, xrender_dep, m_dep],
   link_with: libx11,
   version: '2.0.0',
   soversion: '2',

@@ -1,18 +1,21 @@
 /* xft.c — a small Xft implementation over the shim's own font path.
  *
  * Xft normally draws through the X Render extension: it uploads glyphs to the
- * server and composites them.  The shim has no Render, and does not need one --
- * it already rasterises text with FreeType/fontconfig/cairo (see
- * src/raster/raster_cairo.c), so the Xft entry points Motif uses are
- * implemented directly on that path through the mw_xft_* bridge.  The public
- * structures (XftFont, XftColor, XftDraw) match Xft's headers, so callers see
- * the same ABI.
+ * server and composites them.  The shim rasterises text with
+ * FreeType/fontconfig/cairo (see src/raster/raster_cairo.c) and implements the
+ * Render extension on that same backend (src/xlib/render.c), so the Xft entry
+ * points Motif uses are served from the raster font path through the mw_xft_*
+ * bridge and the Render-level picture entry points hand out real Render
+ * pictures.  The public structures (XftFont, XftColor, XftDraw) match Xft's
+ * headers, so callers see the same ABI.
  *
  * This is deliberately a subset: it covers what a Motif application calls to
- * draw and measure strings.  Glyph-level and Render-picture entry points are
- * not provided.
+ * draw and measure strings, plus the picture accessors Render-drawing clients
+ * (xclock's clock face, for one) use.  The glyph-upload Render entry points are
+ * still stubs.
  */
 #include <X11/Xft/Xft.h>
+#include <X11/extensions/Xrender.h>
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -24,7 +27,11 @@
 struct _XftDraw {
     Display    *dpy;
     Drawable    drawable;
-    XRectangle *clip;      /* rectangles in drawable coordinates, or NULL */
+    Visual     *visual;      /* for the Render picture format, or NULL */
+    Picture     picture;     /* cached XftDrawPicture(), None until asked */
+    Picture     src_picture; /* cached XftDrawSrcPicture(), None until asked */
+    unsigned long src_pixel; /* colour the cached source was built for */
+    XRectangle *clip;        /* rectangles in drawable coordinates, or NULL */
     int         nclip;
 };
 
@@ -98,9 +105,9 @@ static char *to_utf8(const void *s, int len, int bits, int *out_len)
 XftDraw *XftDrawCreate(Display *dpy, Drawable drawable, Visual *visual,
                        Colormap colormap)
 {
-    (void)visual; (void)colormap;
+    (void)colormap;
     XftDraw *d = calloc(1, sizeof *d);
-    if (d) { d->dpy = dpy; d->drawable = drawable; }
+    if (d) { d->dpy = dpy; d->drawable = drawable; d->visual = visual; }
     return d;
 }
 
@@ -110,6 +117,8 @@ XftDraw *XftDrawCreateBitmap(Display *dpy, Pixmap bitmap)
 void XftDrawDestroy(XftDraw *draw)
 {
     if (!draw) return;
+    if (draw->picture)     XRenderFreePicture(draw->dpy, draw->picture);
+    if (draw->src_picture) XRenderFreePicture(draw->dpy, draw->src_picture);
     free(draw->clip);
     free(draw);
 }
@@ -424,12 +433,45 @@ void XftDrawCharSpec(XftDraw *draw, _Xconst XftColor *color, XftFont *pub,
     }
 }
 
-/* There is no Render extension behind this Xft, so there is no Picture to hand
- * back: a client that asks for one gets None, and the Render calls it makes
- * against that are no-ops (libXrender talks a wire we do not answer). */
-Picture XftDrawPicture(XftDraw *draw) { (void)draw; return None; }
+/* The Render-level picture entry points.  Xft clients that draw through Render
+ * (xclock's clock face, for one) call XftDrawPicture()/XftDrawSrcPicture() and
+ * hand the results to XRenderComposite*.  The shim now implements the Render
+ * extension on its raster backend, so these can hand out real pictures rather
+ * than None -- with None every such client composited against picture 0 and
+ * drew nothing. */
+Picture XftDrawPicture(XftDraw *draw)
+{
+    if (!draw) return None;
+    if (draw->picture) return draw->picture;
+    if (!draw->visual) return None;
+    XRenderPictFormat *fmt = XRenderFindVisualFormat(draw->dpy, draw->visual);
+    if (!fmt) return None;
+    draw->picture = XRenderCreatePicture(draw->dpy, draw->drawable, fmt, 0, NULL);
+    return draw->picture;
+}
+
 Picture XftDrawSrcPicture(XftDraw *draw, _Xconst XftColor *color)
-{ (void)draw; (void)color; return None; }
+{
+    if (!draw || !color) return None;
+    if (draw->src_picture && draw->src_pixel == color->pixel)
+        return draw->src_picture;
+    if (draw->src_picture) {
+        XRenderFreePicture(draw->dpy, draw->src_picture);
+        draw->src_picture = None;
+    }
+    XRenderColor rc = color->color;
+    if (!rc.alpha && !rc.red && !rc.green && !rc.blue) {
+        /* The caller set only the pixel; split it into components. */
+        unsigned long px = color->pixel;
+        rc.red   = (unsigned short)((px >> 16) & 0xff) * 0x101;
+        rc.green = (unsigned short)((px >> 8) & 0xff) * 0x101;
+        rc.blue  = (unsigned short)(px & 0xff) * 0x101;
+        rc.alpha = 0xffff;
+    }
+    draw->src_picture = XRenderCreateSolidFill(draw->dpy, &rc);
+    draw->src_pixel = color->pixel;
+    return draw->src_picture;
+}
 
 /* ---------------------------------------------------- glyph-level drawing
  *
@@ -438,11 +480,10 @@ Picture XftDrawSrcPicture(XftDraw *draw, _Xconst XftColor *color)
  * those are implemented here on the shim's cairo font path.  The *Render-level*
  * ones (XftGlyphSpecRender, XftGlyphFontSpecRender, XftCharSpecRender, ...)
  * take Render Pictures -- a source and a destination -- and are the way a
- * Render-backed Xft uploads glyphs to a server.  The shim has no Render
- * extension, so those cannot be implemented without one; a caller that needs
- * them (Pango's legacy Xft renderer is the main one) needs the Render work
- * tracked in the design document, not an Xft stub that would silently draw
- * nothing.
+ * Render-backed Xft uploads glyphs to a server.  The shim's Render backend
+ * rasterises pictures but does not yet accept uploaded glyph sets, so these
+ * glyph-upload entry points are still stubs; a caller that needs them (Pango's
+ * legacy Xft renderer is the main one) draws nothing rather than mis-drawing.
  */
 
 static int ft_glyph_advance(XftFont *pub, FT_UInt glyph)
@@ -458,8 +499,9 @@ static int ft_glyph_advance(XftFont *pub, FT_UInt glyph)
 Bool XftDefaultHasRender(Display *dpy)
 {
     /* Xft uses this to decide whether it can upload glyphs through the Render
-     * extension.  The shim has no Render, but its Xft draws on its own font
-     * path, so callers that only need the draw-level API still work. */
+     * extension.  The shim has Render, but glyph upload is one of the stubs
+     * above, so it still answers no; callers that only need the draw-level API
+     * (and the picture accessors) work regardless. */
     (void)dpy;
     return False;
 }
@@ -558,8 +600,9 @@ FcBool XftInitFtLibrary(void) { return 1; }
 
 /* ------------------------------------------------ Render-level entry points
  *
- * These composite through Render Pictures.  There are no real Pictures behind
- * this Xft (XftDrawPicture() returns None), and pangoxft only reaches them when
+ * These composite through Render Pictures.  XftDrawPicture() now hands out a
+ * real picture, but these upload glyphs through Render glyph sets, which the
+ * shim does not implement, so they remain stubs; pangoxft only reaches them when
  * a caller has explicitly installed a source Picture with
  * pango_xft_renderer_set_source(); its normal path draws through the draw-level
  * API above, which is implemented.  They exist so pangoxft (marco and

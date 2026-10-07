@@ -905,6 +905,13 @@ static void req_triangles(Display *d, const unsigned char *b, size_t len)
     MwRenderPicture *dst = pic(d, r->dst), *src = pic(d, r->src);
     size_t n = (len - sz_xRenderTrianglesReq) / sz_xTriangle;
     const unsigned char *p = b + sz_xRenderTrianglesReq;
+    if (getenv("MW_TRACE_RENDER")) {
+        static int shown;
+        if (shown++ < 4)
+            fprintf(stderr, "MW: triangles dst=0x%lx(%p) src=0x%lx(%p) op=%d n=%zu mask=%u\n",
+                    (unsigned long)r->dst, (void*)dst, (unsigned long)r->src, (void*)src,
+                    r->op, n, (unsigned)r->maskFormat);
+    }
     for (size_t i = 0; i < n; i++) {
         xTriangle t; memcpy(&t, p + i*sz_xTriangle, sz_xTriangle);
         double pts[6] = { frac(t.p1.x), frac(t.p1.y), frac(t.p2.x), frac(t.p2.y),
