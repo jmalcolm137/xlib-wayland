@@ -160,10 +160,15 @@ XImage *XGetImage(Display *d, Drawable dr, int x, int y,
             uint32_t px = tmp[(size_t)j * width + i];
             /* A depth-32 drawable carries alpha; masking it off lost the
              * channel entirely (rendercheck reads ARGB destinations back to
-             * check alpha, and every gradient looked transparent).  Shallower
-             * drawables have no alpha to keep. */
-            img_put_pixel(img, (int)i, (int)j,
-                          depth >= 32 ? px : (px & 0xffffffu));
+             * check alpha, and every gradient looked transparent).  A depth-8
+             * Render drawable (PictStandardA8) *is* alpha, stored in the
+             * surface's alpha channel here, so hand that back as the pixel.
+             * Shallower drawables have no alpha to keep. */
+            unsigned long out;
+            if (depth == 8)       out = (px >> 24) & 0xff;
+            else if (depth >= 32) out = px;
+            else                  out = px & 0xffffffu;
+            img_put_pixel(img, (int)i, (int)j, out);
         }
     free(tmp);
     return img;

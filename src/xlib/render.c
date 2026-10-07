@@ -114,6 +114,37 @@ static MwWindow *pic_window(Display *d, MwRenderPicture *p)
     return mw_window(d, p->drawable);
 }
 
+/* A destination picture without an alpha channel (the r8g8b8 visual, say) is
+ * opaque: the X server treats its destination alpha as 1.0, and rendercheck's
+ * reference does the same (color_correct() forces a=1 when the format has no
+ * alphaMask).  Our surfaces are always ARGB32, so we force the alpha byte of
+ * the touched pixels back to 255 after compositing.  Without this, operators
+ * that read the destination alpha -- In, Atop, Out and their reverses -- treat
+ * the window as translucent, and the whole r8g8b8 gradient group fails.  RGB is
+ * premultiplied, so raising only the alpha byte keeps the colour unchanged,
+ * which is exactly what dropping the alpha channel on a real depth-24 drawable
+ * does. */
+static void force_opaque(MwSurface *s, int x, int y, int w, int h)
+{
+    if (!s || w <= 0 || h <= 0) return;
+    int sw = mw_surface_width(s), sh = mw_surface_height(s);
+    int stride = mw_surface_stride(s) / 4;
+    uint32_t *px = mw_surface_data(s);
+    if (!px || stride <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > sw) w = sw - x;
+    if (y + h > sh) h = sh - y;
+    if (w <= 0 || h <= 0) return;
+    cairo_surface_t *cs = mw_surface_native(s);
+    if (cs) cairo_surface_flush(cs);
+    for (int j = 0; j < h; j++) {
+        uint32_t *row = px + (size_t)(y + j) * stride + x;
+        for (int i = 0; i < w; i++) row[i] |= 0xff000000u;
+    }
+    if (cs) cairo_surface_mark_dirty(cs);
+}
+
 /* ------------------------------------------------------------- operators */
 
 static cairo_operator_t cairo_op(int op)
@@ -293,6 +324,9 @@ static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_surface_t *dcs = ds ? mw_surface_native(ds) : NULL;
     if (!dcs) return;
 
+    /* Make an alpha-less destination read as opaque for this composite. */
+    if (dst->format == FMT_RGB24) force_opaque(ds, xd, yd, w, h);
+
     cairo_t *cr = cairo_create(dcs);
     cairo_save(cr);
     cairo_set_operator(cr, cairo_op(op));
@@ -331,6 +365,7 @@ static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_restore(cr);
     cairo_destroy(cr);
 
+    if (dst->format == FMT_RGB24) force_opaque(ds, xd, yd, w, h);
     mw_surface_mark_dirty(ds);
     MwWindow *win = pic_window(d, dst);
     if (win) mw_window_damage(win);
@@ -772,6 +807,7 @@ static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     MwSurface *ds = pic_surface(d, dst);
     cairo_surface_t *dcs = ds ? mw_surface_native(ds) : NULL;
     if (!dcs) return;
+    if (dst->format == FMT_RGB24) force_opaque(ds, bx, by, w, h);
     cairo_t *cr = cairo_create(dcs);
     cairo_save(cr);
     cairo_set_operator(cr, cairo_op(op));
@@ -783,6 +819,7 @@ static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_mask_surface(cr, mw_surface_native(mask), bx, by);
     cairo_restore(cr);
     cairo_destroy(cr);
+    if (dst->format == FMT_RGB24) force_opaque(ds, bx, by, w, h);
     mw_surface_mark_dirty(ds);
     MwWindow *win = pic_window(d, dst);
     if (win) mw_window_damage(win);
@@ -861,6 +898,17 @@ static void fill_poly(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     MwSurface *ds = pic_surface(d, dst);
     cairo_surface_t *dcs = ds ? mw_surface_native(ds) : NULL;
     if (!dcs) return;
+    if (dst->format == FMT_RGB24) {
+        double minx = pts[0], maxx = pts[0], miny = pts[1], maxy = pts[1];
+        for (int i = 1; i < n; i++) {
+            if (pts[i*2]   < minx) minx = pts[i*2];
+            if (pts[i*2]   > maxx) maxx = pts[i*2];
+            if (pts[i*2+1] < miny) miny = pts[i*2+1];
+            if (pts[i*2+1] > maxy) maxy = pts[i*2+1];
+        }
+        force_opaque(ds, (int)floor(minx), (int)floor(miny),
+                     (int)ceil(maxx - minx) + 1, (int)ceil(maxy - miny) + 1);
+    }
     cairo_t *cr = cairo_create(dcs);
     cairo_save(cr);
     cairo_set_operator(cr, cairo_op(op));
@@ -895,6 +943,17 @@ static void fill_poly(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     }
     cairo_restore(cr);
     cairo_destroy(cr);
+    if (dst->format == FMT_RGB24) {
+        double minx = pts[0], maxx = pts[0], miny = pts[1], maxy = pts[1];
+        for (int i = 1; i < n; i++) {
+            if (pts[i*2]   < minx) minx = pts[i*2];
+            if (pts[i*2]   > maxx) maxx = pts[i*2];
+            if (pts[i*2+1] < miny) miny = pts[i*2+1];
+            if (pts[i*2+1] > maxy) maxy = pts[i*2+1];
+        }
+        force_opaque(ds, (int)floor(minx), (int)floor(miny),
+                     (int)ceil(maxx - minx) + 1, (int)ceil(maxy - miny) + 1);
+    }
     mw_surface_mark_dirty(ds);
     MwWindow *win = pic_window(d, dst);
     if (win) mw_window_damage(win);
