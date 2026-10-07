@@ -40,6 +40,12 @@ typedef struct MwXdnd {
     unsigned char *drop_data;
     size_t    drop_len;
     bool      drop_ready;
+
+    /* X→Wayland: an X client's drag (it owns XdndSelection). */
+    Window    x_src;
+    Atom      q_prop;        /* property of the pending TARGETS query */
+    bool      q_pending;
+    bool      drag_started;
 } MwXdnd;
 
 static int xdnd_trace(void)
@@ -343,4 +349,102 @@ bool mw_xdnd_client_message(Display *d, XClientMessageEvent *cm)
         return true;
     }
     return true;   /* any other message for our source window is ours to swallow */
+}
+
+/* ------------------------------------------- source side (X drag -> Wayland) */
+
+void mw_xdnd_source_done(Display *d)
+{
+    MwXdnd *x = MWD(d)->xdnd;
+    if (!x) return;
+    x->drag_started = false;
+    x->x_src = None;
+}
+
+static void xdnd_start_wayland_drag(Display *d, const Atom *targets, int nt)
+{
+    XDisplayImpl *dp = MWD(d);
+    MwXdnd *x = dp->xdnd;
+    if (!x || x->drag_started) return;
+    if (!dp->data_device || !dp->dnd_mgr || !dp->wl_seat) return;
+
+    MwWindow *sw = mw_window(d, x->x_src);
+    while (sw && !sw->tl) sw = sw->parent;
+    if (!sw || !sw->tl || !sw->tl->surface) { TR("no source surface\n"); return; }
+
+    struct wl_data_source *src = mw_clipboard_make_source(d, a_sel(d));
+    if (!src) return;
+
+    int offered = 0;
+    for (int i = 0; i < nt; i++) {
+        const char *nm = XGetAtomName(d, targets[i]);
+        if (!nm) continue;
+        if (strcmp(nm, "TARGETS") != 0 && strcmp(nm, "SAVE_TARGETS") != 0) {
+            wl_data_source_offer(src, nm);
+            offered++;
+        }
+        XFree((char *)nm);
+    }
+    if (!offered) { TR("no targets to offer\n"); return; }
+
+    wl_data_source_set_actions(src,
+        WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY | WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
+    x->drag_started = true;
+    wl_data_device_start_drag(dp->data_device, src, sw->tl->surface, NULL,
+                              dp->last_press_serial);
+    wl_display_flush(dp->wl_display);
+    TR("started Wayland drag src=0x%lx offered=%d serial=%u\n",
+       (unsigned long)x->x_src, offered, dp->last_press_serial);
+}
+
+void mw_xdnd_selection_changed(Display *d, Atom selection, Window owner)
+{
+    MwXdnd *x = MWD(d)->xdnd;
+    if (!x || selection != a_sel(d)) return;
+    if (owner == None) {
+        x->x_src = None;
+        x->q_pending = false;
+        x->drag_started = false;
+        return;
+    }
+    if (x->drag_started || x->q_pending) return;
+    x->x_src = owner;
+    /* GDK sets XdndTypeList only when it sends XdndEnter, which it cannot do
+     * for a target in another process; ask it for its target list instead. */
+    x->q_prop = mw_intern_atom(d, "MW_XDND_TARGETS", False);
+    x->q_pending = true;
+    TR("XdndSelection owner=0x%lx -> query TARGETS\n", (unsigned long)owner);
+    XConvertSelection(d, a_sel(d), a_targets(d), x->q_prop, mw_clip_window(d),
+                      CurrentTime);
+}
+
+bool mw_xdnd_notify(Display *d, XSelectionEvent *se)
+{
+    MwXdnd *x = MWD(d)->xdnd;
+    if (!x || !x->q_pending) return false;
+    if (se->selection != a_sel(d) || se->requestor != mw_clip_window(d) ||
+        se->property != x->q_prop)
+        return false;
+    x->q_pending = false;
+    if (se->property == None) return true;
+
+    Atom type; int fmt; unsigned long n, ba;
+    unsigned char *data = NULL;
+    XGetWindowProperty(d, se->requestor, se->property, 0, 0x7fffffff, True,
+                       XA_ATOM, &type, &fmt, &n, &ba, &data);
+    if (data) {
+        Atom *targets = malloc((size_t)n * sizeof(Atom));
+        int nt = 0;
+        if (targets) {
+            for (unsigned long i = 0; i < n; i++) {
+                long v = 0;
+                memcpy(&v, data + (size_t)i * sizeof(long), sizeof(long));
+                targets[nt++] = (Atom)v;
+            }
+            xdnd_start_wayland_drag(d, targets, nt);
+            free(targets);
+        }
+        XFree(data);
+    }
+    return true;
 }

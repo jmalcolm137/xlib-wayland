@@ -499,7 +499,9 @@ static void source_handle_send(Display *d, void *proxy, const char *mime, int32_
 static void source_handle_cancel(Display *d, void *proxy)
 {
     MwWlSource *s = source_by_proxy(d, proxy);
+    Atom sel = s ? s->selection : None;
     if (s) source_free(d, s);
+    if (sel == mw_xdnd_selection(d)) mw_xdnd_source_done(d);
     /* Losing our source means some other client took the selection;
      * re-evaluate who should own the X selection(s). */
     sync_x_owner(d);
@@ -518,7 +520,11 @@ static void source_cancelled(void *data, struct wl_data_source *src)
 static void source_drop(void *data, struct wl_data_source *src)
 { (void)data; (void)src; }
 static void source_finished(void *data, struct wl_data_source *src)
-{ (void)data; (void)src; }
+{
+    Display *d = data;
+    MwWlSource *s = source_by_proxy(d, src);
+    if (s && s->selection == mw_xdnd_selection(d)) mw_xdnd_source_done(d);
+}
 static void source_action(void *data, struct wl_data_source *src, uint32_t a)
 { (void)data; (void)src; (void)a; }
 
@@ -542,6 +548,25 @@ static const struct zwp_primary_selection_source_v1_listener prim_source_listene
     .send = prim_source_send,
     .cancelled = prim_source_cancelled,
 };
+
+/* Create a Wayland data source carrying `selection`, using the same send
+ * listener as the clipboard, and register it.  The XDND bridge uses this for an
+ * X client's drag (which drives wl_data_device.start_drag, not a selection). */
+struct wl_data_source *mw_clipboard_make_source(Display *d, Atom selection)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (!dp->dnd_mgr) return NULL;
+    struct wl_data_source *src = wl_data_device_manager_create_data_source(dp->dnd_mgr);
+    if (!src) return NULL;
+    wl_data_source_add_listener(src, &source_listener, d);
+    MwWlSource *s = calloc(1, sizeof *s);
+    if (!s) { wl_data_source_destroy(src); return NULL; }
+    s->source = src;
+    s->selection = selection;
+    s->next = dp->wl_sources;
+    dp->wl_sources = s;
+    return src;
+}
 
 /* ----------------------------------------------------------- data device */
 

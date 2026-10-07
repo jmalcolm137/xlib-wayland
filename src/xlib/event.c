@@ -98,6 +98,8 @@ void mw_put_event(Display *d, XEvent *ev)
     XDisplayImpl *dp = MWD(d);
     /* A SelectionNotify for our hidden clipboard window belongs to an
      * in-flight X->Wayland transfer; completing it consumes the event. */
+    if (ev->type == SelectionNotify && mw_xdnd_notify(d, &ev->xselection))
+        return;
     if (ev->type == SelectionNotify && dp->clip_window != None &&
         ev->xselection.requestor == dp->clip_window &&
         mw_clipboard_serve_notify(d, &ev->xselection))

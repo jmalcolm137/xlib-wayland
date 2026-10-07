@@ -207,6 +207,12 @@ if get_option('tests')
     link_with: libx11,
     install: false)
 
+  # X XDND drag source (owns XdndSelection) for the X->Wayland XDND path.
+  executable('xdnd_src_x', 'tests/xdnd_src_x.c',
+    include_directories: inc,
+    link_with: libx11,
+    install: false)
+
   # Drag source for the Motif DnD bridge: a Wayland toplevel that starts a
   # drag on button press, so a CDE drop target can be exercised with the
   # virtual-pointer tools.

@@ -1025,10 +1025,24 @@ bool      mw_xdnd_xconvert(Display *d, Atom selection, Atom target, Atom propert
                            Window requestor, Time time);
 /* A ClientMessage from the target (XdndStatus / XdndFinished) to our source
  * window.  Returns true when it was ours and should not be queued. */
+/* A ClientMessage from the target (XdndStatus / XdndFinished) to our source
+ * window.  Returns true when it was ours and should not be queued. */
 bool      mw_xdnd_client_message(Display *d, XClientMessageEvent *cm);
 /* The dropped bytes have arrived: stash them and tell the target it may drop. */
 void      mw_xdnd_store_drop(Display *d, const unsigned char *data, size_t len);
+/* X→Wayland: an X client took XdndSelection (a GDK drag started); drive a
+ * Wayland drag for it. */
+void      mw_xdnd_selection_changed(Display *d, Atom selection, Window owner);
+/* A SelectionNotify to the clip window: the TARGETS reply for a drag start.
+ * Returns true when it was ours and should not be queued. */
+bool      mw_xdnd_notify(Display *d, XSelectionEvent *se);
+/* The Wayland drag carrying an X source finished/was cancelled. */
+void      mw_xdnd_source_done(Display *d);
 Atom      mw_xdnd_selection(Display *d);
+
+/* Create a Wayland data source bound to `selection` (with the clipboard's send
+ * listener) and add it to the display's source list (clipboard.c). */
+struct wl_data_source *mw_clipboard_make_source(Display *d, Atom selection);
 
 /* Start fetching `mime` from a Wayland offer and serving it to an X requestor
  * as `selection`/`target` (clipboard.c). */
