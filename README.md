@@ -44,6 +44,7 @@ Wayland compositor:
 | XDND drag-and-drop bridged to Wayland (both directions) | ✅ done ([docs/XDND-STATUS.md](docs/XDND-STATUS.md)); Motif DnD also bridged (`dnd.c`) |
 | XFIXES (`libXfixes`): selection-owner notifications for GDK | ✅ done ([docs/XFIXES-STATUS.md](docs/XFIXES-STATUS.md)) |
 | Xcursor (`libXcursor`): themed/image cursors for GDK | ✅ done ([docs/XFIXES-STATUS.md](docs/XFIXES-STATUS.md)) |
+| Xext (`libXext`): SHAPE, MIT-SHM, Sync, extutil | ✅ done ([docs/XEXT-STATUS.md](docs/XEXT-STATUS.md)) |
 
 The GTK2 / MATE 1.10 / GIMP 2.10 targets are built and run by the
 [`gtk2-wayland`](https://github.com/jmalcolm137/gtk2-wayland) project; their
