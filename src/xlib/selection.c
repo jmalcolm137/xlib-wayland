@@ -44,6 +44,7 @@ int XSetSelectionOwner(Display *d, Atom selection, Window owner, Time time)
     mw_broker_owner_changed(d, selection, owner);
     mw_dnd_selection_changed(d, selection, owner);
     mw_xdnd_selection_changed(d, selection, owner);
+    mw_xfixes_selection_notify(d, selection, owner, time);
     if (old != None && old != owner) {
         MwWindow *w = mw_window(d, old);
         if (w) {

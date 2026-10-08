@@ -267,6 +267,7 @@ Display *XOpenDisplay(_Xconst char *display_name)
     mw_xim_init(d);
     mw_xsettings_init(d);
     mw_shape_init(d);
+    mw_xfixes_init(d);
 
     /* The keymap comes from the compositor, but keymap-aware clients read the
      * layout names off the root window -- `setxkbmap -query` prints these. */
@@ -357,6 +358,7 @@ int XCloseDisplay(Display *d)
     mw_cursor_fini(d);
     mw_xdnd_fini(d);
     mw_xsettings_fini(d);
+    mw_xfixes_fini(d);
     mw_fini_selection(d);
     mw_keymap_fini(d);
     mw_wl_disconnect(dp);

@@ -116,7 +116,28 @@ struct MwCursor {
     unsigned int              shape;   /* cursor-shape-v1 enum, 0 = none */
     uint32_t                  fg, bg;
     bool                      created_surface;
+    /* XFixesChangeCursor support: a cursor whose image was replaced. */
+    Cursor                    alias_to;
+    /* An ARGB cursor built from an XcursorImage (libXcursor), if any. */
+    uint32_t                 *img_pixels;
+    int                       img_w, img_h, img_hx, img_hy;
+    struct wl_buffer         *img_buffer;
 };
+
+/* An XFIXES selection-input registration (GDK uses these to learn when the
+ * clipboard owner changes, including across shim processes). */
+typedef struct MwXfixesSel {
+    Window                window;
+    Atom                  selection;
+    unsigned long         mask;
+    struct MwXfixesSel   *next;
+} MwXfixesSel;
+
+/* A region handle returned by XFixesCreateRegion (opaque to clients). */
+typedef struct MwXfixesRegion {
+    unsigned long           id;
+    struct MwXfixesRegion  *next;
+} MwXfixesRegion;
 
 /* An Xlib font object: an XFontStruct plus the raster font used to draw. */
 struct MwXFont {
@@ -694,6 +715,13 @@ typedef struct _XDisplayImpl {
     struct wl_cursor_theme     *cursor_theme;
     int                         cursor_theme_size;
     MwCursor                   *default_cursor;   /* left_ptr fallback */
+    char                       *xcursor_theme;    /* XcursorSetTheme */
+    int                         xcursor_size;     /* XcursorSetDefaultSize */
+
+    /* XFIXES (xfixes.c) */
+    MwXfixesSel                *xfixes_sels;
+    MwXfixesRegion             *xfixes_regions;
+    unsigned long               xfixes_next_region;
 } XDisplayImpl;
 
 #define MWD(d)     ((XDisplayImpl *)(d))
@@ -1005,6 +1033,32 @@ bool      mw_dnd_source_send(Display *d, const char *mime, int fd);
 /* cursor (cursor.c) */
 void      mw_cursor_init(Display *d);
 void      mw_cursor_fini(Display *d);
+/* Xcursor support (used by the libXcursor facade): load a themed cursor by
+ * freedesktop name, and (re)load the theme.  Returns None if unavailable. */
+Cursor    mw_cursor_load_named(Display *d, const char *name);
+Cursor    mw_cursor_load_shape(Display *d, unsigned int shape);
+Cursor    mw_cursor_from_image(Display *d, int w, int h, int xhot, int yhot,
+                               const uint32_t *pixels);
+char     *mw_cursor_theme_get(Display *d);
+int       mw_cursor_size_get(Display *d);
+void      mw_cursor_theme_set(Display *d, const char *theme);
+void      mw_cursor_size_set(Display *d, int size);
+
+/* XFIXES (xfixes.c): the subset GDK uses for clipboard owner-change
+ * notifications, regions and cursor changes.  The public entry points live in
+ * the libXfixes facade (src/xfixes/xfixes.c), which calls these. */
+#define MW_XFIXES_EVENT_BASE 128
+#define MW_XFIXES_ERROR_BASE 128
+Bool      mw_xfixes_query(int *event_base, int *error_base);
+void      mw_xfixes_init(Display *d);
+void      mw_xfixes_fini(Display *d);
+void      mw_xfixes_select_input(Display *d, Window w, Atom selection,
+                                 unsigned long mask);
+void      mw_xfixes_selection_notify(Display *d, Atom selection, Window owner,
+                                     Time time);
+unsigned long mw_xfixes_new_region(Display *d);
+void      mw_xfixes_free_region(Display *d, unsigned long region);
+void      mw_xfixes_change_cursor(Display *d, Cursor image, Cursor target);
 
 /* XDND (xdnd.c): bridge the XDND drag-and-drop protocol to the Wayland data
  * device, the same way the Motif bridge does for Motif DnD.  As the X side, the

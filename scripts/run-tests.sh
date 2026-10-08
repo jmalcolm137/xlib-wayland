@@ -271,6 +271,35 @@ else
     exit 1
 fi
 
+say "XFIXES owner-change notification and Xcursor facades"
+# GDK links libXfixes/libXcursor; the shim supplies its own facades (installed
+# over the host's sonames).  A raw-Xlib client exercises both: registering for
+# a selection's owner changes must yield an XFixesSelectionNotify (which GDK
+# turns into a clipboard owner-change), and the themed/image cursor loads must
+# return real X cursors.
+XFSOCK="mwfx$$"
+XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+    --socket "$XFSOCK" --size 200x200 --timeout 6 \
+    --output "$WORK/xfixes.png" >"$WORK/xfixes.ready" 2>"$WORK/xfixes.hc" &
+XFHC=$!
+for _ in $(seq 1 100); do
+    grep -q READY "$WORK/xfixes.ready" 2>/dev/null && break; sleep 0.05
+done
+XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XFSOCK" \
+    LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    "$BUILD/xfixes_x" >"$WORK/xfixes.out" 2>&1
+XF=$?
+kill "$XFHC" 2>/dev/null || true
+wait "$XFHC" 2>/dev/null || true
+if [ "$XF" = 0 ] && grep -q 'XFIXES:GOT' "$WORK/xfixes.out" \
+   && grep -Eq 'XCURSOR:.* shape=[1-9][0-9]* image=[1-9][0-9]*' "$WORK/xfixes.out"; then
+    echo "  ok   XFIXES reported the owner change; Xcursor loaded cursors"
+else
+    echo "  FAIL: XFIXES/Xcursor facades"
+    sed 's/^/  /' "$WORK/xfixes.out"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys

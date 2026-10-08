@@ -79,7 +79,7 @@ xlib_sources = files(
   'src/xlib/xim.c', 'src/xlib/xi2.c', 'src/xlib/xkb.c', 'src/xlib/xmb.c', 'src/xlib/xtcompat.c', 'src/xlib/xlibint.c',
   'src/xlib/xresources.c', 'src/xlib/xftbridge.c', 'src/xlib/render.c',
   'src/xlib/xshape.c', 'src/xlib/broker.c', 'src/xlib/smprops.c', 'src/xlib/dnd.c',
-  'src/xlib/xsettings.c', 'src/xlib/xdnd.c')
+  'src/xlib/xsettings.c', 'src/xlib/xdnd.c', 'src/xlib/xfixes.c')
 
 # Installed as libX11.so.6 so that -lX11, dlopen("libX11.so.6") and the
 # transitive dependency of libXext/libXrender/libcairo all resolve to us.
@@ -152,6 +152,45 @@ pkg.generate(libxrandr,
   requires: 'x11',
   subdirs: 'X11')
 
+# libXfixes: GDK uses XFixes for clipboard owner-change notifications,
+# regions and cursor changes.  Shadowing the host's libXfixes.so.3 (same
+# soname) keeps GDK from sending XFixes protocol we do not speak; the work is
+# in src/xlib/xfixes.c.
+libxfixes = shared_library('Xfixes',
+  'src/xfixes/xfixes.c',
+  include_directories: inc,
+  link_with: libx11,
+  version: '6.0.2',
+  soversion: '3',
+  install: true)
+
+pkg.generate(libxfixes,
+  name: 'xfixes',
+  filebase: 'xfixes',
+  version: '6.0.2',
+  description: 'XFixes over the Motif/Wayland shim',
+  requires: 'x11',
+  subdirs: 'X11')
+
+# libXcursor: GDK loads themed cursors through it.  Named/shape lookups become
+# Wayland cursor-theme lookups and image cursors become ARGB Wayland cursor
+# buffers (src/xlib/cursor.c).
+libxcursor = shared_library('Xcursor',
+  'src/xcursor/xcursor.c',
+  include_directories: inc,
+  link_with: libx11,
+  version: '1.2.3',
+  soversion: '1',
+  install: true)
+
+pkg.generate(libxcursor,
+  name: 'xcursor',
+  filebase: 'xcursor',
+  version: '1.2.3',
+  description: 'X cursor loading over the Motif/Wayland shim',
+  requires: 'x11',
+  subdirs: 'X11')
+
 # ---------------------------------------------------------------- tests/tools
 
 if get_option('tests')
@@ -206,6 +245,13 @@ if get_option('tests')
   executable('xdnd_x', 'tests/xdnd_x.c',
     include_directories: inc,
     link_with: libx11,
+    install: false)
+
+  # XFIXES / Xcursor facades: selection-owner notification + themed cursors.
+  executable('xfixes_x', 'tests/xfixes_x.c',
+    include_directories: inc,
+    dependencies: [wl_dep],
+    link_with: [libx11, libxfixes, libxcursor],
     install: false)
 
   # X XDND drag source (owns XdndSelection) for the X->Wayland XDND path.

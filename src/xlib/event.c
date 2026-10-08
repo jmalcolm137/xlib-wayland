@@ -1,6 +1,7 @@
 /* event.c — XEvent queue, event retrieval, error delivery, synthetic events. */
 #include "internal.h"
 
+#include <X11/extensions/Xfixes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -89,6 +90,9 @@ static size_t mw_event_size(int type)
     case ClientMessage:                        return sizeof(XClientMessageEvent);
     case MappingNotify:                        return sizeof(XMappingEvent);
     case GenericEvent:                         return sizeof(XGenericEvent);
+    /* The XFIXES selection-notify event is larger than XAnyEvent; copy it in
+     * full so its owner/selection/timestamp fields survive. */
+    case MW_XFIXES_EVENT_BASE:                 return sizeof(XFixesSelectionNotifyEvent);
     default:                                   return sizeof(XAnyEvent);
     }
 }
