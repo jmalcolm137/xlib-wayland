@@ -6,6 +6,7 @@
 #include <X11/Xutil.h>
 #include <X11/extensions/Xcomposite.h>
 #include <X11/extensions/Xdamage.h>
+#include <X11/extensions/Xrender.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -32,12 +33,16 @@ int main(void)
     Atom cm = XInternAtom(d, "_NET_WM_CM_S0", False);
     int comp_ok = XGetSelectionOwner(d, cm) != None;
 
-    int eb = 0, erb = 0;
-    Bool composite = XCompositeQueryExtension(d, &eb, &erb);
+    int eb2 = 0, erb2 = 0;
+    Bool composite = XCompositeQueryExtension(d, &eb2, &erb2);
     int cmaj = 0, cmin = 0;
     if (composite) XCompositeQueryVersion(d, &cmaj, &cmin);
     int deb = 0, derb = 0;
     Bool damage = XDamageQueryExtension(d, &deb, &derb);
+
+    /* libXrender resolves visual ids through Xlib's _XVIDtoVisual and matches
+     * the pointer, so the 32-bit visual must be recognised there too. */
+    int renderfmt = list && XRenderFindVisualFormat(d, list[0].visual) != NULL;
 
     Window root = DefaultRootWindow(d);
     Colormap cmap = XCreateColormap(d, root, list[0].visual, AllocNone);
@@ -78,8 +83,9 @@ int main(void)
         if (!got) usleep(10000);
     }
 
-    printf("COMPOSITE:rgba=%d cm=%d composite=%d xcomp=%d.%d damage=%d alpha=%02x notify=%d\n",
-           rgba_ok, comp_ok, composite, cmaj, cmin, damage, alpha, got);
+    printf("COMPOSITE:rgba=%d cm=%d composite=%d xcomp=%d.%d damage=%d renderfmt=%d alpha=%02x notify=%d\n",
+           rgba_ok, comp_ok, composite, cmaj, cmin, damage, renderfmt, alpha, got);
 
-    return (rgba_ok && comp_ok && composite && damage && alpha < 0xff && got) ? 0 : 1;
+    return (rgba_ok && comp_ok && composite && damage && renderfmt &&
+            alpha < 0xff && got) ? 0 : 1;
 }

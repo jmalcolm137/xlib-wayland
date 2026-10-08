@@ -321,7 +321,7 @@ if get_option('tests')
   # Compositing path: depth-32 ARGB visual, _NET_WM_CM_S0, XComposite/XDamage.
   executable('composite_x', 'tests/composite_x.c',
     include_directories: inc,
-    dependencies: [wl_dep],
+    dependencies: [wl_dep, dependency('xrender')],
     link_with: [libx11, libxcomposite, libxdamage],
     install: false)
 

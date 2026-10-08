@@ -189,6 +189,10 @@ int _XGetScanlinePad(Display *d, int depth)
 Visual *_XVIDtoVisual(Display *d, VisualID vid)
 {
     if (vid == MWD(d)->visual.visualid) return &MWD(d)->visual;
+    /* libXrender resolves the visual ids in its QueryPictFormats reply through
+     * this and then matches the returned Visual* against the one it is asked
+     * about, so the depth-32 ARGB visual has to be recognised too. */
+    if (vid == MWD(d)->visual32.visualid) return &MWD(d)->visual32;
     return NULL;
 }
 

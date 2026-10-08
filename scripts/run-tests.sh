@@ -348,7 +348,7 @@ CP=$?
 kill "$CPHC" 2>/dev/null || true
 wait "$CPHC" 2>/dev/null || true
 if [ "$CP" = 0 ] && grep -Eq \
-   'COMPOSITE:rgba=1 cm=1 composite=1 xcomp=0.4 damage=1 alpha=[0-9a-e][0-9a-f] notify=1' \
+   'COMPOSITE:rgba=1 cm=1 composite=1 xcomp=0.4 damage=1 renderfmt=1 alpha=[0-9a-e][0-9a-f] notify=1' \
    "$WORK/composite.out"; then
     echo "  ok   depth-32 visual, composited screen, alpha preserved, damage delivered"
 else
