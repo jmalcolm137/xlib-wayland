@@ -387,6 +387,43 @@ else
     exit 1
 fi
 
+say "X11 session protocol relayed across shim processes"
+# A client opts into WM_SAVE_YOURSELF / WM_DELETE_WINDOW via WM_PROTOCOLS; a
+# session manager in another process relays "save"/"close" over the shim's
+# session socket and the client receives the ClientMessages.
+SSOCK="mwss$$"
+XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+    --socket "$SSOCK" --size 200x200 --timeout 10 \
+    --output "$WORK/sess.png" >"$WORK/sess.ready" 2>"$WORK/sess.hc" &
+SSHC=$!
+for _ in $(seq 1 100); do
+    grep -q READY "$WORK/sess.ready" 2>/dev/null && break; sleep 0.05
+done
+XLIB_WAYLAND_SESSION=1 LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$SSOCK" \
+    "$BUILD/session_x" >"$WORK/sess.out" 2>&1 &
+SSP=$!
+for _ in $(seq 1 100); do
+    grep -q SESSION:READY "$WORK/sess.out" 2>/dev/null && break; sleep 0.05
+done
+XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/mw-session" save >>"$WORK/sess.out" 2>&1
+for _ in $(seq 1 100); do
+    grep -q SESSION:SAVE "$WORK/sess.out" 2>/dev/null && break; sleep 0.05
+done
+XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/mw-session" close >>"$WORK/sess.out" 2>&1
+for _ in $(seq 1 100); do
+    grep -q SESSION:RESULT "$WORK/sess.out" 2>/dev/null && break; sleep 0.05
+done
+kill "$SSP" "$SSHC" 2>/dev/null || true
+wait "$SSHC" 2>/dev/null || true
+if grep -q 'SESSION:RESULT save=1 close=1' "$WORK/sess.out"; then
+    echo "  ok   WM_SAVE_YOURSELF and WM_DELETE_WINDOW relayed across processes"
+else
+    echo "  FAIL: session protocol"
+    sed 's/^/  /' "$WORK/sess.out"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys

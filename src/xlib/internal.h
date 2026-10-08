@@ -748,6 +748,10 @@ typedef struct _XDisplayImpl {
 
     /* XInput2 event selection: per-window masks set by XISelectEvents. */
     MwXiSelect                 *xi_selects;
+
+    /* X11 session protocol relay (session.c). */
+    int                         session_fd;
+    char                        session_path[192];
 } XDisplayImpl;
 
 #define MWD(d)     ((XDisplayImpl *)(d))
@@ -818,6 +822,14 @@ void       mw_xi2_touch(Display *d, Window win, int evtype, int touchid,
 /* The id of the touch device, or 0 when the seat has no touch. */
 int        mw_xi2_touch_device(Display *d);
 void       mw_xi2_fini(Display *d);
+
+/* X11 session protocol (session.c): deliver WM_SAVE_YOURSELF / WM_DELETE_WINDOW
+ * to opted-in top-level windows, relayed from a session manager in another shim
+ * process over a per-process Unix socket. */
+void       mw_session_init(Display *d);
+void       mw_session_fini(Display *d);
+int        mw_session_poll_fd(Display *d);
+void       mw_session_handle_ready(Display *d);
 
 /* Absolute (root) origin of a window's content. */
 void mw_window_origin(MwWindow *win, int *x, int *y);

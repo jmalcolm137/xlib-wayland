@@ -250,7 +250,8 @@ void mw_block_for_events(Display *d)
      * drag, would wait for an unrelated Wayland event. */
     int cfd = mw_clipboard_poll_fd(d);
     int bfd = mw_broker_poll_fd(d);
-    if (cfd < 0 && bfd < 0 && rtimeout < 0 && dtimeout < 0) {
+    int sfd = mw_session_poll_fd(d);
+    if (cfd < 0 && bfd < 0 && sfd < 0 && rtimeout < 0 && dtimeout < 0) {
         if (wl_display_dispatch(dp->wl_display) < 0)
             mw_io_error(d, "Wayland connection closed");
         mw_input_settle(d);
@@ -262,20 +263,22 @@ void mw_block_for_events(Display *d)
             if (!dp->closed) mw_io_error(d, "Wayland connection error");
             mw_clipboard_handle_ready(d);
     mw_broker_handle_ready(d);
+    mw_session_handle_ready(d);
             return;
         }
     }
     wl_display_flush(dp->wl_display);
 
-    struct pollfd pfd[3];
+    struct pollfd pfd[4];
     int np = 0;
     pfd[np].fd = dp->wl_fd; pfd[np].events = POLLIN; pfd[np].revents = 0; np++;
     if (cfd >= 0) { pfd[np].fd = cfd; pfd[np].events = POLLIN; pfd[np].revents = 0; np++; }
     if (bfd >= 0) { pfd[np].fd = bfd; pfd[np].events = POLLIN; pfd[np].revents = 0; np++; }
+    if (sfd >= 0) { pfd[np].fd = sfd; pfd[np].events = POLLIN; pfd[np].revents = 0; np++; }
 
     int timeout = rtimeout >= 0 ? rtimeout : 100;
     if (dtimeout >= 0 && dtimeout < timeout) timeout = dtimeout;
-    if ((cfd >= 0 || bfd >= 0) && timeout > 100) timeout = 100;
+    if ((cfd >= 0 || bfd >= 0 || sfd >= 0) && timeout > 100) timeout = 100;
     int r = poll(pfd, np, timeout);
     if (r > 0 && pfd[0].revents) {
         if (wl_display_read_events(dp->wl_display) < 0) {
@@ -290,6 +293,7 @@ void mw_block_for_events(Display *d)
     mw_input_settle(d);
     mw_clipboard_handle_ready(d);
     mw_broker_handle_ready(d);
+    mw_session_handle_ready(d);
     mw_kbd_repeat_pump(d);
     mw_dnd_pump(d);
     mw_xsettings_pump(d);
@@ -323,11 +327,13 @@ void mw_process_events(Display *d, bool block)
     /* canonical non-blocking read */
     if (wl_display_prepare_read(dp->wl_display) == 0) {
         wl_display_flush(dp->wl_display);
-        struct pollfd pfd[2];
+        struct pollfd pfd[3];
         int n = 0;
         pfd[n].fd = dp->wl_fd; pfd[n].events = POLLIN; pfd[n].revents = 0; n++;
         int cfd = mw_clipboard_poll_fd(d);
         if (cfd >= 0) { pfd[n].fd = cfd; pfd[n].events = POLLIN; pfd[n].revents = 0; n++; }
+        int sfd = mw_session_poll_fd(d);
+        if (sfd >= 0) { pfd[n].fd = sfd; pfd[n].events = POLLIN; pfd[n].revents = 0; n++; }
         int r = poll(pfd, n, 0);
         if (r > 0 && pfd[0].revents) {
             if (wl_display_read_events(dp->wl_display) < 0) {
@@ -343,4 +349,5 @@ void mw_process_events(Display *d, bool block)
     mw_input_settle(d);
     mw_clipboard_handle_ready(d);
     mw_broker_handle_ready(d);
+    mw_session_handle_ready(d);
 }

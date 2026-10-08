@@ -80,7 +80,7 @@ xlib_sources = files(
   'src/xlib/xresources.c', 'src/xlib/xftbridge.c', 'src/xlib/render.c',
   'src/xlib/xshape.c', 'src/xlib/broker.c', 'src/xlib/smprops.c', 'src/xlib/dnd.c',
   'src/xlib/xsettings.c', 'src/xlib/xdnd.c', 'src/xlib/xfixes.c', 'src/xlib/xsync.c',
-  'src/xlib/xdamage.c')
+  'src/xlib/xdamage.c', 'src/xlib/session.c')
 
 # Installed as libX11.so.6 so that -lX11, dlopen("libX11.so.6") and the
 # transitive dependency of libXext/libXrender/libcairo all resolve to us.
@@ -332,6 +332,13 @@ if get_option('tests')
     link_with: [libx11],
     install: false)
 
+  # X11 session protocol: WM_SAVE_YOURSELF / WM_DELETE_WINDOW relayed.
+  executable('session_x', 'tests/session_x.c',
+    include_directories: inc,
+    dependencies: [wl_dep],
+    link_with: [libx11],
+    install: false)
+
   # X XDND drag source (owns XdndSelection) for the X->Wayland XDND path.
   executable('xdnd_src_x', 'tests/xdnd_src_x.c',
     include_directories: inc,
@@ -393,4 +400,7 @@ if get_option('tools')
     include_directories: inc,
     dependencies: [wl_server_dep, xkb_dep, dependency('libpng')],
     install: false)
+
+  # Relay an X session command ("save"/"close") to every shim process.
+  executable('mw-session', 'tools/mw-session.c', install: false)
 endif

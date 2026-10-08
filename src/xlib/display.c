@@ -146,6 +146,10 @@ Display *XOpenDisplay(_Xconst char *display_name)
     XDisplayImpl *dp = calloc(1, sizeof *dp);
     Display *d = (Display *)dp;
 
+    /* -1, not 0: the wake thread must not poll stdin before the session socket
+     * is set up. */
+    dp->session_fd = -1;
+
     dp->proto_major_version = 11;
     dp->proto_minor_version = 0;
     dp->vendor = strdup("Motif/Wayland");
@@ -281,6 +285,7 @@ Display *XOpenDisplay(_Xconst char *display_name)
     mw_shape_init(d);
     mw_xfixes_init(d);
     mw_xdamage_init(d);
+    mw_session_init(d);
 
     /* Own _NET_WM_CM_S0 so GDK considers the screen composited.  Under Wayland
      * there is no separate X compositor -- the Wayland compositor blends our
@@ -383,6 +388,7 @@ int XCloseDisplay(Display *d)
     mw_xfixes_fini(d);
     mw_xdamage_fini(d);
     mw_xi2_fini(d);
+    mw_session_fini(d);
     mw_fini_selection(d);
     mw_keymap_fini(d);
     mw_wl_disconnect(dp);

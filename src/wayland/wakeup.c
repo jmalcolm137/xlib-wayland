@@ -51,12 +51,13 @@ static void *wake_thread(void *arg)
             if (timeout > 1000) timeout = 1000;
         }
 
-        struct pollfd pfd[3] = {
+        struct pollfd pfd[4] = {
             { dp->wl_fd,     POLLIN, 0 },
             { dp->wake_stop, POLLIN, 0 },
             { dp->wake_cmd,  POLLIN, 0 },
+            { dp->session_fd, POLLIN, 0 },
         };
-        int r = poll(pfd, 3, timeout);
+        int r = poll(pfd, 4, timeout);
         if (r < 0) {
             if (errno == EINTR) continue;
             break;
@@ -70,6 +71,10 @@ static void *wake_thread(void *arg)
             continue;
         }
         if (pfd[0].revents & POLLIN) {      /* Wayland has data to read */
+            wake_signal(dp);
+            continue;
+        }
+        if (pfd[3].revents & POLLIN) {      /* a session command arrived */
             wake_signal(dp);
             continue;
         }
