@@ -232,6 +232,45 @@ else
     exit 1
 fi
 
+say "XDND: an X drag drops onto a Wayland target"
+# The reverse direction.  A raw-Xlib client owns XdndSelection (which is what
+# GDK does when a drag starts) and serves a target; the shim notices, asks for
+# the target list, drives a Wayland drag, and serves the data by converting
+# XdndSelection.  A Wayland drop target receives it.  Start the target second so
+# it is the most recently mapped toplevel (what the compositor routes to).
+XSRCSOCK="mwxsrc$$"
+printf 'sleep 2500\nmotion 100 50\nsleep 800\nbutton press left\nbutton release left\nsleep 1500\n' \
+    > "$WORK/xsrc.input"
+HC_TRACE=1 XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+    --socket "$XSRCSOCK" --size 400x300 --timeout 8 \
+    --output "$WORK/xsrc.png" --input "$WORK/xsrc.input" \
+    >"$WORK/xsrc.ready" 2>"$WORK/xsrc.hc" &
+XSRCHC=$!
+for _ in $(seq 1 100); do
+    grep -q READY "$WORK/xsrc.ready" 2>/dev/null && break; sleep 0.05
+done
+XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XSRCSOCK" \
+    LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    "$BUILD/xdnd_src_x" >"$WORK/xsrc.src" 2>&1 &
+XSRC=$!
+sleep 0.6
+XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XSRCSOCK" \
+    LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    "$BUILD/drag_target_wl" >"$WORK/xsrc.tgt" 2>&1 &
+XSRCT=$!
+for _ in $(seq 1 300); do
+    grep -q 'WLDRAG:GOT\|WLDRAG:NONE\|WLDRAG:TIMEOUT' "$WORK/xsrc.tgt" 2>/dev/null && break; sleep 0.05
+done
+kill "$XSRC" "$XSRCT" "$XSRCHC" 2>/dev/null || true
+wait "$XSRCHC" 2>/dev/null || true
+if grep -q 'WLDRAG:GOT file:///tmp/from-x' "$WORK/xsrc.tgt"; then
+    echo "  ok   the Wayland target received the X drag's data"
+else
+    echo "  FAIL: X->Wayland XDND drop did not deliver"
+    sed 's/^/  /' "$WORK/xsrc.tgt"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys

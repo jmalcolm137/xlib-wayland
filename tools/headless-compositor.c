@@ -1793,6 +1793,10 @@ static void data_offer_receive(struct wl_client *client,
 	(void)client;
 
 	if (offer && offer->source && offer->source->resource) {
+		if (getenv("HC_TRACE"))
+			fprintf(stderr, "HC: offer_receive mime=%s src=%p ver=%u\n",
+				mime_type, (void*)offer->source->resource,
+				wl_resource_get_version(offer->source->resource));
 		if (offer->primary)
 			zwp_primary_selection_source_v1_send_send(offer->source->resource,
 								  mime_type, fd);
@@ -1974,6 +1978,8 @@ static void drag_enter(struct mw_compositor *comp, struct mw_surface *surface,
 {
 	if (!comp->drag_source || !surface)
 		return;
+	if (getenv("HC_TRACE"))
+		fprintf(stderr, "HC: drag_enter surface=%p\n", (void*)surface);
 	struct wl_resource *dev = data_device_for_client(comp,
 			wl_resource_get_client(surface->resource));
 	if (!dev)
@@ -2015,6 +2021,9 @@ static void drag_motion(struct mw_compositor *comp, int x, int y)
 
 static void drag_drop(struct mw_compositor *comp)
 {
+	if (getenv("HC_TRACE"))
+		fprintf(stderr, "HC: drag_drop device=%p source=%p\n",
+			(void*)comp->drag_device, (void*)comp->drag_source);
 	if (comp->drag_device)
 		wl_data_device_send_drop(comp->drag_device);
 	if (comp->drag_source && comp->drag_source->resource)
@@ -2044,6 +2053,9 @@ static void data_device_start_drag(struct wl_client *client,
 	comp->drag_surface = NULL;
 	comp->drag_device = NULL;
 	comp->drag_offer = NULL;
+	if (getenv("HC_TRACE"))
+		fprintf(stderr, "HC: start_drag source=%p active=%d serial=%u\n",
+			(void*)source, comp->drag_active, serial);
 }
 
 static void data_device_set_selection(struct wl_client *client,

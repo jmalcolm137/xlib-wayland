@@ -214,6 +214,13 @@ if get_option('tests')
     link_with: libx11,
     install: false)
 
+  # Wayland drop target for the X->Wayland XDND path: maps a toplevel, accepts
+  # the drag and receives the data the X source serves through the shim.
+  executable('drag_target_wl', 'tests/drag_target_wl.c', client_protos,
+    include_directories: inc,
+    dependencies: [wl_dep],
+    install: false)
+
   # Drag source for the Motif DnD bridge: a Wayland toplevel that starts a
   # drag on button press, so a CDE drop target can be exercised with the
   # virtual-pointer tools.
