@@ -1037,10 +1037,65 @@ int XReparentWindow(Display *d, Window w, Window parent, int x, int y)
 {
     MwWindow *win = mw_window(d, w);
     MwWindow *par = mw_window(d, parent);
-    if (!win || !par) return 0;
+    if (!win || !par || win == par) return 0;
+    MwWindow *old = win->parent;
+
     unlink_child(win);
     link_top(par, win);
-    win->x = x; win->y = y;
+    win->x = x;
+    win->y = y;
+
+    /* Moving to or from the root changes what the window *is*.  A window
+     * reparented into another window becomes an ordinary child and must be
+     * composited into its ancestor's toplevel (XEmbed's plug into its socket),
+     * not keep a Wayland surface of its own; one reparented to the root becomes
+     * a toplevel again. */
+    if (is_root(d, par)) {
+        if (win->mapped) {
+            if (!win->tl) mw_toplevel_create(win);
+            mw_toplevel_map(win->tl);
+        }
+    } else {
+        if (win->tl) {
+            MwToplevel *tl = win->tl;
+            win->tl = NULL;
+            mw_toplevel_destroy(tl);
+        }
+        if (win->mapped && !win->input_only)
+            mw_window_ensure_surface(win);
+    }
+
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: XReparentWindow 0x%lx into 0x%lx at %d,%d\n",
+                (unsigned long)w, (unsigned long)parent, x, y);
+
+    /* ReparentNotify to the window itself -- an XEmbed plug learns which
+     * window it was embedded into from xre->parent -- and to the old and new
+     * parents when they selected SubstructureNotify. */
+    XReparentEvent re;
+    if (win->event_mask & StructureNotifyMask) {
+        memset(&re, 0, sizeof re);
+        re.type = ReparentNotify; re.display = d; re.event = win->id;
+        re.window = win->id; re.parent = par->id; re.x = x; re.y = y;
+        re.override_redirect = win->override_redirect;
+        mw_put_event(d, (XEvent *)&re);
+    }
+    if (old && old != par && (old->event_mask & SubstructureNotifyMask)) {
+        memset(&re, 0, sizeof re);
+        re.type = ReparentNotify; re.display = d; re.event = old->id;
+        re.window = win->id; re.parent = par->id; re.x = x; re.y = y;
+        re.override_redirect = win->override_redirect;
+        mw_put_event(d, (XEvent *)&re);
+    }
+    if (par->event_mask & SubstructureNotifyMask) {
+        memset(&re, 0, sizeof re);
+        re.type = ReparentNotify; re.display = d; re.event = par->id;
+        re.window = win->id; re.parent = par->id; re.x = x; re.y = y;
+        re.override_redirect = win->override_redirect;
+        mw_put_event(d, (XEvent *)&re);
+    }
+
+    dispatch_configure_notify(d, win);
     mw_window_damage(win);
     return 1;
 }

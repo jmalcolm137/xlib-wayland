@@ -424,6 +424,34 @@ else
     exit 1
 fi
 
+say "XEmbed primitives (reparent + _XEMBED message)"
+# Cross-process XEmbed is impossible under Wayland (no cross-client surface
+# embedding); this exercises the same-process primitives: XReparentWindow moves
+# the plug into the socket and emits ReparentNotify, and XSendEvent delivers the
+# _XEMBED ClientMessage.
+XE_SOCK="mwxe$$"
+XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+    --socket "$XE_SOCK" --size 200x200 --timeout 8 \
+    --output "$WORK/xembed.png" >"$WORK/xembed.ready" 2>"$WORK/xembed.hc" &
+XEHC=$!
+for _ in $(seq 1 100); do
+    grep -q READY "$WORK/xembed.ready" 2>/dev/null && break; sleep 0.05
+done
+LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XE_SOCK" \
+    "$BUILD/xembed_x" >"$WORK/xembed.out" 2>&1
+XERC=$?
+kill "$XEHC" 2>/dev/null || true
+wait "$XEHC" 2>/dev/null || true
+if [ "$XERC" = 0 ] \
+   && grep -q 'XEMBED:reparent=1 geometry=1 message=1 info=1' "$WORK/xembed.out"; then
+    echo "  ok   reparent + ReparentNotify, _XEMBED message, _XEMBED_INFO"
+else
+    echo "  FAIL: XEmbed primitives"
+    sed 's/^/  /' "$WORK/xembed.out"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys
