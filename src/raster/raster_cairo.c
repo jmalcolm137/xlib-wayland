@@ -284,6 +284,7 @@ void mw_clip_mask(MwCanvas *c, MwSurface *mask, int x_org, int y_org)
      * their union, intersected with any existing clip.  This is exact (a
      * bounding box was not), and honours the clip-origin alignment.  An empty
      * mask clips everything, as X does. */
+    cairo_reset_clip(c->cr);
     cairo_new_path(c->cr);
     for (int y = 0; y < mh; y++) {
         const uint32_t *row = px + (size_t)y * stride;
