@@ -11,8 +11,10 @@
  *
  * This is deliberately a subset: it covers what a Motif application calls to
  * draw and measure strings, plus the picture accessors Render-drawing clients
- * (xclock's clock face, for one) use.  The glyph-upload Render entry points are
- * still stubs.
+ * (xclock's clock face, for one) use, and the Render-level glyph entry points
+ * Pango's Xft renderer calls.  It does not upload glyphs to a server; those
+ * Render-level entry points draw through the destination picture's drawable on
+ * the same raster path.
  */
 #include <X11/Xft/Xft.h>
 #include <X11/extensions/Xrender.h>
@@ -485,10 +487,10 @@ Picture XftDrawSrcPicture(XftDraw *draw, _Xconst XftColor *color)
  * those are implemented here on the shim's cairo font path.  The *Render-level*
  * ones (XftGlyphSpecRender, XftGlyphFontSpecRender, XftCharSpecRender, ...)
  * take Render Pictures -- a source and a destination -- and are the way a
- * Render-backed Xft uploads glyphs to a server.  The shim's Render backend
- * rasterises pictures but does not yet accept uploaded glyph sets, so these
- * glyph-upload entry points are still stubs; a caller that needs them (Pango's
- * legacy Xft renderer is the main one) draws nothing rather than mis-drawing.
+ * Render-backed Xft composites glyphs.  We implement them by drawing the run
+ * through the destination picture's drawable on the raster path above, using
+ * the source's colour when it is a solid fill; Pango's legacy Xft renderer
+ * takes this path when it has a source Picture.
  */
 
 static int ft_glyph_advance(XftFont *pub, FT_UInt glyph)
@@ -503,12 +505,14 @@ static int ft_glyph_advance(XftFont *pub, FT_UInt glyph)
 
 Bool XftDefaultHasRender(Display *dpy)
 {
-    /* Xft uses this to decide whether it can upload glyphs through the Render
-     * extension.  The shim has Render, but glyph upload is one of the stubs
-     * above, so it still answers no; callers that only need the draw-level API
-     * (and the picture accessors) work regardless. */
-    (void)dpy;
-    return False;
+    /* Whether Xft may draw through the Render extension.  It may: this shim
+     * implements Render, and the Render-level glyph entry points below are
+     * implemented on the raster path.  Pango's legacy Xft renderer draws
+     * nothing when this returns false, so reporting the truth matters.
+     * XQueryExtension honours the MW_RENDER=0 kill switch. */
+    int major, first_event, first_error;
+    if (!dpy) return False;
+    return XQueryExtension(dpy, "RENDER", &major, &first_event, &first_error);
 }
 
 void XftGlyphExtents(Display *dpy, XftFont *pub, _Xconst FT_UInt *glyphs,
@@ -611,10 +615,8 @@ FcBool XftInitFtLibrary(void) { return 1; }
  * These composite glyphs through Render Pictures rather than an XftDraw.  The
  * shim's Render pictures know their drawable, so a run is drawn with the same
  * raster path the draw-level API uses; the source is used as the text colour
- * when it is a solid fill.  Render glyph-set *upload* (XRenderCreateGlyphSet/
- * AddGlyphs) is still not implemented, so XftDefaultHasRender() stays false and
- * pangoxft takes the draw path; a caller that drives these directly now gets
- * its text instead of a blank.
+ * when it is a solid fill.  (Render also implements CreateGlyphSet/AddGlyphs/
+ * CompositeGlyphs, but Xft does not need them here.)
  */
 static unsigned render_argb(Display *dpy, Picture src)
 {
