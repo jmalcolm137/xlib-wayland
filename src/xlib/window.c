@@ -89,7 +89,17 @@ void mw_window_ensure_surface(MwWindow *w)
      * rebuilt at the current scale every render) would composite it at the
      * wrong size. */
     int sc = mw_display_scale(w->d);
-    if (w->surface && w->surface_valid && mw_surface_scale(w->surface) == sc)
+    /* The surface is the window's backing store, so it must match the window's
+     * current size as well as its scale.  Checking only the scale left the
+     * surface at whatever size the window had when it was created, and cairo
+     * silently clips all later drawing to that surface -- so a window that was
+     * created small and then resized (any client-side window, an XmText as it
+     * grows) drew only as far as the old surface reached and the rest of it
+     * stayed blank until something else forced a fresh allocation. */
+    if (w->surface && w->surface_valid &&
+        mw_surface_scale(w->surface) == sc &&
+        mw_surface_width(w->surface) == w->w &&
+        mw_surface_height(w->surface) == w->h)
         return;
     if (w->surface) mw_surface_destroy(w->surface);
     w->surface = mw_surface_create_scaled(w->w, w->h, sc);
