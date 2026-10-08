@@ -426,20 +426,33 @@ static const struct zxdg_toplevel_decoration_v1_listener deco_listener = {
 
 /* --------------------------------------------------------------- create */
 
-/* Resolve the ordinary toplevel that an override-redirect window (a Motif
- * menu shell, say) should be anchored to, or NULL if there is nothing to
- * anchor to yet.  Tries, in order:
+/* A window can anchor a popup if it is a Wayland toplevel of its own -- i.e.
+ * it has an xdg_surface and is not itself a popup.  A popup is skipped: a
+ * Motif menu shell is an override-redirect toplevel, so anchoring the next menu
+ * to it -- which the old code could do when the keyboard focus was an item
+ * inside the menu -- produced a popup whose parent had already been dismissed,
+ * and no menu after the first one would drop down.
+ *
+ * Note that override_redirect is deliberately *not* part of this test.  An
+ * override-redirect window that is a non-popup toplevel is an application
+ * window that the window manager simply does not decorate (see mw_map_window):
+ * an XForms form shown with FL_NOBORDER, say.  A client whose only window is
+ * borderless still needs its menus anchored to something. */
+static bool mw_anchorable(MwWindow *w)
+{
+    return w && w->tl && w->tl->xdg_surface && !w->tl->is_popup;
+}
+
+/* Resolve the toplevel that an override-redirect window (a Motif menu shell, say)
+ * should be anchored to, or NULL if there is nothing to anchor to yet.  Tries, in
+ * order:
  *
  *   1. the toplevel under the pointer,
  *   2. the toplevel owning the keyboard focus,
  *   3. the most recently mapped application toplevel,
  *   4. the X hierarchy (covers popups parented to their app shell).
  *
- * Any candidate that is itself override-redirect or a popup is skipped: a
- * Motif menu shell is an override-redirect toplevel, so anchoring the next
- * menu to it -- which the old code could do when the keyboard focus was an
- * item inside the menu -- produced a popup whose parent had already been
- * dismissed, and no menu after the first one would drop down. */
+ * Popups are skipped and the search continues, see mw_anchorable(). */
 MwWindow *mw_popup_anchor(MwWindow *win)
 {
     if (!win || !win->override_redirect) return NULL;
@@ -460,17 +473,15 @@ MwWindow *mw_popup_anchor(MwWindow *win)
 
     MwWindow *cand = dp->ptr_toplevel;
 
-    if (!cand || cand->override_redirect) cand = dp->kbd_focus;
-    while (cand && (cand->override_redirect || !cand->tl))
-        cand = cand->parent;
-    if (!cand) cand = dp->active_toplevel;
-    if (cand && (cand->override_redirect || !cand->tl)) cand = NULL;
+    if (!mw_anchorable(cand)) cand = dp->kbd_focus;
+    while (cand && !mw_anchorable(cand)) cand = cand->parent;
+    if (!mw_anchorable(cand)) cand = dp->active_toplevel;
+    if (cand && !mw_anchorable(cand)) cand = NULL;
     if (!cand) {
         cand = win->parent;
-        while (cand && (cand->override_redirect || !cand->tl))
-            cand = cand->parent;
+        while (cand && !mw_anchorable(cand)) cand = cand->parent;
     }
-    if (!cand || !cand->tl || !cand->tl->xdg_surface) return NULL;
+    if (!mw_anchorable(cand)) return NULL;
     return cand;
 }
 
@@ -488,11 +499,13 @@ void mw_toplevel_create(MwWindow *win)
 
     /* An override-redirect window (Motif menus, tooltips) becomes an
      * xdg_popup anchored to the toplevel it belongs to, so the compositor
-     * places it where the application asked and routes input to it. */
+     * places it where the application asked and routes input to it.  With
+     * nothing to anchor to it becomes an undecorated xdg_toplevel instead --
+     * mw_map_window() only lets a visible window this far. */
     MwWindow *ptl = mw_popup_anchor(win);
     if (win->override_redirect && !ptl && getenv("MW_TRACE"))
         fprintf(stderr, "MW: 0x%lx is override-redirect with no toplevel to "
-                "anchor to\n", win->id);
+                "anchor to: undecorated toplevel\n", win->id);
 
     tl->surface = wl_compositor_create_surface(dp->wl_compositor);
     tl->xdg_surface = xdg_wm_base_get_xdg_surface(dp->wm_base, tl->surface);

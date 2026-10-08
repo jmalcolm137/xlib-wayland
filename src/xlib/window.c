@@ -496,12 +496,16 @@ void mw_map_window(Display *d, MwWindow *win, bool raised)
      * pointer input to the parent and the menu items would never be
      * selectable. */
     /* Only windows that are actually meant to be on screen become Wayland
-     * surfaces.  An override-redirect window has to be anchored as a popup:
-     * window managers do not manage those on X, but a Wayland toplevel is
-     * always shown, so promoting an unanchorable one put a stray window on
-     * screen next to the application window. */
+     * surfaces.  An override-redirect window normally has to be anchored as a
+     * popup: window managers do not manage those on X, but a Wayland toplevel
+     * is always shown, so promoting a helper the application never expected
+     * anyone to see put a stray window on screen next to the application
+     * window. */
     bool promotable;
     bool focus_toplevel = false;
+    /* Set when an override-redirect window becomes a toplevel in its own right
+     * rather than a popup -- see below. */
+    bool override_toplevel = false;
     if (win->input_only) {
         /* An InputOnly window has no pixels at all; it exists purely to
          * receive events.  Motif uses a 10x10 InputOnly window at (-100,-100)
@@ -523,7 +527,23 @@ void mw_map_window(Display *d, MwWindow *win, bool raised)
          * dtwm maps its per-workspace backdrop this way, and promoting it as a
          * popup paints the desktop (and the panel) over. */
         bool fullscreen = (win->w >= MWSCR(d)->width && win->h >= MWSCR(d)->height);
-        promotable = !fullscreen && (mw_popup_anchor(win) != NULL);
+        MwWindow *anchor = fullscreen ? NULL : mw_popup_anchor(win);
+        /* With no toplevel to anchor to, an override-redirect *root child* is
+         * not a helper but the application's own visible window: on X such a
+         * window bypasses the window manager, is mapped, and is shown at the
+         * geometry it asked for.  Dropping it instead left a client with no
+         * window at all, and that is not an exotic client: any XForms form
+         * shown with FL_NOBORDER is override-redirect (lib/win.c sets
+         * CWOverrideRedirect for those), which is how a toolkit asks for a
+         * window without window-manager decoration.  An application whose only
+         * window is borderless then has nothing left to show.  So promote it to
+         * an undecorated toplevel -- mw_toplevel_create() calls
+         * mw_popup_anchor() itself and, finding the same NULL anchor, builds an
+         * xdg_toplevel; override_redirect already marks the toplevel
+         * undecorated.  A helper that is *not* a root child, and a full-screen
+         * root cover, still stay out of the Wayland tree. */
+        override_toplevel = (anchor == NULL && !fullscreen && is_root(d, win->parent));
+        promotable = (anchor != NULL) || override_toplevel;
     } else {
         promotable = win->parent && is_root(d, win->parent);
     }
@@ -543,8 +563,9 @@ void mw_map_window(Display *d, MwWindow *win, bool raised)
         mw_toplevel_map(win->tl);
         /* Remember this as the application toplevel a popup should anchor to
          * (Motif menu shells are parented to the root, so the X hierarchy
-         * cannot be used to find it). */
-        if (!win->override_redirect) {
+         * cannot be used to find it).  A borderless application toplevel is
+         * such a window too: it is the one its own popups should hang off. */
+        if (!win->override_redirect || override_toplevel) {
             MWD(d)->active_toplevel = win;
             focus_toplevel = true;
         } else if (win->tl && win->tl->is_popup) {
