@@ -26,6 +26,7 @@
 #define MW_XI_QUERY_DEVICE    48
 #define MW_XI_LIST_PROPERTIES 56
 #define MW_XI_GET_PROPERTY    59
+#define MW_XI_GET_SELECTED_EVENTS 60
 
 /* XInput2 device uses.  These are the values the protocol actually carries
  * (checked against a real server): XIMasterPointer is 1, not 0. */
@@ -42,6 +43,7 @@
 #define MW_XI_VALUATOR_CLASS 2
 #define MW_XI_TOUCH_CLASS    8
 #define MW_XI_MODE_ABSOLUTE  1
+#define MW_XI_MODE_RELATIVE  0
 #define MW_XI_DIRECT_TOUCH   1
 #define MW_XI_TOUCH_ID       6        /* the touch device, when present */
 
@@ -177,12 +179,14 @@ static void build_device_info(Display *d, int filter, int *count, size_t *len)
     int n = 0;
     for (int i = 0; i < nd; i++) {
         if (filter && devs[i].id != filter) continue;
-        int nclasses = devs[i].kind == 1 ? 3 : devs[i].kind == 2 ? 1 : 2;
+        int nclasses = devs[i].kind == 1 ? 5 : devs[i].kind == 2 ? 1 : 2;
         add_device(&b, devs[i].id, devs[i].use, devs[i].attach, devs[i].name, nclasses);
         switch (devs[i].kind) {
-        case 1:  /* pointer: two absolute axes + three buttons */
+        case 1:  /* pointer: two absolute axes, two scroll axes, three buttons */
             add_valuator(&b, devs[i].id, 0, 0, sw, MW_XI_MODE_ABSOLUTE);
             add_valuator(&b, devs[i].id, 1, 0, sh, MW_XI_MODE_ABSOLUTE);
+            add_valuator(&b, devs[i].id, 2, -1, 1, MW_XI_MODE_RELATIVE);  /* hscroll */
+            add_valuator(&b, devs[i].id, 3, -1, 1, MW_XI_MODE_RELATIVE);  /* vscroll */
             add_buttons(&b, devs[i].id, 3);
             break;
         case 2:  /* keyboard */
@@ -202,6 +206,8 @@ static void build_device_info(Display *d, int filter, int *count, size_t *len)
     dp->xi2_data_len = b.len;
     dp->xi2_data_off = 0;
 }
+
+static MwXiSelect *xi_select_find(Display *d, Window win, bool create);
 
 Bool mw_xi2_reply(Display *d, void *repbuf)
 {
@@ -246,6 +252,35 @@ Bool mw_xi2_reply(Display *d, void *repbuf)
     case MW_XI_GET_PROPERTY:
         put32(rep, 4, 0);                     /* no such property */
         return True;
+    case MW_XI_GET_SELECTED_EVENTS: {
+        Window win;
+        memcpy(&win, req + 4, 4);
+        MwXiSelect *s = xi_select_find(d, win, false);
+        int any = 0;
+        if (s) for (int i = 0; i < 4; i++) if (s->mask[i]) any = 1;
+        if (dp->xi2_data) { free(dp->xi2_data); dp->xi2_data = NULL; }
+        if (!any) {
+            put16(rep, 8, 0);
+            put32(rep, 4, 0);
+            return True;
+        }
+        /* One mask over all devices (deviceid 0), 128 bits = 16 bytes.  The
+         * request layer merges XISelectEvents' per-device masks, so a single
+         * union is all we can report back. */
+        unsigned char buf[20];
+        buf[0] = 0; buf[1] = 0;              /* deviceid = XIAllDevices */
+        buf[2] = 4; buf[3] = 0;              /* mask_len, in 4-byte words (16 bytes) */
+        memcpy(buf + 4, s->mask, 16);
+        dp->xi2_data = malloc(sizeof buf);
+        if (dp->xi2_data) {
+            memcpy(dp->xi2_data, buf, sizeof buf);
+            dp->xi2_data_len = sizeof buf;
+            dp->xi2_data_off = 0;
+        }
+        put16(rep, 8, 1);                    /* num_masks */
+        put32(rep, 4, (unsigned)(sizeof buf / 4));
+        return True;
+    }
     default:
         return True;                          /* empty reply, no data */
     }
