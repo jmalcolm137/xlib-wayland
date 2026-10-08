@@ -47,6 +47,7 @@ Wayland compositor:
 | Xext (`libXext`): SHAPE, MIT-SHM, Sync, extutil | ✅ done ([docs/XEXT-STATUS.md](docs/XEXT-STATUS.md)) |
 | Compositing / RGBA windows under Wayland | ✅ done ([docs/COMPOSITE-STATUS.md](docs/COMPOSITE-STATUS.md)) |
 | XInput2 device classes + touch events from Wayland | ✅ done ([docs/XI2-STATUS.md](docs/XI2-STATUS.md)) |
+| Xinerama (`libXinerama`): monitor geometry from the Wayland output | ✅ done |
 | X11 session protocol (WM_SAVE_YOURSELF/WM_DELETE_WINDOW) relayed | ✅ done ([docs/SESSION-STATUS.md](docs/SESSION-STATUS.md)) |
 | XEmbed same-process primitives (reparent + `_XEMBED`) | ✅ primitives; cross-process is a Wayland limit ([docs/XEMBED-STATUS.md](docs/XEMBED-STATUS.md)) |
 
