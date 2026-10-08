@@ -61,9 +61,25 @@ static int wc_text_width(XFontSet fs, _Xconst wchar_t *s, int n)
 static void mb_draw(Display *d, Drawable dr, XFontSet fs, GC gc,
                     int x, int y, _Xconst char *str, int n, int image)
 {
-    (void)fs;
+    /* The fontset names the font, and XDrawString derives everything -- the
+     * advance, XTextWidth, the caller's layout -- from the GC's font.  Motif
+     * lays a widget's line out from the fontset (its fontList) but draws it
+     * with XmbDrawString while the GC still carries some other font, so the
+     * two disagreed: the drawn advance came out wider than the measured width,
+     * and the widget then erased everything past the measured extent, wiping
+     * the tail of every line that ran longer than the (too small) measurement.
+     * Borrow the fontset's font for the duration of the draw so the pixels and
+     * the metrics always describe the same font. */
+    MwXFont *ff = gc ? fs_font(fs) : NULL;
+    Font     of = 0;
+    MwXFont *ox = NULL;
+    if (ff && ff->rfont) {
+        of = gc->font; ox = gc->xfont;
+        gc->font = ff->id; gc->xfont = ff;
+    }
     if (image) XDrawImageString(d, dr, gc, x, y, str, n);
     else       XDrawString(d, dr, gc, x, y, str, n);
+    if (ff && ff->rfont) { gc->font = of; gc->xfont = ox; }
 }
 
 /* ------------------------------------------------------------------ Xmb */
