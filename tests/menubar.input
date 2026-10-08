@@ -19,7 +19,7 @@ button release left
 sleep 1500
 
 # --- Edit cascade: the second menu ---
-motion 83 19
+motion 60 19
 sleep 400
 button press left
 sleep 700

@@ -542,8 +542,8 @@ RXC=$?
 kill "$RXHC" 2>/dev/null || true
 wait "$RXHC" 2>/dev/null || true
 if [ "$RXC" = 0 ] && \
-   grep -q 'RENDERX:RESULT clipcore=1 cliprender=1 dstxform=1 xisel=1' "$WORK/rx.out"; then
-    echo "  ok   clip masks, transformed masked composite and XIGetSelectedEvents"
+   grep -q 'RENDERX:RESULT clipcore=1 cliprender=1 dstxform=1 xisel=1 xftrender=1' "$WORK/rx.out"; then
+    echo "  ok   clip masks, transformed masked composite, Xft Render-level glyphs and XIGetSelectedEvents"
 else
     echo "  FAIL: Render clip masks / destination transform / XI2 selection"
     sed 's/^/  /' "$WORK/rx.out"
@@ -900,7 +900,7 @@ PY
         printf "$FLOW_OPEN"
         printf 'motion %d %d\nsleep 500\nbutton press left\nsleep 300\nbutton release left\nsleep 2000\n' \
             "$OKX" "$OKY"
-        printf 'motion 31 19\nsleep 500\nbutton press left\nsleep 700\nmotion 26 43\nsleep 400\nbutton release left\nsleep 2000\n'
+        printf 'motion 31 19\nsleep 500\nbutton press left\nsleep 700\nmotion 26 36\nsleep 400\nbutton release left\nsleep 2000\n'
     } > "$WORK/flow.input"
     INPUT="$WORK/flow.input" HC_TIMEOUT=12 \
         run_headless flow mwflow 500x400 "$WORK/flow.png" \

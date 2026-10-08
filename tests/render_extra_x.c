@@ -5,6 +5,7 @@
 #include <X11/Xutil.h>
 #include <X11/extensions/Xrender.h>
 #include <X11/extensions/XInput2.h>
+#include <X11/Xft/Xft.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -124,6 +125,47 @@ static int dst_transform(void)
     return red_left == 0 && red_right == 54 * 64 && white_left == 10 * 64;
 }
 
+/* Xft's Render-level glyph entry points (what pangoxft uses when it has a
+ * source Picture): XftDefaultHasRender must report Render, and a glyph run must
+ * leave ink on the destination. */
+static int xft_render(void)
+{
+    int scr = DefaultScreen(d);
+    if (!XftDefaultHasRender(d)) return 0;
+
+    Pixmap outp = XCreatePixmap(d, root, 200, 60, 24);
+    XRenderPictFormat *rgb = XRenderFindStandardFormat(d, PictStandardRGB24);
+    Picture dst = XRenderCreatePicture(d, outp, rgb, 0, NULL);
+    XRenderColor w = { 0xffff, 0xffff, 0xffff, 0xffff };
+    XRenderColor k = { 0x0000, 0x0000, 0x0000, 0xffff };
+    XRenderFillRectangle(d, PictOpSrc, dst, &w, 0, 0, 200, 60);
+    Picture black = XRenderCreateSolidFill(d, &k);
+
+    XftFont *font = XftFontOpenName(d, scr, "DejaVu Sans-24");
+    if (!font) return 0;
+
+    XftGlyphSpec specs[16];
+    int n = 0, x = 4;
+    for (const char *p = "Hello"; *p; p++) {
+        specs[n].glyph = XftCharIndex(d, font, (unsigned char)*p);
+        specs[n].x = x;
+        specs[n].y = 40;
+        x += 16;
+        n++;
+    }
+    XftGlyphSpecRender(d, PictOpOver, black, font, dst, 0, 0, specs, n);
+    XSync(d, 0);
+
+    XImage *im = XGetImage(d, outp, 0, 0, 200, 60, ~0UL, ZPixmap);
+    int ink = 0;
+    for (int yy = 0; yy < 60; yy++)
+        for (int xx = 0; xx < 200; xx++)
+            if ((XGetPixel(im, xx, yy) & 0xffffff) != 0xffffff) ink++;
+    XDestroyImage(im);
+    XFreePixmap(d, outp);
+    return ink > 100;
+}
+
 static int xi_selected(void)
 {
     int maj = 2, min = 0;
@@ -164,7 +206,8 @@ int main(void)
     int b = render_clip_mask();
     int c = dst_transform();
     int e = xi_selected();
-    printf("RENDERX:RESULT clipcore=%d cliprender=%d dstxform=%d xisel=%d\n",
-           a, b, c, e);
-    return (a && b && c && e) ? 0 : 1;
+    int f = xft_render();
+    printf("RENDERX:RESULT clipcore=%d cliprender=%d dstxform=%d xisel=%d xftrender=%d\n",
+           a, b, c, e, f);
+    return (a && b && c && e && f) ? 0 : 1;
 }

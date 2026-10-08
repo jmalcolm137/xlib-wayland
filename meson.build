@@ -385,10 +385,11 @@ if get_option('tests')
     link_with: [libx11],
     install: false)
 
-  # Clip masks, a transformed masked composite, and XIGetSelectedEvents.
+  # Clip masks, a transformed masked composite, Xft Render-level glyphs, and
+  # XIGetSelectedEvents.
   executable('render_extra_x', 'tests/render_extra_x.c',
     include_directories: inc,
-    dependencies: [wl_dep, dependency('xrender'), dependency('xi')],
+    dependencies: [wl_dep, dependency('xrender'), dependency('xft'), dependency('xi')],
     link_with: [libx11],
     install: false)
 
