@@ -526,6 +526,30 @@ else
     exit 1
 fi
 
+say "clip masks, a transformed masked composite, and XIGetSelectedEvents"
+RX_SOCK="mwrx$$"
+XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+    --socket "$RX_SOCK" --size 200x200 --timeout 8 \
+    --output "$WORK/rx.png" >"$WORK/rx.ready" 2>"$WORK/rx.hc" &
+RXHC=$!
+for _ in $(seq 1 100); do
+    grep -q READY "$WORK/rx.ready" 2>/dev/null && break; sleep 0.05
+done
+LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$RX_SOCK" \
+    timeout 8 "$BUILD/render_extra_x" >"$WORK/rx.out" 2>&1
+RXC=$?
+kill "$RXHC" 2>/dev/null || true
+wait "$RXHC" 2>/dev/null || true
+if [ "$RXC" = 0 ] && \
+   grep -q 'RENDERX:RESULT clipcore=1 cliprender=1 dstxform=1 xisel=1' "$WORK/rx.out"; then
+    echo "  ok   clip masks, transformed masked composite and XIGetSelectedEvents"
+else
+    echo "  FAIL: Render clip masks / destination transform / XI2 selection"
+    sed 's/^/  /' "$WORK/rx.out"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys

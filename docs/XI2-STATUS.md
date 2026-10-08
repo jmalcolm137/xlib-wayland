@@ -11,7 +11,7 @@ XI2 is answered by synthesising replies in `src/xlib/xi2.c`, because libXi
 builds requests through Xlib's internal machinery and the shim speaks no wire
 protocol (`_XReply` recognises the XInputExtension opcode).  Implemented:
 `XIGetExtensionVersion`, `XIQueryVersion` (2.4), `XIQueryDevice`,
-`XIListProperties`, `XIGetProperty`.
+`XIListProperties`, `XIGetProperty`, `XIGetSelectedEvents`.
 
 `XIQueryDevice` reports a device set built from the seat:
 
@@ -63,8 +63,9 @@ coordinates.
   the `zwp_tablet_v2` protocol (an optional libinput add-on), which the shim
   does not bind, so there is no tablet device to describe; this is deferred
   rather than emulated.
-* Gesture classes, touch grabs and `XITouchOwnership`, and
-  `XIGetSelectedEvents`.
-* Smooth-scroll valuators (scroll is still delivered as wheel buttons).
+* Gesture classes, touch grabs and `XITouchOwnership`.
+* **Smooth-scroll delivery**: the pointer devices advertise the two relative
+  scroll valuators and `XIGetSelectedEvents` reports the masks, but Wayland axis
+  events are still delivered as wheel buttons, not as XI2 scroll valuators.
 * Touch is single-touch in practice (the compositor sends one point); the
   event path handles whatever ids Wayland delivers.

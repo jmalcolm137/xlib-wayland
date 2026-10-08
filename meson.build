@@ -385,6 +385,13 @@ if get_option('tests')
     link_with: [libx11],
     install: false)
 
+  # Clip masks, a transformed masked composite, and XIGetSelectedEvents.
+  executable('render_extra_x', 'tests/render_extra_x.c',
+    include_directories: inc,
+    dependencies: [wl_dep, dependency('xrender'), dependency('xi')],
+    link_with: [libx11],
+    install: false)
+
   # X XDND drag source (owns XdndSelection) for the X->Wayland XDND path.
   executable('xdnd_src_x', 'tests/xdnd_src_x.c',
     include_directories: inc,

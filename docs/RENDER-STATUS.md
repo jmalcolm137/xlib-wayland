@@ -64,11 +64,16 @@ XDG_RUNTIME_DIR="$RT" WAYLAND_DISPLAY=mwrc LD_LIBRARY_PATH="$HOME/.local/motif-w
 
 ## Known simplifications
 
-* A 1-bit clip mask (`XSetClipMask`, `CPClipMask`) is approximated by its
-  bounding box (`mw_clip_mask()`).
-* The software compositor path (masked / Disjoint operations) ignores destination
-  picture transforms; rendercheck does not exercise that combination.
+* Destination picture transforms are handled by the software compositor for
+  Composite/FillRectangles (sampled through the inverse map); triangles and
+  trapezoids with a destination transform still are not, which rendercheck does
+  not exercise.
 * `XRenderCompositeGlyphs` uses nearest glyph sampling.
+
+Clip masks are implemented: `XSetClipMask` clips to the exact set-bit
+rectangles of a depth-1 mask, and a Render `CPClipMask` picture is applied as an
+alpha multiplier on the source (in the software compositor and the triangle
+path).
 
 See [DESIGN.md](../DESIGN.md) §3.9 and §7, and [IME-STATUS.md](IME-STATUS.md) for
 the text-input side.
