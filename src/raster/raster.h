@@ -26,12 +26,25 @@ MwSurface *mw_surface_create(int w, int h);
 /* Wrap caller-owned memory (e.g. a wl_shm buffer).  stride is in bytes. */
 MwSurface *mw_surface_create_for_data(void *data, int w, int h, int stride);
 
+/* HiDPI variants.  w/h and all coordinates passed to the canvas API stay in
+ * logical (application) units; the backing store is scale times larger and the
+ * cairo device scale is set, so glyphs, lines and arcs are rasterised at
+ * physical resolution and the compositor presents them 1:1 instead of stretching
+ * a low-resolution buffer.  scale < 1 is treated as 1, i.e. identical to the
+ * plain constructor.  For the _for_data variant the caller's memory holds
+ * (w*scale) x (h*scale) physical pixels and `stride` is the physical row pitch
+ * in bytes. */
+MwSurface *mw_surface_create_scaled(int w, int h, int scale);
+MwSurface *mw_surface_create_for_data_scaled(void *data, int w, int h,
+                                             int stride, int scale);
+
 void mw_surface_destroy(MwSurface *s);
 
-int  mw_surface_width(const MwSurface *s);
-int  mw_surface_height(const MwSurface *s);
-int  mw_surface_stride(const MwSurface *s);
-void *mw_surface_data(const MwSurface *s);
+int  mw_surface_width(const MwSurface *s);   /* logical */
+int  mw_surface_height(const MwSurface *s);  /* logical */
+int  mw_surface_stride(const MwSurface *s);  /* physical row pitch, bytes */
+void *mw_surface_data(const MwSurface *s);   /* physical pixels */
+int  mw_surface_scale(const MwSurface *s);   /* device scale, >= 1 */
 
 /* Fill the whole surface with a pixel. */
 void mw_surface_clear(MwSurface *s, uint32_t argb);

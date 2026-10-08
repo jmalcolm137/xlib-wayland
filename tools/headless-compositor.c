@@ -173,6 +173,7 @@ struct mw_surface {
 	int pending_attach;
 	struct wl_resource *buffer;       /* committed buffer */
 	int32_t buf_w, buf_h;
+	int32_t buffer_scale;             /* wl_surface.set_buffer_scale, >= 1 */
 
 	int32_t geom_x, geom_y, geom_w, geom_h;
 
@@ -268,6 +269,7 @@ struct mw_compositor {
 	char *socket_name;
 	int width;
 	int height;
+	int scale;                 /* wl_output scale advertised to clients */
 	int timeout;
 	const char *output_path;
 	const char *input_path;
@@ -588,19 +590,24 @@ static void save_screenshot_path(struct mw_compositor *comp, const char *path)
 
 		if (buf && buffer_to_rgba(buf, &rgba, &w, &h) == 0) {
 			/* A viewport crops the (possibly larger) buffer down to
-			 * the window: present only the source rectangle. */
+			 * the window: present only the source rectangle.  The
+			 * source rect is in surface-local coordinates, so it is
+			 * scaled by the surface's buffer scale to reach buffer
+			 * (physical) pixels. */
+			int bfs = s->buffer_scale > 0 ? s->buffer_scale : 1;
+			int vsx = s->vp_sx * bfs, vsy = s->vp_sy * bfs;
+			int vsw = s->vp_sw * bfs, vsh = s->vp_sh * bfs;
 			if (s->has_vp_source && s->vp_sw > 0 && s->vp_sh > 0 &&
-			    (s->vp_sw < w || s->vp_sh < h ||
-			     s->vp_sx || s->vp_sy)) {
-				int cw = s->vp_sw, ch = s->vp_sh, y;
-				if (cw > w - s->vp_sx) cw = w - s->vp_sx;
-				if (ch > h - s->vp_sy) ch = h - s->vp_sy;
+			    (vsw < w || vsh < h || vsx || vsy)) {
+				int cw = vsw, ch = vsh, y;
+				if (cw > w - vsx) cw = w - vsx;
+				if (ch > h - vsy) ch = h - vsy;
 				uint8_t *crop = malloc((size_t)cw * (size_t)ch * 4u);
 				if (crop) {
 					for (y = 0; y < ch; y++)
 						memcpy(crop + (size_t)y * cw * 4u,
-						       rgba + ((size_t)(y + s->vp_sy) * w +
-						               s->vp_sx) * 4u,
+						       rgba + ((size_t)(y + vsy) * w +
+						               vsx) * 4u,
 						       (size_t)cw * 4u);
 					free(rgba);
 					rgba = crop;
@@ -995,7 +1002,10 @@ static void surface_set_buffer_scale(struct wl_client *client,
 				     struct wl_resource *resource,
 				     int32_t scale)
 {
-	(void)client; (void)resource; (void)scale;
+	struct mw_surface *surface = wl_resource_get_user_data(resource);
+	(void)client;
+	if (scale > 0 && surface)
+		surface->buffer_scale = scale;
 }
 
 static void surface_damage_buffer(struct wl_client *client,
@@ -1081,6 +1091,7 @@ static void compositor_create_surface(struct wl_client *client,
 	if (!surface)
 		return;
 	surface->comp = comp;
+	surface->buffer_scale = 1;
 	wl_list_init(&surface->frame_callbacks);
 	wl_list_insert(&comp->surfaces, &surface->link);
 
@@ -2229,7 +2240,7 @@ static void bind_output(struct wl_client *client, void *data,
 	wl_output_send_mode(dev->resource,
 			    WL_OUTPUT_MODE_CURRENT | WL_OUTPUT_MODE_PREFERRED,
 			    comp->width, comp->height, 60000);
-	wl_output_send_scale(dev->resource, 1);
+	wl_output_send_scale(dev->resource, comp->scale > 0 ? comp->scale : 1);
 	wl_output_send_done(dev->resource);
 }
 
@@ -3270,12 +3281,13 @@ static int signal_func(int signal_number, void *data)
 static void usage(const char *argv0)
 {
 	fprintf(stderr,
-		"usage: %s [--socket NAME] [--size WxH] [--timeout SECONDS]\n"
+		"usage: %s [--socket NAME] [--size WxH] [--scale N] [--timeout SECONDS]\n"
 		"          [--output FILE] [--input FILE]\n"
 		"\n"
 		"  --socket NAME   Wayland socket in $XDG_RUNTIME_DIR\n"
 		"                  (default: $WAYLAND_DISPLAY or \"%s\")\n"
 		"  --size WxH      toplevel configure size (default %dx%d)\n"
+		"  --scale N       advertise wl_output scale N (HiDPI); default 1\n"
 		"  --timeout SEC   seconds before the screenshot (default %d)\n"
 		"  --output FILE   PNG path (default %s)\n"
 		"  --capture-prefix P   also write P0001.png every --capture-every ms\n"
@@ -3302,6 +3314,7 @@ int main(int argc, char **argv)
 	memset(&comp, 0, sizeof comp);
 	comp.width = DEFAULT_WIDTH;
 	comp.height = DEFAULT_HEIGHT;
+	comp.scale = 1;
 	comp.timeout = DEFAULT_TIMEOUT;
 	comp.output_path = DEFAULT_OUTPUT;
 
@@ -3320,6 +3333,10 @@ int main(int argc, char **argv)
 			comp.timeout = atoi(argv[++i]);
 			if (comp.timeout < 0)
 				comp.timeout = 0;
+		} else if (!strcmp(argv[i], "--scale") && i + 1 < argc) {
+			comp.scale = atoi(argv[++i]);
+			if (comp.scale < 1)
+				comp.scale = 1;
 		} else if (!strcmp(argv[i], "--output") && i + 1 < argc) {
 			comp.output_path = argv[++i];
 		} else if (!strcmp(argv[i], "--input") && i + 1 < argc) {

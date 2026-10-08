@@ -81,9 +81,18 @@ static void paint_background(MwWindow *win, int x, int y, int w, int h)
 void mw_window_ensure_surface(MwWindow *w)
 {
     if (w->w <= 0 || w->h <= 0) return;
-    if (w->surface && w->surface_valid) return;
+    /* Render at the output's device scale so the client's drawing (core fonts,
+     * Xft text, lines and fills) is rasterised at physical resolution; the
+     * compositor then presents it 1:1 instead of stretching a 1x buffer.  The
+     * scale is part of the surface's identity: if the window moved to an output
+     * with a different scale, recreate it, or the toplevel frame (which is
+     * rebuilt at the current scale every render) would composite it at the
+     * wrong size. */
+    int sc = mw_display_scale(w->d);
+    if (w->surface && w->surface_valid && mw_surface_scale(w->surface) == sc)
+        return;
     if (w->surface) mw_surface_destroy(w->surface);
-    w->surface = mw_surface_create(w->w, w->h);
+    w->surface = mw_surface_create_scaled(w->w, w->h, sc);
     w->surface_valid = true;
     paint_background(w, 0, 0, w->w, w->h);
 }

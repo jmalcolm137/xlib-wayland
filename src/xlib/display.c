@@ -81,6 +81,18 @@ void *mw_lookup(Display *d, XID id, MwObjKind kind)
 
 XID mw_alloc_id(Display *d) { return MWD(d)->next_id++; }
 
+/* The HiDPI device scale for the display, always >= 1.  Wayland surfaces are
+ * rendered at this many physical pixels per logical pixel and the matching
+ * wl_surface buffer scale is advertised to the compositor.  Derived from
+ * wl_output.scale (see wl.c); 1 on a non-HiDPI output. */
+int mw_display_scale(Display *d)
+{
+    int s = MWD(d)->output_scale;
+    if (s < 1) s = 1;
+    if (s > 4) s = 4;   /* the compositor never offers more; clamp defensively */
+    return s;
+}
+
 MwWindow   *mw_window(Display *d, Window w)       { return mw_lookup(d, w, MW_OBJ_WINDOW); }
 MwPixmap   *mw_pixmap(Display *d, Pixmap p)       { return mw_lookup(d, p, MW_OBJ_PIXMAP); }
 MwXFont    *mw_font(Display *d, Font f)           { return mw_lookup(d, f, MW_OBJ_FONT); }

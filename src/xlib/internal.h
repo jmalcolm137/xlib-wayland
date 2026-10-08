@@ -720,6 +720,7 @@ MwPixmap   *mw_pixmap(Display *d, Pixmap p);
 MwXFont    *mw_font(Display *d, Font f);
 MwColormap *mw_colormap(Display *d, Colormap c);
 MwCursor   *mw_cursor(Display *d, Cursor c);
+int         mw_display_scale(Display *d);   /* HiDPI device scale, >= 1 */
 
 /* ------------------------------------------------------- window / compositor */
 

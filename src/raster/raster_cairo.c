@@ -26,34 +26,62 @@ struct MwSurface {
     bool             owned;   /* cs was created with _create (owns memory) */
     void            *data;    /* for create_for_data */
     cairo_t         *keep;    /* retained for wrapping data surfaces */
-    int              w, h, stride;
+    int              w, h;    /* LOGICAL size (device-independent units) */
+    int              stride;  /* PHYSICAL row pitch in bytes */
+    int              scale;   /* device scale, >= 1 */
 };
 
-MwSurface *mw_surface_create(int w, int h)
+/* Shared constructor.  `data` is NULL for an owned surface; `scale` is the
+ * HiDPI device scale.  The backing store is always w*scale x h*scale physical
+ * pixels, while MwSurface.w/h stay logical -- cairo's device scale does the
+ * mapping, so every caller keeps working in application coordinates. */
+static MwSurface *surface_new(void *data, int w, int h, int stride, int scale,
+                              bool owned)
 {
     if (w < 1) w = 1;
     if (h < 1) h = 1;
+    if (scale < 1) scale = 1;
     MwSurface *s = calloc(1, sizeof *s);
-    s->cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-    s->owned = true;
-    s->w = w; s->h = h;
+    if (!s) return NULL;
+    s->w = w;
+    s->h = h;
+    s->scale = scale;
+    s->owned = owned;
+    int pw = w * scale, ph = h * scale;
+    if (owned) {
+        s->cs = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);
+    } else {
+        if (stride <= 0) stride = pw * 4;
+        s->cs = cairo_image_surface_create_for_data(data, CAIRO_FORMAT_ARGB32,
+                                                    pw, ph, stride);
+        s->data = data;
+    }
+    if (!s->cs) { free(s); return NULL; }
+    if (scale > 1) cairo_surface_set_device_scale(s->cs, scale, scale);
     s->stride = cairo_image_surface_get_stride(s->cs);
-    s->data = cairo_image_surface_get_data(s->cs);
+    if (owned) s->data = cairo_image_surface_get_data(s->cs);
     return s;
+}
+
+MwSurface *mw_surface_create(int w, int h)
+{
+    return surface_new(NULL, w, h, 0, 1, true);
+}
+
+MwSurface *mw_surface_create_scaled(int w, int h, int scale)
+{
+    return surface_new(NULL, w, h, 0, scale, true);
 }
 
 MwSurface *mw_surface_create_for_data(void *data, int w, int h, int stride)
 {
-    if (w < 1) w = 1;
-    if (h < 1) h = 1;
-    if (stride <= 0) stride = w * 4;
-    MwSurface *s = calloc(1, sizeof *s);
-    s->cs = cairo_image_surface_create_for_data(data, CAIRO_FORMAT_ARGB32,
-                                                w, h, stride);
-    s->owned = false;
-    s->data = data;
-    s->w = w; s->h = h; s->stride = stride;
-    return s;
+    return surface_new(data, w, h, stride, 1, false);
+}
+
+MwSurface *mw_surface_create_for_data_scaled(void *data, int w, int h,
+                                             int stride, int scale)
+{
+    return surface_new(data, w, h, stride, scale, false);
 }
 
 void mw_surface_destroy(MwSurface *s)
@@ -68,6 +96,7 @@ int  mw_surface_width(const MwSurface *s)  { return s ? s->w : 0; }
 int  mw_surface_height(const MwSurface *s) { return s ? s->h : 0; }
 int  mw_surface_stride(const MwSurface *s) { return s ? s->stride : 0; }
 void *mw_surface_data(const MwSurface *s)  { return s ? s->data : NULL; }
+int  mw_surface_scale(const MwSurface *s)  { return s ? s->scale : 1; }
 
 void mw_surface_clear(MwSurface *s, uint32_t argb)
 {
@@ -409,7 +438,13 @@ void mw_canvas_copy(MwCanvas *dst, MwSurface *src, int sx, int sy,
      * Motif text widget does constantly) is undefined in cairo.  Snapshot the
      * source region first. */
     if (src == dst->surface) {
-        cairo_surface_t *tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+        /* The snapshot must be on the same device-scale grid as the source,
+         * otherwise cairo samples the (physical) source at logical pitch and
+         * silently downsamples it. */
+        int ssc = src->scale > 0 ? src->scale : 1;
+        cairo_surface_t *tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
+                                                          w * ssc, h * ssc);
+        if (ssc > 1) cairo_surface_set_device_scale(tmp, ssc, ssc);
         cairo_t *tc = cairo_create(tmp);
         cairo_set_operator(tc, CAIRO_OPERATOR_SOURCE);
         cairo_set_source_surface(tc, src->cs, -sx, -sy);
@@ -454,11 +489,13 @@ void mw_canvas_copy_plane(MwCanvas *c, MwSurface *src, int sx, int sy,
     cairo_surface_flush(src->cs);
     const uint32_t *sp = (const uint32_t *)src->data;
     int sstride = src->stride / 4;
+    int ssc = src->scale > 0 ? src->scale : 1;
+    int spw = src->w * ssc, sph = src->h * ssc;
     for (int y = 0; y < h; y++) {
         for (int x = 0; x < w; x++) {
-            int sxs = sx + x, sys = sy + y;
+            int sxs = (sx + x) * ssc, sys = (sy + y) * ssc;
             uint32_t px = 0;
-            if (sxs >= 0 && sys >= 0 && sxs < src->w && sys < src->h)
+            if (sxs >= 0 && sys >= 0 && sxs < spw && sys < sph)
                 px = sp[(size_t)sys * sstride + sxs];
             ad[(size_t)y * as + x] = (px >> bit) & 1 ? 0xff : 0x00;
         }
@@ -480,11 +517,16 @@ void mw_surface_get(MwSurface *s, int x, int y, int w, int h,
     cairo_surface_flush(s->cs);
     const uint32_t *sp = (const uint32_t *)s->data;
     int sstride = s->stride / 4;
+    int sc = s->scale > 0 ? s->scale : 1;
+    int pw = s->w * sc, ph = s->h * sc;
+    /* x,y,w,h are logical (the caller works in drawable coordinates).  On a
+     * device-scaled surface each logical pixel covers a sc x sc physical block;
+     * return its top-left physical pixel. */
     for (int j = 0; j < h; j++) {
         for (int i = 0; i < w; i++) {
-            int sx = x + i, sy = y + j;
+            int sx = (x + i) * sc, sy = (y + j) * sc;
             uint32_t px = 0;
-            if (sx >= 0 && sy >= 0 && sx < s->w && sy < s->h)
+            if (sx >= 0 && sy >= 0 && sx < pw && sy < ph)
                 px = sp[(size_t)sy * sstride + sx];
             out[(size_t)j * out_stride_px + i] = px;
         }

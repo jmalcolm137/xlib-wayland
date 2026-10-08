@@ -173,11 +173,12 @@ static void buffer_destroy(MwToplevel *tl)
     buf_free(&tl->bufs[1]);
 }
 
-static int buf_alloc(MwBuf *b, MwToplevel *tl, int idx, int w, int h)
+static int buf_alloc(MwBuf *b, MwToplevel *tl, int idx,
+                     int pw, int ph, int scale)
 {
     XDisplayImpl *dp = MWD(tl->win->d);
-    int stride = w * 4;
-    size_t size = (size_t)stride * h;
+    int stride = pw * 4;
+    size_t size = (size_t)stride * ph;
 
     int fd = memfd_create("motif-wl-shm", MFD_CLOEXEC);
     if (fd < 0) return -1;
@@ -186,14 +187,19 @@ static int buf_alloc(MwBuf *b, MwToplevel *tl, int idx, int w, int h)
     if (data == MAP_FAILED) { close(fd); return -1; }
     struct wl_shm_pool *pool = wl_shm_create_pool(dp->wl_shm, fd, (int32_t)size);
     close(fd);
-    struct wl_buffer *buf = wl_shm_pool_create_buffer(pool, 0, w, h, stride,
+    struct wl_buffer *buf = wl_shm_pool_create_buffer(pool, 0, pw, ph, stride,
                                                       WL_SHM_FORMAT_ARGB8888);
     b->buffer = buf;
     b->pool = pool;
     b->data = data;
     b->size = size;
     b->stride = stride;
-    b->frame = mw_surface_create_for_data(data, w, h, stride);
+    /* pw x ph are physical pixels; the surface presents them at the logical
+     * size with the device scale set.  The render path re-wraps the exact used
+     * region, so the rounded-up logical size here is only a validity probe. */
+    b->frame = mw_surface_create_for_data_scaled(data,
+                     (pw + scale - 1) / scale, (ph + scale - 1) / scale,
+                     stride, scale);
     b->idx = idx;
     b->tl = tl;
     b->busy = false;
@@ -213,6 +219,11 @@ static int buffer_create(MwToplevel *tl, int w, int h)
     XDisplayImpl *dp = MWD(tl->win->d);
     if (!dp->wl_shm) return -1;
 
+    /* The wl_surface is presented at logical w x h; the buffer backing it is
+     * `scale` times larger so nothing is stretched by the compositor. */
+    int sc = mw_display_scale(tl->win->d);
+    int pw = w * sc, ph = h * sc;
+
     /* A viewport lets the buffers be larger than the window, so an interactive
      * resize no longer makes the compositor import a fresh buffer for every
      * step of the drag. */
@@ -222,16 +233,16 @@ static int buffer_create(MwToplevel *tl, int w, int h)
     bool crop = tl->viewport != NULL;
 
     bool keep = crop && tl->bufs[0].buffer &&
-                tl->cap_w >= w && tl->cap_h >= h;
+                tl->cap_w >= pw && tl->cap_h >= ph;
     if (!keep) {
-        int cw = w, ch = h;
+        int cw = pw, ch = ph;
         if (crop) {
-            cw = (w + MW_BUF_QUANTUM - 1) / MW_BUF_QUANTUM * MW_BUF_QUANTUM;
-            ch = (h + MW_BUF_QUANTUM - 1) / MW_BUF_QUANTUM * MW_BUF_QUANTUM;
+            cw = (pw + MW_BUF_QUANTUM - 1) / MW_BUF_QUANTUM * MW_BUF_QUANTUM;
+            ch = (ph + MW_BUF_QUANTUM - 1) / MW_BUF_QUANTUM * MW_BUF_QUANTUM;
         }
         buffer_destroy(tl);
-        if (buf_alloc(&tl->bufs[0], tl, 0, cw, ch) != 0) return -1;
-        if (buf_alloc(&tl->bufs[1], tl, 1, cw, ch) != 0) return -1;
+        if (buf_alloc(&tl->bufs[0], tl, 0, cw, ch, sc) != 0) return -1;
+        if (buf_alloc(&tl->bufs[1], tl, 1, cw, ch, sc) != 0) return -1;
         tl->cap_w = cw;
         tl->cap_h = ch;
     }
@@ -239,6 +250,9 @@ static int buffer_create(MwToplevel *tl, int w, int h)
     tl->height = h;
 
     if (crop) {
+        /* wp_viewport source/destination are in surface-local (logical)
+         * coordinates -- the protocol applies buffer scale before crop/scale --
+         * so these stay w x h even though the buffer is scale times larger. */
         wp_viewport_set_source(tl->viewport, wl_fixed_from_int(0),
                                wl_fixed_from_int(0),
                                wl_fixed_from_int(w), wl_fixed_from_int(h));
@@ -1044,10 +1058,12 @@ void mw_toplevel_render(MwToplevel *tl)
         if (getenv("MW_TRACE")) fprintf(stderr, "MW: buffer REUSE (stalled) -> %d\n", idx);
         if (!tl->bufs[idx].buffer) return;
     }
-    /* The buffer may be larger than the window (see buffer_create), so wrap
-     * just the used w x h region with the buffer's stride. */
-    tl->frame = mw_surface_create_for_data(tl->bufs[idx].data, w, h,
-                                           tl->bufs[idx].stride);
+    /* The buffer may be larger than the window (see buffer_create), and on a
+     * HiDPI output it is scale times larger still, so wrap just the used
+     * logical w x h region at the buffer's physical stride and device scale. */
+    int sc = mw_display_scale(tl->win->d);
+    tl->frame = mw_surface_create_for_data_scaled(tl->bufs[idx].data, w, h,
+                                                  tl->bufs[idx].stride, sc);
     if (!tl->frame) return;
 
     mw_surface_clear(tl->frame, 0xff000000u |
@@ -1088,8 +1104,9 @@ void mw_toplevel_render(MwToplevel *tl)
         xdg_surface_ack_configure(tl->xdg_surface, tl->ack_serial);
         tl->ack_serial = 0;
     }
+    wl_surface_set_buffer_scale(tl->surface, sc);
     wl_surface_attach(tl->surface, tl->bufs[idx].buffer, 0, 0);
-    wl_surface_damage_buffer(tl->surface, 0, 0, w, h);
+    wl_surface_damage_buffer(tl->surface, 0, 0, w * sc, h * sc);
     wl_surface_commit(tl->surface);
     tl->bufs[idx].busy = true;
     tl->last_idx = idx;
