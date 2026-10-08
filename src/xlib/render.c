@@ -70,6 +70,10 @@ typedef struct {
 
     Bool        has_clip;
     pixman_region32_t clip;
+    /* CPClipMask: an alpha clip mask picture and its origin. */
+    XID         clip_mask;
+    int         cm_x, cm_y;
+    Bool        has_clip_mask;
 
     xRenderColor color;          /* solid */
     xPointFixed  p1, p2;         /* linear */
@@ -605,6 +609,33 @@ static void composite_manual(Display *d, MwRenderPicture *dst, MwRenderPicture *
     const uint32_t *mp_px = mtmp ? (const uint32_t *)cairo_image_surface_get_data(mtmp) : NULL;
     int mstride = mtmp ? cairo_image_surface_get_stride(mtmp) / 4 : 0;
 
+    /* CPClipMask: an alpha clip mask on the destination picture, applied as a
+     * multiplier on the source. */
+    cairo_surface_t *ctmp = NULL;
+    if (dst->has_clip_mask) {
+        MwRenderPicture *cmp = pic(d, dst->clip_mask);
+        MwSurface *cms = cmp ? pic_surface(d, cmp) : NULL;
+        cairo_surface_t *ccs = cms ? mw_surface_native(cms) : NULL;
+        if (ccs) {
+            ctmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+            cairo_t *cc = cairo_create(ctmp);
+            cairo_set_operator(cc, CAIRO_OPERATOR_SOURCE);
+            cairo_pattern_t *cp = cairo_pattern_create_for_surface(ccs);
+            cairo_matrix_t cm;
+            cairo_matrix_init_translate(&cm, dst->cm_x, dst->cm_y);
+            cairo_pattern_set_matrix(cp, &cm);
+            cairo_pattern_set_extend(cp, cairo_extend(cmp->repeat));
+            cairo_pattern_set_filter(cp, picture_filter(cmp));
+            cairo_set_source(cc, cp);
+            cairo_paint(cc);
+            cairo_pattern_destroy(cp);
+            cairo_destroy(cc);
+            cairo_surface_flush(ctmp);
+        }
+    }
+    const uint32_t *cp_px = ctmp ? (const uint32_t *)cairo_image_surface_get_data(ctmp) : NULL;
+    int cstride = ctmp ? cairo_image_surface_get_stride(ctmp) / 4 : 0;
+
     cairo_surface_flush(dcs);
     uint32_t *dp = mw_surface_data(ds);
     int dstride = mw_surface_stride(ds) / 4;
@@ -637,6 +668,10 @@ static void composite_manual(Display *d, MwRenderPicture *dst, MwRenderPicture *
                 double SG = ((sv >>  8) & 0xff) / 255.0;
                 double SB = ((sv      ) & 0xff) / 255.0;
                 double SA = ((sv >> 24) & 0xff) / 255.0;
+                if (cp_px) {
+                    double ca = ((cp_px[(size_t)j * cstride + i] >> 24) & 0xff) / 255.0;
+                    SR *= ca; SG *= ca; SB *= ca; SA *= ca;
+                }
                 double da = dsta_opaque ? 1.0 : ((dv >> 24) & 0xff) / 255.0;
                 double DR = ((dcanon >> 16) & 0xff) / 255.0;
                 double DG = ((dcanon >>  8) & 0xff) / 255.0;
@@ -679,6 +714,7 @@ static void composite_manual(Display *d, MwRenderPicture *dst, MwRenderPicture *
         }
     }
     pixman_region32_fini(&clip);
+    if (ctmp) cairo_surface_destroy(ctmp);
     if (mtmp) cairo_surface_destroy(mtmp);
     cairo_surface_destroy(stmp);
     cairo_surface_mark_dirty(dcs);
@@ -707,7 +743,7 @@ static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
                 src ? (unsigned long)src->drawable : 0, src ? src->format : -1,
                 mask ? (unsigned long)mask->id : 0UL, mask ? mask->kind : -1,
                 op, xs, ys, xm, ym, xd, yd, w, h);
-    if (is_disjoint_op(op) || mask ||
+    if (is_disjoint_op(op) || mask || dst->has_clip_mask ||
         (src && fmt_legacy(src->format)) || fmt_legacy(dst->format)) {
         composite_manual(d, dst, src, mask, op, xs, ys, xm, ym, xd, yd, w, h);
         return;
@@ -806,15 +842,21 @@ static void apply_values(MwRenderPicture *p, CARD32 mask, const CARD32 *v)
     if (mask & CPAlphaMap)        (void)NEXT();
     if (mask & CPAlphaXOrigin)    (void)NEXT();
     if (mask & CPAlphaYOrigin)    (void)NEXT();
-    if (mask & CPClipXOrigin)     (void)NEXT();
-    if (mask & CPClipYOrigin)     (void)NEXT();
+    if (mask & CPClipXOrigin)     p->cm_x = (int)NEXT();
+    if (mask & CPClipYOrigin)     p->cm_y = (int)NEXT();
     if (mask & CPClipMask) {
+        XID cm = (XID)NEXT();
         /* A clip mask (or None, which cairo uses to clear the clip) replaces
-         * any rectangle clip.  We do not implement mask clips, so drop the
-         * rectangle clip: keeping it would clip later drawing to a stale box
-         * (glyph runs after a clip-to-None lost their text). */
-        (void)NEXT();
-        if (p->has_clip) { pixman_region32_fini(&p->clip); p->has_clip = 0; }
+         * any rectangle clip.  A real mask is kept and applied as an alpha
+         * multiplier on the source; None drops the rectangle clip too, so a
+         * later composite is not clipped to a stale box (glyph runs after a
+         * clip-to-None used to lose their text). */
+        p->clip_mask = cm;
+        p->has_clip_mask = (cm != None);
+        if (cm == None && p->has_clip) {
+            pixman_region32_fini(&p->clip);
+            p->has_clip = 0;
+        }
     }
     if (mask & CPGraphicsExposure)(void)NEXT();
     if (mask & CPSubwindowMode)   p->subwindow_mode = (int)NEXT();
@@ -1313,6 +1355,44 @@ static void apply_poly_mask(Display *d, MwRenderPicture *dst, MwRenderPicture *s
     cairo_mask_surface(tc, mask, 0, 0);
     cairo_destroy(tc);
     cairo_surface_flush(tmp);
+    /* The destination picture's clip mask scales the masked source. */
+    if (dst->has_clip_mask) {
+        MwRenderPicture *cmp = pic(d, dst->clip_mask);
+        MwSurface *cms = cmp ? pic_surface(d, cmp) : NULL;
+        cairo_surface_t *ccs = cms ? mw_surface_native(cms) : NULL;
+        if (ccs) {
+            cairo_surface_t *ctmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, mw, mh);
+            cairo_t *cc = cairo_create(ctmp);
+            cairo_set_operator(cc, CAIRO_OPERATOR_SOURCE);
+            cairo_pattern_t *cp = cairo_pattern_create_for_surface(ccs);
+            cairo_matrix_t cm;
+            cairo_matrix_init_translate(&cm, dst->cm_x, dst->cm_y);
+            cairo_pattern_set_matrix(cp, &cm);
+            cairo_pattern_set_extend(cp, cairo_extend(cmp->repeat));
+            cairo_pattern_set_filter(cp, picture_filter(cmp));
+            cairo_set_source(cc, cp);
+            cairo_paint(cc);
+            cairo_pattern_destroy(cp);
+            cairo_destroy(cc);
+            cairo_surface_flush(ctmp);
+            uint32_t *tp = (uint32_t *)cairo_image_surface_get_data(tmp);
+            const uint32_t *cpp = (const uint32_t *)cairo_image_surface_get_data(ctmp);
+            int cst = cairo_image_surface_get_stride(ctmp) / 4;
+            int tst = cairo_image_surface_get_stride(tmp) / 4;
+            for (int y = 0; y < mh; y++)
+                for (int x = 0; x < mw; x++) {
+                    unsigned ca = (cpp[(size_t)y * cst + x] >> 24) & 0xff;
+                    if (ca == 255) continue;
+                    uint32_t v = tp[(size_t)y * tst + x];
+                    uint32_t a = (((v >> 24) & 0xff) * ca) / 255;
+                    uint32_t r = (((v >> 16) & 0xff) * ca) / 255;
+                    uint32_t g = (((v >>  8) & 0xff) * ca) / 255;
+                    uint32_t b = (((v      ) & 0xff) * ca) / 255;
+                    tp[(size_t)y * tst + x] = (a << 24) | (r << 16) | (g << 8) | b;
+                }
+            cairo_surface_destroy(ctmp);
+        }
+    }
     const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(tmp);
     int sstride = cairo_image_surface_get_stride(tmp) / 4;
 

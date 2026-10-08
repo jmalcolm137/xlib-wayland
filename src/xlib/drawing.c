@@ -43,6 +43,11 @@ void mw_apply_gc(MwCanvas *c, Display *d, struct _XGC *gc)
         MwPixmap *pm = mw_pixmap(d, gc->tile);
         if (pm) mw_set_stipple(c, pm->surface, gc->ts_x_origin, gc->ts_y_origin);
     }
+    /* A depth-1 clip mask (XSetClipMask) clips all drawing to its set bits. */
+    if (gc->clip_mask != None) {
+        MwPixmap *pm = mw_pixmap(d, gc->clip_mask);
+        if (pm) mw_clip_mask(c, pm->surface, gc->clip_x_origin, gc->clip_y_origin);
+    }
 }
 
 /* Fill the current path with the right fill style. */

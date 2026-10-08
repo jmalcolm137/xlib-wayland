@@ -272,8 +272,33 @@ void mw_clip_rects(MwCanvas *c, const XRectangle *r, int n, int x_org, int y_org
 
 void mw_clip_mask(MwCanvas *c, MwSurface *mask, int x_org, int y_org)
 {
-    /* Approximate a 1-bit clip mask with its bounding box (documented). */
-    (void)mask; (void)x_org; (void)y_org;
+    if (!c || !mask) return;
+    int mw = mw_surface_width(mask), mh = mw_surface_height(mask);
+    const uint32_t *px = mw_surface_data(mask);
+    int stride = mw_surface_stride(mask) / 4;
+    if (!px || mw <= 0 || mh <= 0 || stride <= 0) return;
+    cairo_surface_t *cs = mw_surface_native(mask);
+    if (cs) cairo_surface_flush(cs);
+    /* A depth-1 clip mask's logical value is bit 0 of each pixel.  Turn each
+     * horizontal run of set bits into a 1-pixel-tall rectangle and clip to
+     * their union, intersected with any existing clip.  This is exact (a
+     * bounding box was not), and honours the clip-origin alignment.  An empty
+     * mask clips everything, as X does. */
+    cairo_new_path(c->cr);
+    for (int y = 0; y < mh; y++) {
+        const uint32_t *row = px + (size_t)y * stride;
+        int x = 0;
+        while (x < mw) {
+            if (row[x] & 1u) {
+                int x0 = x;
+                while (x < mw && (row[x] & 1u)) x++;
+                cairo_rectangle(c->cr, x_org + x0, y_org + y, x - x0, 1);
+            } else {
+                x++;
+            }
+        }
+    }
+    cairo_clip(c->cr);
 }
 
 void mw_paint(MwCanvas *c)
