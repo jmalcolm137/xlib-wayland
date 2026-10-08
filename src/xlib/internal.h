@@ -819,6 +819,13 @@ bool       mw_xi2_selected(Display *d, Window win, int evtype);
 void       mw_xi2_touch(Display *d, Window win, int evtype, int touchid,
                         int deviceid, int sourceid, double x, double y,
                         Time time);
+/* A generic XI2 device event (motion/button/key) and a crossing/focus event
+ * (Enter/Leave/FocusIn/FocusOut).  Coordinates are window-relative. */
+void       mw_xi2_event(Display *d, Window win, int evtype, int detail,
+                        int deviceid, int sourceid, double x, double y, Time time);
+void       mw_xi2_crossing(Display *d, Window win, int evtype, int mode,
+                           int detail, int deviceid, int sourceid, int focus,
+                           double x, double y, Time time);
 /* The id of the touch device, or 0 when the seat has no touch. */
 int        mw_xi2_touch_device(Display *d);
 void       mw_xi2_fini(Display *d);

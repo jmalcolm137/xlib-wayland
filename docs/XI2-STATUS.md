@@ -50,12 +50,21 @@ The headless compositor now advertises `WL_SEAT_CAPABILITY_TOUCH` and has a
 appears in `XIQueryDevice` and that all three events arrive with Wayland's
 coordinates.
 
+* **Events** (input.c mirrors each Wayland input event as XI2 when a window
+  selected it, independent of the core event mask): `XI_Motion`,
+  `XI_ButtonPress`/`XI_ButtonRelease`, `XI_KeyPress`/`XI_KeyRelease`,
+  `XI_Enter`/`XI_Leave` and `XI_FocusIn`/`XI_FocusOut`.  They are delivered as
+  `XIDeviceEvent` / `XIEnterEvent` GenericEvent cookies, like touch.
+  `tests/xi2_event_x.c` verifies motion/button/key arrive.
+
 ## Not yet
 
-* XI2 **pointer/keyboard** event delivery (`XI_Motion`, `XI_ButtonPress`,
-  `XI_KeyPress`, `XI_Enter/Leave/Focus`, smooth scroll).  Core input already
-  works; an XI2-only client would get no pointer/keyboard events.
-* Tablet/tool classes (`XIToolClass`), gesture classes, touch grabs and
-  `XITouchOwnership`, and `XIGetSelectedEvents`.
+* **Tablet/tool classes** (`XIToolClass`).  Wayland exposes tablets only through
+  the `zwp_tablet_v2` protocol (an optional libinput add-on), which the shim
+  does not bind, so there is no tablet device to describe; this is deferred
+  rather than emulated.
+* Gesture classes, touch grabs and `XITouchOwnership`, and
+  `XIGetSelectedEvents`.
+* Smooth-scroll valuators (scroll is still delivered as wheel buttons).
 * Touch is single-touch in practice (the compositor sends one point); the
   event path handles whatever ids Wayland delivers.

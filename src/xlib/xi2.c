@@ -379,8 +379,10 @@ struct mw_xi_dev_event {
     double         valuator_values[2];
 };
 
-void mw_xi2_touch(Display *d, Window win, int evtype, int touchid, int deviceid,
-                  int sourceid, double x, double y, Time time)
+/* A generic XI2 device event (motion, button, key, touch).  Coordinates are
+ * window-relative. */
+void mw_xi2_event(Display *d, Window win, int evtype, int detail,
+                  int deviceid, int sourceid, double x, double y, Time time)
 {
     Window target = xi_event_target(d, win, evtype);
     if (target == None) return;
@@ -395,7 +397,7 @@ void mw_xi2_touch(Display *d, Window win, int evtype, int touchid, int deviceid,
     ev->time = time ? time : mw_now();
     ev->deviceid = deviceid;
     ev->sourceid = sourceid;
-    ev->detail = touchid;
+    ev->detail = detail;
     ev->root = MWSCR(d)->root;
     ev->event = target;
     ev->child = None;
@@ -425,6 +427,61 @@ void mw_xi2_touch(Display *d, Window win, int evtype, int touchid, int deviceid,
     mw_put_event(d, &xev);
 
     if (getenv("MW_TRACE"))
-        fprintf(stderr, "MW: XI touch evtype=%d id=%d win=0x%lx (%.0f,%.0f)\n",
-                evtype, touchid, (unsigned long)target, x, y);
+        fprintf(stderr, "MW: XI event evtype=%d detail=%d win=0x%lx (%.0f,%.0f)\n",
+                evtype, detail, (unsigned long)target, x, y);
+}
+
+void mw_xi2_touch(Display *d, Window win, int evtype, int touchid, int deviceid,
+                  int sourceid, double x, double y, Time time)
+{
+    mw_xi2_event(d, win, evtype, touchid, deviceid, sourceid, x, y, time);
+}
+
+/* XI_Enter/Leave/FocusIn/FocusOut use xXIEnterEvent (an XIEnterEvent cookie),
+ * not the device-event layout. */
+void mw_xi2_crossing(Display *d, Window win, int evtype, int mode, int detail,
+                     int deviceid, int sourceid, int focus, double x, double y,
+                     Time time)
+{
+    Window target = xi_event_target(d, win, evtype);
+    if (target == None) return;
+
+    struct { XIEnterEvent ev; unsigned char bm[4]; } *e = calloc(1, sizeof *e);
+    if (!e) return;
+    XIEnterEvent *ev = &e->ev;
+    ev->type = GenericEvent;
+    ev->display = d;
+    ev->extension = MW_XI_OPCODE;
+    ev->evtype = evtype;
+    ev->time = time ? time : mw_now();
+    ev->deviceid = deviceid;
+    ev->sourceid = sourceid;
+    ev->mode = mode;
+    ev->detail = detail;
+    ev->root = MWSCR(d)->root;
+    ev->event = target;
+    ev->child = None;
+    ev->root_x = x;
+    ev->root_y = y;
+    ev->event_x = x;
+    ev->event_y = y;
+    ev->focus = focus ? True : False;
+    ev->same_screen = True;
+    ev->buttons.mask_len = 0;
+    ev->buttons.mask = NULL;
+    memset(&ev->mods, 0, sizeof ev->mods);
+    memset(&ev->group, 0, sizeof ev->group);
+
+    XEvent xev;
+    memset(&xev, 0, sizeof xev);
+    XGenericEventCookie *c = &xev.xcookie;
+    c->type = GenericEvent;
+    c->extension = MW_XI_OPCODE;
+    c->evtype = evtype;
+    c->data = e;
+    mw_put_event(d, &xev);
+
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: XI crossing evtype=%d mode=%d detail=%d win=0x%lx\n",
+                evtype, mode, detail, (unsigned long)target);
 }

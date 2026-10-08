@@ -499,6 +499,33 @@ else
     exit 1
 fi
 
+say "XInput2 pointer and keyboard events from Wayland"
+XI2E_SOCK="mwxe$$"
+printf 'sleep 900\nmotion 100 50\nsleep 300\nbutton press left\nbutton release left\nsleep 300\nkey press 30\nkey release 30\nsleep 900\n' \
+    > "$WORK/xi2e.input"
+XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+    --socket "$XI2E_SOCK" --size 200x200 --timeout 8 \
+    --output "$WORK/xi2e.png" --input "$WORK/xi2e.input" \
+    >"$WORK/xi2e.ready" 2>"$WORK/xi2e.hc" &
+XI2EHC=$!
+for _ in $(seq 1 100); do
+    grep -q READY "$WORK/xi2e.ready" 2>/dev/null && break; sleep 0.05
+done
+LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XI2E_SOCK" \
+    timeout 8 "$BUILD/xi2_event_x" >"$WORK/xi2e.out" 2>&1
+XI2EC=$?
+kill "$XI2EHC" 2>/dev/null || true
+wait "$XI2EHC" 2>/dev/null || true
+if [ "$XI2EC" = 0 ] && grep -q 'XI2EV:RESULT motion=1 button=1 release=1 key=1' \
+   "$WORK/xi2e.out"; then
+    echo "  ok   XI_Motion / Button / Key events delivered"
+else
+    echo "  FAIL: XInput2 pointer/keyboard events"
+    sed 's/^/  /' "$WORK/xi2e.out"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys

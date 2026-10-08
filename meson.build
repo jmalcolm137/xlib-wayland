@@ -378,6 +378,13 @@ if get_option('tests')
     link_with: [libx11, libxinerama],
     install: false)
 
+  # XI2 pointer/keyboard events from Wayland input.
+  executable('xi2_event_x', 'tests/xi2_event_x.c',
+    include_directories: inc,
+    dependencies: [wl_dep, dependency('xi')],
+    link_with: [libx11],
+    install: false)
+
   # X XDND drag source (owns XdndSelection) for the X->Wayland XDND path.
   executable('xdnd_src_x', 'tests/xdnd_src_x.c',
     include_directories: inc,

@@ -107,6 +107,29 @@ static void pt_event(Display *d, MwWindow *w, XEvent *ev, int type,
     ev->xbutton.state = state;
     ev->xbutton.button = (unsigned int)detail;
     ev->xbutton.same_screen = True;
+
+    /* Mirror the event as XInput2 for windows that selected it (the XI mask is
+     * independent of the core event mask).  4/5 = ButtonPress/Release,
+     * 6 = Motion, 7/8 = Enter/Leave. */
+    {
+        int xi = 0, cross = 0;
+        switch (type) {
+        case MotionNotify:  xi = 6; break;
+        case ButtonPress:   xi = 4; break;
+        case ButtonRelease: xi = 5; break;
+        case EnterNotify:   xi = 7; cross = 1; break;
+        case LeaveNotify:   xi = 8; cross = 1; break;
+        default: break;
+        }
+        if (xi) {
+            if (cross)
+                mw_xi2_crossing(d, w->id, xi, mode, detail, 2, 2, 0,
+                                ev->xbutton.x, ev->xbutton.y, ev->xbutton.time);
+            else
+                mw_xi2_event(d, w->id, xi, detail, 2, 2,
+                             ev->xbutton.x, ev->xbutton.y, ev->xbutton.time);
+        }
+    }
     (void)mode; (void)kind;
 }
 
@@ -156,6 +179,10 @@ static void kbd_enter(void *data, struct wl_keyboard *kbd, uint32_t serial,
         }
         if (!dp->focus_explicit)
             dp->kbd_focus = deep;
+        /* XI2 focus event (9 = FocusIn), driven by the XI selection rather than
+         * the core FocusChangeMask. */
+        mw_xi2_crossing(d, deep->id, 9, NotifyNormal, NotifyNonlinear, 3, 3, 1,
+                        dp->ptr_x, dp->ptr_y, mw_now());
         if (deep->event_mask & FocusChangeMask) {
             XFocusChangeEvent fe;
             memset(&fe, 0, sizeof fe);
@@ -199,6 +226,10 @@ static void kbd_leave(void *data, struct wl_keyboard *kbd, uint32_t serial,
         fe.mode = NotifyNormal; fe.detail = NotifyNonlinear;
         mw_put_event(d, (XEvent *)&fe);
     }
+    /* XI2 focus event (10 = FocusOut). */
+    if (dp->kbd_focus)
+        mw_xi2_crossing(d, dp->kbd_focus->id, 10, NotifyNormal, NotifyNonlinear,
+                        3, 3, 0, dp->ptr_x, dp->ptr_y, mw_now());
 }
 
 /* Build one key event for `kc` and deliver it to the focused window (or to a
@@ -253,6 +284,10 @@ static void deliver_key(Display *d, KeyCode kc, int type)
         ke.y = dp->ptr_y - wy;
         ke.window = target->id;
         mw_put_event(d, (XEvent *)&ke);
+        /* XI2 keyboard event (2/3 = KeyPress/Release); device 3 is the master
+         * keyboard. */
+        mw_xi2_event(d, target->id, type == KeyPress ? 2 : 3, kc, 3, 3,
+                     ke.x, ke.y, ke.time);
     }
 }
 
