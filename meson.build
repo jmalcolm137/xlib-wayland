@@ -79,7 +79,7 @@ xlib_sources = files(
   'src/xlib/xim.c', 'src/xlib/xi2.c', 'src/xlib/xkb.c', 'src/xlib/xmb.c', 'src/xlib/xtcompat.c', 'src/xlib/xlibint.c',
   'src/xlib/xresources.c', 'src/xlib/xftbridge.c', 'src/xlib/render.c',
   'src/xlib/xshape.c', 'src/xlib/broker.c', 'src/xlib/smprops.c', 'src/xlib/dnd.c',
-  'src/xlib/xsettings.c', 'src/xlib/xdnd.c', 'src/xlib/xfixes.c')
+  'src/xlib/xsettings.c', 'src/xlib/xdnd.c', 'src/xlib/xfixes.c', 'src/xlib/xsync.c')
 
 # Installed as libX11.so.6 so that -lX11, dlopen("libX11.so.6") and the
 # transitive dependency of libXext/libXrender/libcairo all resolve to us.
@@ -191,6 +191,26 @@ pkg.generate(libxcursor,
   requires: 'x11',
   subdirs: 'X11')
 
+# libXext: carries extutil (used by libXi/libXtst/libXv/... to find their
+# display) plus SHAPE/MIT-SHM/Sync.  Shadowing the host's libXext.so.6 routes
+# GDK's SHM/Sync calls to us; XShape is deliberately left undefined here so it
+# resolves to the shim's own libX11 (src/xlib/xshape.c).
+libxext = shared_library('Xext',
+  'src/xext/xext.c',
+  include_directories: inc,
+  link_with: libx11,
+  version: '1.3.7',
+  soversion: '6',
+  install: true)
+
+pkg.generate(libxext,
+  name: 'xext',
+  filebase: 'xext',
+  version: '1.3.7',
+  description: 'X extensions (SHAPE/SHM/Sync, extutil) over the Motif/Wayland shim',
+  requires: 'x11',
+  subdirs: 'X11')
+
 # ---------------------------------------------------------------- tests/tools
 
 if get_option('tests')
@@ -252,6 +272,13 @@ if get_option('tests')
     include_directories: inc,
     dependencies: [wl_dep],
     link_with: [libx11, libxfixes, libxcursor],
+    install: false)
+
+  # libXext facade: MIT-SHM blit, Sync, and XShape via libX11.
+  executable('xext_x', 'tests/xext_x.c',
+    include_directories: inc,
+    dependencies: [wl_dep],
+    link_with: [libx11, libxext],
     install: false)
 
   # X XDND drag source (owns XdndSelection) for the X->Wayland XDND path.

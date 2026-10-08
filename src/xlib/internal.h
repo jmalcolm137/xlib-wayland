@@ -1059,6 +1059,7 @@ void      mw_xfixes_selection_notify(Display *d, Atom selection, Window owner,
 unsigned long mw_xfixes_new_region(Display *d);
 void      mw_xfixes_free_region(Display *d, unsigned long region);
 void      mw_xfixes_change_cursor(Display *d, Cursor image, Cursor target);
+unsigned long mw_xsync_new_counter(Display *d);
 
 /* XDND (xdnd.c): bridge the XDND drag-and-drop protocol to the Wayland data
  * device, the same way the Motif bridge does for Motif DnD.  As the X side, the

@@ -300,6 +300,34 @@ else
     exit 1
 fi
 
+say "libXext facade: MIT-SHM blit, Sync, and XShape"
+# The shim installs its own libXext.so.6: SHM/Sync come from the facade, XShape
+# resolves through to the shim's libX11.  extutil must stay faithful for the
+# libXi/libXtst clients the matrix runs (xinput, xdpyinfo).
+XE_SOCK="mwext$$"
+XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+    --socket "$XE_SOCK" --size 200x200 --timeout 6 \
+    --output "$WORK/xext.png" >"$WORK/xext.ready" 2>"$WORK/xext.hc" &
+XEHC=$!
+for _ in $(seq 1 100); do
+    grep -q READY "$WORK/xext.ready" 2>/dev/null && break; sleep 0.05
+done
+LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XE_SOCK" \
+    "$BUILD/xext_x" >"$WORK/xext.out" 2>&1
+XE=$?
+kill "$XEHC" 2>/dev/null || true
+wait "$XEHC" 2>/dev/null || true
+if [ "$XE" = 0 ] && grep -Eq \
+   'XEXT:shm=1 ver=[0-9.]+ pixmaps=[01] put=1 sync=1 sver=[0-9.]+ shape=1' \
+   "$WORK/xext.out"; then
+    echo "  ok   libXext: SHM round trip, Sync present, XShape via libX11"
+else
+    echo "  FAIL: libXext facade"
+    sed 's/^/  /' "$WORK/xext.out"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys
