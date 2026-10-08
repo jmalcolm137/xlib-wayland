@@ -268,6 +268,14 @@ XkbSectionPtr   XkbAddGeomSection(XkbGeometryPtr geom, Atom name, int sz_rows,
 XkbShapePtr     XkbAddGeomShape(XkbGeometryPtr geom, Atom name, int sz_outlines)
 { (void)geom; (void)name; (void)sz_outlines; return NULL; }
 
+Status XkbGetNamedGeometry(Display *dpy, XkbDescPtr xkb, Atom name)
+{
+    /* No geometry descriptions are served; the shim's keymap is xkbcommon's,
+     * which has none. */
+    (void)dpy; (void)xkb; (void)name;
+    return BadName;
+}
+
 /* ----------------------------------------------------- map / names I/O */
 
 /* Build a valid client/server/names description from the compositor's

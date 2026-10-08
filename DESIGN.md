@@ -429,7 +429,10 @@ scope; we accept and ignore them so applications proceed.
   query it.
 * **XShape** (`XShape*`): track a per-window bounding/clip region; `XShapeCombineRectangles`
   updates it and feeds the compositor clip. `XShapeQueryExtension` reports it as present.
-* **XKB**: `XkbLookupKeySym` provided from xkbcommon.
+* **XKB**: the extension is reported present.  `XkbGetState`, `XkbGetMap` and
+  the keycode/keysym lookups are built from the compositor's xkbcommon keymap;
+  `XkbSelectEvents` is accepted but no XKB notifications are synthesised (core
+  key events carry the modifier state).  Keyboard geometry is not served.
 * **Render** (XRender): implemented on the shim's raster backend
   (`src/xlib/render.c`) and reported as present, so Xft and cairo-xlib use their
   real compositing paths. It passes rendercheck 1.6 in full — see
@@ -442,8 +445,8 @@ scope; we accept and ignore them so applications proceed.
   (`src/xlib/xinerama.c`).
 * **XFIXES / DAMAGE / XEmbed / session manager relay / XEXT**: implemented as
   noted in their `docs/*-STATUS.md` files.
-* **XKB-ext / DRI**: not implemented; `XQueryExtension` reports absent so
-  clients take their fallback paths. (Note: some clients call an extension
+* **DRI / DRM-lease**: not applicable — clients render through Wayland, not
+  through a direct-rendering X buffer.  (Note: some clients call an extension
   function unconditionally after checking; we provide weak no-op stubs for the
   handful Motif and NEdit touch.)
 
@@ -613,7 +616,8 @@ xlib-wayland/
   transforms.
 * XInput2 lacks tablet/tool classes, touch grabs/ownership, `XIGetSelectedEvents`
   and smooth-scroll valuators ([docs/XI2-STATUS.md](docs/XI2-STATUS.md)).
-* No XKB extension beyond `XkbLookupKeySym`.
+* XKB keyboard geometry and XKB event notifications are not served (state,
+  map and keysym lookups are).  DRI/DRM-lease is not applicable on Wayland.
 * No XIM preedit/status UI (local IM only).
 * Single screen, single seat, no DRM-lease; Xinerama is a single-output facade.
 * No `_NET_WM_STATE`/EWMH negotiation, no inter-client exchange.
