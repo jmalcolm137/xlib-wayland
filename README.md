@@ -48,6 +48,7 @@ Wayland compositor:
 | Compositing / RGBA windows under Wayland | ✅ done ([docs/COMPOSITE-STATUS.md](docs/COMPOSITE-STATUS.md)) |
 | XInput2 device classes + touch events from Wayland | ✅ done ([docs/XI2-STATUS.md](docs/XI2-STATUS.md)) |
 | X11 session protocol (WM_SAVE_YOURSELF/WM_DELETE_WINDOW) relayed | ✅ done ([docs/SESSION-STATUS.md](docs/SESSION-STATUS.md)) |
+| XEmbed same-process primitives (reparent + `_XEMBED`) | ✅ primitives; cross-process is a Wayland limit ([docs/XEMBED-STATUS.md](docs/XEMBED-STATUS.md)) |
 
 The GTK2 / MATE 1.10 / GIMP 2.10 targets are built and run by the
 [`gtk2-wayland`](https://github.com/jmalcolm137/gtk2-wayland) project; their
