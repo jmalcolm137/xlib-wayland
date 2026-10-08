@@ -79,7 +79,8 @@ xlib_sources = files(
   'src/xlib/xim.c', 'src/xlib/xi2.c', 'src/xlib/xkb.c', 'src/xlib/xmb.c', 'src/xlib/xtcompat.c', 'src/xlib/xlibint.c',
   'src/xlib/xresources.c', 'src/xlib/xftbridge.c', 'src/xlib/render.c',
   'src/xlib/xshape.c', 'src/xlib/broker.c', 'src/xlib/smprops.c', 'src/xlib/dnd.c',
-  'src/xlib/xsettings.c', 'src/xlib/xdnd.c', 'src/xlib/xfixes.c', 'src/xlib/xsync.c')
+  'src/xlib/xsettings.c', 'src/xlib/xdnd.c', 'src/xlib/xfixes.c', 'src/xlib/xsync.c',
+  'src/xlib/xdamage.c')
 
 # Installed as libX11.so.6 so that -lX11, dlopen("libX11.so.6") and the
 # transitive dependency of libXext/libXrender/libcairo all resolve to us.
@@ -211,6 +212,42 @@ pkg.generate(libxext,
   requires: 'x11',
   subdirs: 'X11')
 
+# libXdamage / libXcomposite: GDK's composited-window path.  The shim owns
+# _NET_WM_CM_S0 and exposes a depth-32 ARGB visual, so GTK requests RGBA
+# windows; redirect is a no-op (the Wayland compositor does the compositing)
+# and DAMAGE objects live in libX11 (src/xlib/xdamage.c).
+libxdamage = shared_library('Xdamage',
+  'src/xdamage/xdamage.c',
+  include_directories: inc,
+  link_with: libx11,
+  version: '1.1.7',
+  soversion: '1',
+  install: true)
+
+pkg.generate(libxdamage,
+  name: 'xdamage',
+  filebase: 'xdamage',
+  version: '1.1.7',
+  description: 'X Damage over the Motif/Wayland shim',
+  requires: 'x11',
+  subdirs: 'X11')
+
+libxcomposite = shared_library('Xcomposite',
+  'src/xcomposite/xcomposite.c',
+  include_directories: inc,
+  link_with: libx11,
+  version: '0.4.7',
+  soversion: '1',
+  install: true)
+
+pkg.generate(libxcomposite,
+  name: 'xcomposite',
+  filebase: 'xcomposite',
+  version: '0.4.7',
+  description: 'X Composite over the Motif/Wayland shim',
+  requires: 'x11',
+  subdirs: 'X11')
+
 # ---------------------------------------------------------------- tests/tools
 
 if get_option('tests')
@@ -279,6 +316,13 @@ if get_option('tests')
     include_directories: inc,
     dependencies: [wl_dep],
     link_with: [libx11, libxext],
+    install: false)
+
+  # Compositing path: depth-32 ARGB visual, _NET_WM_CM_S0, XComposite/XDamage.
+  executable('composite_x', 'tests/composite_x.c',
+    include_directories: inc,
+    dependencies: [wl_dep],
+    link_with: [libx11, libxcomposite, libxdamage],
     install: false)
 
   # X XDND drag source (owns XdndSelection) for the X->Wayland XDND path.

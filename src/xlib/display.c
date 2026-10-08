@@ -210,11 +210,23 @@ Display *XOpenDisplay(_Xconst char *display_name)
     dp->depths[0].nvisuals = 1;
     dp->depths[0].visuals = &dp->visual;
 
+    /* A 32-bit ARGB visual so GDK can offer an RGBA colormap and GTK can
+     * request transparent windows; the Wayland compositor blends the alpha. */
+    dp->visual32 = dp->visual;
+    dp->visual32.visualid = 0x22;
+    dp->depths[1].depth = 32;
+    dp->depths[1].nvisuals = 1;
+    dp->depths[1].visuals = &dp->visual32;
+
     dp->formats[0].ext_data = NULL;
     dp->formats[0].depth = 24;
     dp->formats[0].bits_per_pixel = 32;
     dp->formats[0].scanline_pad = 32;
-    dp->nformats = 1;
+    dp->formats[1].ext_data = NULL;
+    dp->formats[1].depth = 32;
+    dp->formats[1].bits_per_pixel = 32;
+    dp->formats[1].scanline_pad = 32;
+    dp->nformats = 2;
     dp->pixmap_format = dp->formats;
 
     scr->ext_data = NULL;
@@ -223,7 +235,7 @@ Display *XOpenDisplay(_Xconst char *display_name)
     scr->height = sh;
     scr->mwidth = (int)(sw * 25.4 / MW_DEFAULT_DPI);
     scr->mheight = (int)(sh * 25.4 / MW_DEFAULT_DPI);
-    scr->ndepths = 1;
+    scr->ndepths = 2;
     scr->depths = dp->depths;
     scr->root_depth = 24;
     scr->root_visual = &dp->visual;
@@ -268,6 +280,16 @@ Display *XOpenDisplay(_Xconst char *display_name)
     mw_xsettings_init(d);
     mw_shape_init(d);
     mw_xfixes_init(d);
+    mw_xdamage_init(d);
+
+    /* Own _NET_WM_CM_S0 so GDK considers the screen composited.  Under Wayland
+     * there is no separate X compositor -- the Wayland compositor blends our
+     * surfaces -- so the shim stands in for it.  This is what makes
+     * gdk_screen_is_composited() true, which lets GTK request RGBA (depth-32)
+     * windows whose alpha the compositor blends.  (Set after mw_init_selection,
+     * which resets the selection table.) */
+    XSetSelectionOwner(d, mw_intern_atom(d, "_NET_WM_CM_S0", False),
+                       MWSCR(d)->root, CurrentTime);
 
     /* The keymap comes from the compositor, but keymap-aware clients read the
      * layout names off the root window -- `setxkbmap -query` prints these. */
@@ -359,6 +381,7 @@ int XCloseDisplay(Display *d)
     mw_xdnd_fini(d);
     mw_xsettings_fini(d);
     mw_xfixes_fini(d);
+    mw_xdamage_fini(d);
     mw_fini_selection(d);
     mw_keymap_fini(d);
     mw_wl_disconnect(dp);

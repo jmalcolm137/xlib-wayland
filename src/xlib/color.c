@@ -309,22 +309,34 @@ int XAllocNamedColor(Display *d, Colormap cmap, _Xconst char *spec,
 XVisualInfo *XGetVisualInfo(Display *d, long vinfo_mask, XVisualInfo *vinfo,
                             int *nitems)
 {
-    Visual *v = &MWD(d)->visual;
-    if (vinfo_mask & VisualIDMask && vinfo->visualid != v->visualid) { *nitems = 0; return NULL; }
-    if (vinfo_mask & VisualDepthMask && vinfo->depth != 24) { *nitems = 0; return NULL; }
-    if (vinfo_mask & VisualClassMask && vinfo->class != TrueColor) { *nitems = 0; return NULL; }
-    XVisualInfo *out = calloc(1, sizeof *out);
-    out->visual = v;
-    out->visualid = v->visualid;
-    out->screen = 0;
-    out->depth = 24;
-    out->class = TrueColor;
-    out->red_mask = v->red_mask;
-    out->green_mask = v->green_mask;
-    out->blue_mask = v->blue_mask;
-    out->colormap_size = 256;
-    out->bits_per_rgb = 8;
-    *nitems = 1;
+    XDisplayImpl *dp = MWD(d);
+    Visual *vs[2] = { &dp->visual, &dp->visual32 };
+    int vdepths[2] = { 24, 32 };
+    XVisualInfo *out = calloc(2, sizeof *out);
+    if (!out) { *nitems = 0; return NULL; }
+    int n = 0;
+    for (int i = 0; i < 2; i++) {
+        Visual *v = vs[i];
+        if ((vinfo_mask & VisualIDMask) && vinfo->visualid != v->visualid)
+            continue;
+        if ((vinfo_mask & VisualDepthMask) && vinfo->depth != vdepths[i])
+            continue;
+        if ((vinfo_mask & VisualClassMask) && vinfo->class != v->class)
+            continue;
+        out[n].visual = v;
+        out[n].visualid = v->visualid;
+        out[n].screen = 0;
+        out[n].depth = vdepths[i];
+        out[n].class = v->class;
+        out[n].red_mask = v->red_mask;
+        out[n].green_mask = v->green_mask;
+        out[n].blue_mask = v->blue_mask;
+        out[n].colormap_size = 256;
+        out[n].bits_per_rgb = 8;
+        n++;
+    }
+    if (!n) { free(out); out = NULL; }
+    *nitems = n;
     return out;
 }
 
@@ -332,12 +344,16 @@ Status XMatchVisualInfo(Display *d, int screen, int depth, int class,
                         XVisualInfo *vinfo)
 {
     (void)screen;
-    if (depth != 24 || (class != TrueColor && class != 0)) return 0;
-    Visual *v = &MWD(d)->visual;
+    if ((class != TrueColor && class != 0)) return 0;
+    XDisplayImpl *dp = MWD(d);
+    Visual *v;
+    if (depth == 24) v = &dp->visual;
+    else if (depth == 32) v = &dp->visual32;
+    else return 0;
     memset(vinfo, 0, sizeof *vinfo);
     vinfo->visual = v;
     vinfo->visualid = v->visualid;
-    vinfo->depth = 24;
+    vinfo->depth = depth;
     vinfo->class = TrueColor;
     vinfo->red_mask = v->red_mask;
     vinfo->green_mask = v->green_mask;
@@ -350,16 +366,17 @@ Status XMatchVisualInfo(Display *d, int screen, int depth, int class,
 int *XListDepths(Display *d, int scr, int *count)
 {
     (void)d; (void)scr;
-    int *a = malloc(sizeof(int));
-    a[0] = 24; *count = 1;
+    int *a = malloc(2 * sizeof(int));
+    a[0] = 24; a[1] = 32; *count = 2;
     return a;
 }
 
 XPixmapFormatValues *XListPixmapFormats(Display *d, int *count)
 {
     (void)d;
-    XPixmapFormatValues *a = malloc(sizeof(XPixmapFormatValues));
+    XPixmapFormatValues *a = malloc(2 * sizeof(XPixmapFormatValues));
     a[0].depth = 24; a[0].bits_per_pixel = 32; a[0].scanline_pad = 32;
-    *count = 1;
+    a[1].depth = 32; a[1].bits_per_pixel = 32; a[1].scanline_pad = 32;
+    *count = 2;
     return a;
 }

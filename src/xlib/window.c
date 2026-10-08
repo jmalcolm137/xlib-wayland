@@ -138,6 +138,13 @@ void mw_window_damage(MwWindow *win)
      * setting ->dirty directly bypassed it and the renderer then painted
      * immediately, mid-repaint, showing half-drawn text. */
     if (w && w->tl) mw_toplevel_damage(w->tl);
+
+    /* Tell any DAMAGE objects on this window or its ancestors: GDK creates one
+     * on the toplevel of a composited (RGBA) window and repaints from the
+     * notifications. */
+    if (MWD(win->d)->damages)
+        for (MwWindow *n = win; n; n = n->parent)
+            mw_xdamage_notify(win->d, n->id, 0, 0, n->w, n->h);
 }
 
 /* --------------------------------------------------- synthetic WM window */

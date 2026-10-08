@@ -139,6 +139,15 @@ typedef struct MwXfixesRegion {
     struct MwXfixesRegion  *next;
 } MwXfixesRegion;
 
+/* A DAMAGE object (XDamageCreate): GDK creates one per composited window and
+ * repaints from XDamageNotify. */
+typedef struct MwDamage {
+    unsigned long           id;
+    Drawable                drawable;
+    int                     level;
+    struct MwDamage        *next;
+} MwDamage;
+
 /* An Xlib font object: an XFontStruct plus the raster font used to draw. */
 struct MwXFont {
     XID            id;
@@ -533,9 +542,10 @@ typedef struct _XDisplayImpl {
     size_t                      xi2_data_off;
 
     Screen                     *screen;       /* == &screens[0] */
-    Visual                      visual;
-    Depth                       depths[1];
-    ScreenFormat                formats[1];
+    Visual                      visual;       /* 24-bit TrueColor, the root */
+    Visual                      visual32;     /* 32-bit ARGB, for compositing */
+    Depth                       depths[2];
+    ScreenFormat                formats[2];
 
     /* Render extension: the request built through _XGetRequest is dispatched
      * when the next request is built, when a reply is awaited, or on flush. */
@@ -722,6 +732,9 @@ typedef struct _XDisplayImpl {
     MwXfixesSel                *xfixes_sels;
     MwXfixesRegion             *xfixes_regions;
     unsigned long               xfixes_next_region;
+
+    /* DAMAGE (xdamage.c) */
+    MwDamage                   *damages;
 } XDisplayImpl;
 
 #define MWD(d)     ((XDisplayImpl *)(d))
@@ -1060,6 +1073,19 @@ unsigned long mw_xfixes_new_region(Display *d);
 void      mw_xfixes_free_region(Display *d, unsigned long region);
 void      mw_xfixes_change_cursor(Display *d, Cursor image, Cursor target);
 unsigned long mw_xsync_new_counter(Display *d);
+
+/* DAMAGE (xdamage.c): GDK's composited-window path.  The shim owns
+ * _NET_WM_CM_S0 (so gdk_screen_is_composited() is true) and reports DAMAGE;
+ * damage objects are local and XDamageNotify is emitted from the shim's own
+ * damage so GDK repaints. */
+#define MW_XDAMAGE_EVENT_BASE 131
+int       mw_xdamage_eventbase(void);
+void      mw_xdamage_init(Display *d);
+void      mw_xdamage_fini(Display *d);
+unsigned long mw_xdamage_new(Display *d, Drawable drawable, int level);
+void      mw_xdamage_free(Display *d, unsigned long id);
+void      mw_xdamage_notify(Display *d, Drawable drawable, int x, int y,
+                            int w, int h);
 
 /* XDND (xdnd.c): bridge the XDND drag-and-drop protocol to the Wayland data
  * device, the same way the Motif bridge does for Motif DnD.  As the X side, the

@@ -328,6 +328,35 @@ else
     exit 1
 fi
 
+say "compositing: depth-32 ARGB visual, _NET_WM_CM_S0, XComposite/XDamage"
+# The shim owns _NET_WM_CM_S0 so GDK considers the screen composited, exposes a
+# depth-32 ARGB visual so GTK can request RGBA windows, preserves alpha through
+# drawing, and provides XComposite/XDamage (redirect no-op, damage from the
+# shim's own damage).
+CP_SOCK="mwcp$$"
+XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+    --socket "$CP_SOCK" --size 200x200 --timeout 6 \
+    --output "$WORK/composite.png" >"$WORK/composite.ready" 2>"$WORK/composite.hc" &
+CPHC=$!
+for _ in $(seq 1 100); do
+    grep -q READY "$WORK/composite.ready" 2>/dev/null && break; sleep 0.05
+done
+LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$CP_SOCK" \
+    "$BUILD/composite_x" >"$WORK/composite.out" 2>&1
+CP=$?
+kill "$CPHC" 2>/dev/null || true
+wait "$CPHC" 2>/dev/null || true
+if [ "$CP" = 0 ] && grep -Eq \
+   'COMPOSITE:rgba=1 cm=1 composite=1 xcomp=0.4 damage=1 alpha=[0-9a-e][0-9a-f] notify=1' \
+   "$WORK/composite.out"; then
+    echo "  ok   depth-32 visual, composited screen, alpha preserved, damage delivered"
+else
+    echo "  FAIL: compositing path"
+    sed 's/^/  /' "$WORK/composite.out"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys

@@ -2,6 +2,7 @@
 #include "internal.h"
 
 #include <X11/extensions/Xfixes.h>
+#include <X11/extensions/Xdamage.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -93,6 +94,7 @@ static size_t mw_event_size(int type)
     /* The XFIXES selection-notify event is larger than XAnyEvent; copy it in
      * full so its owner/selection/timestamp fields survive. */
     case MW_XFIXES_EVENT_BASE:                 return sizeof(XFixesSelectionNotifyEvent);
+    case MW_XDAMAGE_EVENT_BASE:                return sizeof(XDamageNotifyEvent);
     default:                                   return sizeof(XAnyEvent);
     }
 }

@@ -1066,8 +1066,18 @@ void mw_toplevel_render(MwToplevel *tl)
                                                   tl->bufs[idx].stride, sc);
     if (!tl->frame) return;
 
-    mw_surface_clear(tl->frame, 0xff000000u |
-                     (tl->win->background_pixel & 0xffffff));
+    /* A depth-32 (ARGB) window keeps its alpha: with no background it starts
+     * fully transparent (a composited RGBA window draws its own alpha), and
+     * with one it uses the background's own alpha.  A 24-bit window has no
+     * alpha channel, so its background is forced opaque. */
+    uint32_t bg;
+    if (tl->win->depth >= 32)
+        bg = tl->win->have_background
+                 ? (uint32_t)tl->win->background_pixel
+                 : 0x00000000u;
+    else
+        bg = 0xff000000u | (uint32_t)(tl->win->background_pixel & 0xffffff);
+    mw_surface_clear(tl->frame, bg);
     mw_composite_window(tl, tl->win, 0, tb);
     /* An active over-the-spot XIM preedit is painted on top of the composited
      * client content, so it is redrawn on every repaint (xim.c). */

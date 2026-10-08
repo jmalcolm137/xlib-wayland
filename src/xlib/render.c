@@ -1432,7 +1432,7 @@ static void build_pict_formats(Display *d,
 {
     size_t nformats = 6;
     size_t payload = nformats * sz_xPictFormInfo
-                   + sz_xPictScreen + sz_xPictDepth + sz_xPictVisual
+                   + sz_xPictScreen + 2 * (sz_xPictDepth + sz_xPictVisual)
                    + 4 /* subpixel */;
     unsigned char *buf = calloc(1, payload);
     if (!buf) return;
@@ -1460,19 +1460,27 @@ static void build_pict_formats(Display *d,
     PUTFORM(FMT_XBGR32, 32,  0, 0xff, 8, 0xff, 16, 0xff, 0, 0);
 #undef PUTFORM
 
-    int vdepth = MWSCR(d)->root_depth ? MWSCR(d)->root_depth : 24;
-    int vfmt = (vdepth == 32) ? FMT_ARGB32 : FMT_RGB24;
+    XDisplayImpl *dp = MWD(d);
 
     xPictScreen sc; memset(&sc, 0, sizeof sc);
-    sc.nDepth = 1; sc.fallback = vfmt;
+    sc.nDepth = 2; sc.fallback = FMT_RGB24;
     memcpy(p, &sc, sizeof sc); p += sz_xPictScreen;
 
-    xPictDepth pd; memset(&pd, 0, sizeof pd);
-    pd.depth = (CARD8)vdepth; pd.nPictVisuals = 1;
+    /* Depth 24 (the root visual) and depth 32 ARGB (the RGBA visual GDK offers
+     * for composited/transparent windows). */
+    xPictDepth pd; xPictVisual pv;
+    memset(&pd, 0, sizeof pd);
+    pd.depth = 24; pd.nPictVisuals = 1;
     memcpy(p, &pd, sizeof pd); p += sz_xPictDepth;
+    memset(&pv, 0, sizeof pv);
+    pv.visual = dp->visual.visualid; pv.format = FMT_RGB24;
+    memcpy(p, &pv, sizeof pv); p += sz_xPictVisual;
 
-    xPictVisual pv; memset(&pv, 0, sizeof pv);
-    pv.visual = MWD(d)->visual.visualid; pv.format = vfmt;
+    memset(&pd, 0, sizeof pd);
+    pd.depth = 32; pd.nPictVisuals = 1;
+    memcpy(p, &pd, sizeof pd); p += sz_xPictDepth;
+    memset(&pv, 0, sizeof pv);
+    pv.visual = dp->visual32.visualid; pv.format = FMT_ARGB32;
     memcpy(p, &pv, sizeof pv); p += sz_xPictVisual;
 
     CARD32 sub = SubPixelUnknown;
@@ -1483,8 +1491,8 @@ static void build_pict_formats(Display *d,
     rep->length = (CARD32)(payload / 4);
     rep->numFormats = (CARD32)nformats;
     rep->numScreens = 1;
-    rep->numDepths = 1;
-    rep->numVisuals = 1;
+    rep->numDepths = 2;
+    rep->numVisuals = 2;
     rep->numSubpixel = 1;
     *data = buf;
     *len = payload;
