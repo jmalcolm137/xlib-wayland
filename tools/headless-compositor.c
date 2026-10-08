@@ -250,6 +250,7 @@ enum mw_action_kind {
 	ACT_POPUPDONE,
 	ACT_RESIZE,
 	ACT_AXIS,
+	ACT_TOUCH,
 };
 
 struct mw_action {
@@ -286,6 +287,7 @@ struct mw_compositor {
 	struct wl_list surfaces;          /* mw_surface */
 	struct wl_list pointers;          /* mw_device */
 	struct wl_list keyboards;         /* mw_device */
+	struct wl_list touches;           /* mw_device */
 	struct wl_list outputs;           /* mw_device */
 	struct wl_list data_devices;      /* hc_data_device */
 	struct hc_data_source *data_selection; /* compositor clipboard owner */
@@ -1343,7 +1345,7 @@ static void seat_get_keyboard(struct wl_client *client,
 static void seat_get_touch(struct wl_client *client,
 			   struct wl_resource *resource, uint32_t id)
 {
-	/* Touch is not advertised; create the object only so ids stay valid. */
+	struct mw_compositor *comp = wl_resource_get_user_data(resource);
 	struct mw_device *dev = calloc(1, sizeof *dev);
 
 	if (!dev)
@@ -1352,6 +1354,7 @@ static void seat_get_touch(struct wl_client *client,
 					   wl_resource_get_version(resource), id);
 	wl_resource_set_implementation(dev->resource, &touch_implementation,
 				       dev, device_destroyed);
+	wl_list_insert(&comp->touches, &dev->link);
 }
 
 static void seat_release(struct wl_client *client, struct wl_resource *resource)
@@ -1374,7 +1377,8 @@ static void bind_seat(struct wl_client *client, void *data,
 			&wl_seat_interface, MIN(version, 7), id);
 	wl_resource_set_implementation(resource, &seat_implementation, data, NULL);
 	wl_seat_send_capabilities(resource,
-			WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
+			WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD |
+			WL_SEAT_CAPABILITY_TOUCH);
 	if (wl_resource_get_version(resource) >= 2)
 		wl_seat_send_name(resource, "seat0");
 }
@@ -2904,6 +2908,16 @@ static void parse_script(struct mw_compositor *comp, const char *path)
 			a.code = (!strcasecmp(ax, "horizontal") ||
 				  !strcmp(ax, "h")) ? 1 : 0;
 			a.value = atoi(n);
+		} else if (!strcmp(tok, "touch")) {
+			/* A complete tap: down, a small motion, up. */
+			char *x = strtok_r(NULL, " \t\r\n", &save);
+			char *y = strtok_r(NULL, " \t\r\n", &save);
+			if (!x || !y)
+				continue;
+			a.kind = ACT_TOUCH;
+			a.x = atoi(x);
+			a.y = atoi(y);
+			a.has_xy = 1;
 		} else if (!strcmp(tok, "frame")) {
 			a.kind = ACT_FRAME;
 		} else if (!strcmp(tok, "screenshot")) {
@@ -2952,6 +2966,19 @@ static struct mw_device *pointer_for_surface(struct mw_compositor *comp,
 	else
 		dev = NULL;
 	return dev ? dev : first_device(&comp->pointers);
+}
+
+static struct mw_device *touch_for_surface(struct mw_compositor *comp,
+					   struct mw_surface *surface)
+{
+	struct mw_device *dev;
+
+	if (surface)
+		dev = device_for_client(&comp->touches,
+					wl_resource_get_client(surface->resource));
+	else
+		dev = NULL;
+	return dev ? dev : first_device(&comp->touches);
 }
 
 static struct mw_device *keyboard_for_surface(struct mw_compositor *comp,
@@ -3124,6 +3151,26 @@ static void execute_action(struct mw_compositor *comp, struct mw_action *a)
 			wl_pointer_send_axis_discrete(dev->resource, a->code,
 						      a->value);
 		wl_pointer_send_frame(dev->resource);
+		break;
+	}
+	case ACT_TOUCH: {
+		struct mw_device *dev = touch_for_surface(comp, surface);
+		uint32_t serial, t;
+		if (!dev || !surface)
+			return;
+		serial = wl_display_next_serial(comp->display);
+		t = now_ms();
+		/* down, a small motion, up: a complete tap. */
+		wl_touch_send_down(dev->resource, serial, t, surface->resource, 0,
+				   wl_fixed_from_int(a->x),
+				   wl_fixed_from_int(a->y));
+		wl_touch_send_frame(dev->resource);
+		wl_touch_send_motion(dev->resource, t + 1, 0,
+				     wl_fixed_from_int(a->x + 5),
+				     wl_fixed_from_int(a->y + 5));
+		wl_touch_send_frame(dev->resource);
+		wl_touch_send_up(dev->resource, serial, t + 2, 0);
+		wl_touch_send_frame(dev->resource);
 		break;
 	}
 	case ACT_SLEEP:
@@ -3382,6 +3429,7 @@ int main(int argc, char **argv)
 	wl_list_init(&comp.surfaces);
 	wl_list_init(&comp.pointers);
 	wl_list_init(&comp.keyboards);
+	wl_list_init(&comp.touches);
 	wl_list_init(&comp.outputs);
 	wl_list_init(&comp.data_devices);
 	wl_list_init(&comp.primary_devices);

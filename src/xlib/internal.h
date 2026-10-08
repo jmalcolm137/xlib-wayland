@@ -148,6 +148,13 @@ typedef struct MwDamage {
     struct MwDamage        *next;
 } MwDamage;
 
+/* One window's XI2 event mask (XISelectEvents), as a bit per XI event type. */
+typedef struct MwXiSelect {
+    Window                  win;
+    uint32_t                mask[4];   /* up to 128 event types */
+    struct MwXiSelect      *next;
+} MwXiSelect;
+
 /* An Xlib font object: an XFontStruct plus the raster font used to draw. */
 struct MwXFont {
     XID            id;
@@ -468,6 +475,9 @@ typedef struct _XDisplayImpl {
     struct wl_seat             *wl_seat;
     struct wl_keyboard         *wl_keyboard;
     struct wl_pointer          *wl_pointer;
+    struct wl_touch            *wl_touch;
+    struct wl_surface          *touch_surface;   /* last touch-down surface */
+    wl_fixed_t                  touch_lx, touch_ly;
     struct wl_output           *wl_output;
     struct zxdg_decoration_manager_v1 *deco_mgr;
     struct wp_viewporter              *viewporter;   /* may be NULL */
@@ -735,6 +745,9 @@ typedef struct _XDisplayImpl {
 
     /* DAMAGE (xdamage.c) */
     MwDamage                   *damages;
+
+    /* XInput2 event selection: per-window masks set by XISelectEvents. */
+    MwXiSelect                 *xi_selects;
 } XDisplayImpl;
 
 #define MWD(d)     ((XDisplayImpl *)(d))
@@ -794,6 +807,17 @@ const char *mw_xi2_extension_name(void);
 Bool       mw_xi2_reply(Display *d, void *repbuf);
 int        mw_xi2_read(Display *d, char *data, size_t size);
 void       mw_xi2_forget_request(Display *d);
+/* Process a no-reply XI request (XISelectEvents) as it is drained. */
+void       mw_xi2_request(Display *d, const unsigned char *req, size_t len);
+/* Whether `win` selected XI event `evtype`. */
+bool       mw_xi2_selected(Display *d, Window win, int evtype);
+/* Deliver an XI2 touch event (XIDeviceEvent cookie) to `win`. */
+void       mw_xi2_touch(Display *d, Window win, int evtype, int touchid,
+                        int deviceid, int sourceid, double x, double y,
+                        Time time);
+/* The id of the touch device, or 0 when the seat has no touch. */
+int        mw_xi2_touch_device(Display *d);
+void       mw_xi2_fini(Display *d);
 
 /* Absolute (root) origin of a window's content. */
 void mw_window_origin(MwWindow *win, int *x, int *y);

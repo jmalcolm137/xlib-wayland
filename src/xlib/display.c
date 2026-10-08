@@ -382,6 +382,7 @@ int XCloseDisplay(Display *d)
     mw_xsettings_fini(d);
     mw_xfixes_fini(d);
     mw_xdamage_fini(d);
+    mw_xi2_fini(d);
     mw_fini_selection(d);
     mw_keymap_fini(d);
     mw_wl_disconnect(dp);

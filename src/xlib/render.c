@@ -1591,6 +1591,10 @@ void mw_render_drain(Display *d)
         if (p[0] == (unsigned char)mw_render_opcode()) {
             handle_request(d, p, len);
             n++;
+        } else {
+            /* No-reply XI requests (XISelectEvents) are processed as they
+             * pass through; reply requests are answered in _XReply. */
+            mw_xi2_request(d, p, len);
         }
         p += len;
     }

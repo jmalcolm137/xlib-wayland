@@ -11,6 +11,7 @@
  */
 #include "internal.h"
 
+#include <X11/extensions/XInput2.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -33,21 +34,16 @@
 #define MW_XI_SLAVE_POINTER   3
 #define MW_XI_SLAVE_KEYBOARD  4
 
-struct mw_xi_device {
-    unsigned short id;
-    unsigned short use;
-    unsigned short attachment;
-    unsigned char  enabled;
-    const char    *name;
-};
+/* ------------------------------------------------------------ device info */
 
-static const struct mw_xi_device xi_devices[] = {
-    { 2, MW_XI_MASTER_POINTER,  3, 1, "Virtual core pointer"    },
-    { 3, MW_XI_MASTER_KEYBOARD, 2, 1, "Virtual core keyboard"   },
-    { 4, MW_XI_SLAVE_POINTER,   2, 1, "Virtual core XTEST pointer"  },
-    { 5, MW_XI_SLAVE_KEYBOARD,  3, 1, "Virtual core XTEST keyboard" },
-};
-#define MW_XI_NDEVICES ((int)(sizeof xi_devices / sizeof xi_devices[0]))
+/* XI2 class types and valuator modes (from XI2.h). */
+#define MW_XI_KEY_CLASS      0
+#define MW_XI_BUTTON_CLASS   1
+#define MW_XI_VALUATOR_CLASS 2
+#define MW_XI_TOUCH_CLASS    8
+#define MW_XI_MODE_ABSOLUTE  1
+#define MW_XI_DIRECT_TOUCH   1
+#define MW_XI_TOUCH_ID       6        /* the touch device, when present */
 
 /* A reply is 32 bytes: type, subtype, sequence, length, then 24 bytes of
  * payload.  Writing at explicit offsets keeps the layout obvious. */
@@ -68,37 +64,142 @@ Bool mw_xi2_query_extension(_Xconst char *name, int *major,
 
 const char *mw_xi2_extension_name(void) { return MW_XI_NAME; }
 
+/* A device in the synthetic set.  kind: 1 pointer, 2 keyboard, 3 touch. */
+struct xi_dev {
+    int id, use, attach, kind;
+    const char *name;
+};
+
+/* A growable wire buffer for one XIQueryDevice reply. */
+struct xibuf { unsigned char *p; size_t len, cap; };
+
+static void xb_reserve(struct xibuf *b, size_t n)
+{
+    if (b->len + n <= b->cap) return;
+    size_t nc = b->cap ? b->cap : 256;
+    while (nc < b->len + n) nc *= 2;
+    unsigned char *np = realloc(b->p, nc);
+    if (!np) return;
+    b->p = np;
+    b->cap = nc;
+}
+static void xb_u8(struct xibuf *b, unsigned v)
+{ xb_reserve(b, 1); if (b->p) b->p[b->len++] = (unsigned char)v; }
+static void xb_u16(struct xibuf *b, unsigned v)
+{
+    xb_reserve(b, 2);
+    if (!b->p) return;
+    b->p[b->len++] = (unsigned char)v;
+    b->p[b->len++] = (unsigned char)(v >> 8);
+}
+static void xb_u32(struct xibuf *b, unsigned v)
+{
+    xb_reserve(b, 4);
+    if (!b->p) return;
+    for (int i = 0; i < 4; i++) b->p[b->len++] = (unsigned char)(v >> (8 * i));
+}
+static void xb_bytes(struct xibuf *b, const void *d, size_t n)
+{ xb_reserve(b, n); if (!b->p) return; memcpy(b->p + b->len, d, n); b->len += n; }
+/* FP3232: a 32.32 fixed-point value (integral int32, fractional uint32). */
+static void xb_fp3232(struct xibuf *b, double v)
+{
+    int32_t in = (int32_t)v;
+    uint32_t fr = (uint32_t)((v - (double)in) * 4294967296.0);
+    xb_u32(b, (unsigned)in);
+    xb_u32(b, fr);
+}
+
+/* One class struct.  `length` fields are in 4-byte units. */
+static void add_valuator(struct xibuf *b, int devid, int number,
+                         double min, double max, int mode)
+{
+    xb_u16(b, MW_XI_VALUATOR_CLASS); xb_u16(b, 11);
+    xb_u16(b, devid); xb_u16(b, number);
+    xb_u32(b, 0);                       /* label atom */
+    xb_fp3232(b, min); xb_fp3232(b, max); xb_fp3232(b, 0.0);
+    xb_u32(b, 0);                       /* resolution */
+    xb_u16(b, mode); xb_u16(b, 0);      /* mode + pad */
+}
+
+static void add_buttons(struct xibuf *b, int devid, int nbuttons)
+{
+    int maskbytes = ((nbuttons + 7) / 8 + 3) & ~3;
+    xb_u16(b, MW_XI_BUTTON_CLASS); xb_u16(b, (unsigned)(8 + maskbytes + 4 * nbuttons) / 4);
+    xb_u16(b, devid); xb_u16(b, nbuttons);
+    for (int i = 0; i < maskbytes; i++) xb_u8(b, 0);   /* current button state */
+    for (int i = 0; i < nbuttons; i++) xb_u32(b, 0);   /* labels */
+}
+
+static void add_keys(struct xibuf *b, int devid, int first, int last)
+{
+    int n = last - first + 1;
+    xb_u16(b, MW_XI_KEY_CLASS); xb_u16(b, (unsigned)(8 + 4 * n) / 4);
+    xb_u16(b, devid); xb_u16(b, n);
+    for (int k = first; k <= last; k++) xb_u32(b, (unsigned)k);
+}
+
+static void add_touch(struct xibuf *b, int devid, int ntouch)
+{
+    xb_u16(b, MW_XI_TOUCH_CLASS); xb_u16(b, 2);
+    xb_u16(b, devid); xb_u8(b, MW_XI_DIRECT_TOUCH); xb_u8(b, ntouch);
+}
+
+static void add_device(struct xibuf *b, int id, int use, int attach,
+                       const char *name, int nclasses)
+{
+    int nl = (int)strlen(name);
+    xb_u16(b, id); xb_u16(b, use); xb_u16(b, attach);
+    xb_u16(b, nclasses); xb_u16(b, nl); xb_u8(b, 1); xb_u8(b, 0);
+    xb_bytes(b, name, (size_t)nl);
+    for (int i = nl; (i & 3); i++) xb_u8(b, 0);
+}
+
+/* The device set reflects the Wayland seat: the pointer/keyboard pair is
+ * always there, and a touch device appears only when the seat advertises the
+ * touch capability.  Classes give clients the axes/buttons/keys they expect. */
 static void build_device_info(Display *d, int filter, int *count, size_t *len)
 {
     XDisplayImpl *dp = MWD(d);
-    size_t total = 0;
+    int have_touch = (dp->seat_caps & WL_SEAT_CAPABILITY_TOUCH) != 0;
+    int sw = MWSCR(d)->width > 0 ? MWSCR(d)->width : 1024;
+    int sh = MWSCR(d)->height > 0 ? MWSCR(d)->height : 768;
+
+    struct xi_dev devs[6];
+    int nd = 0;
+    devs[nd++] = (struct xi_dev){2, MW_XI_MASTER_POINTER, 3, 1, "Virtual core pointer"};
+    devs[nd++] = (struct xi_dev){3, MW_XI_MASTER_KEYBOARD, 2, 2, "Virtual core keyboard"};
+    devs[nd++] = (struct xi_dev){4, MW_XI_SLAVE_POINTER, 2, 1, "Virtual core XTEST pointer"};
+    devs[nd++] = (struct xi_dev){5, MW_XI_SLAVE_KEYBOARD, 3, 2, "Virtual core XTEST keyboard"};
+    if (have_touch)
+        devs[nd++] = (struct xi_dev){MW_XI_TOUCH_ID, MW_XI_SLAVE_POINTER, 2, 3, "Wayland touch"};
+
+    struct xibuf b = {0};
     int n = 0;
-    for (int i = 0; i < MW_XI_NDEVICES; i++) {
-        if (filter && xi_devices[i].id != filter) continue;
-        total += 12 + ((strlen(xi_devices[i].name) + 3) & ~(size_t)3);
+    for (int i = 0; i < nd; i++) {
+        if (filter && devs[i].id != filter) continue;
+        int nclasses = devs[i].kind == 1 ? 3 : devs[i].kind == 2 ? 1 : 2;
+        add_device(&b, devs[i].id, devs[i].use, devs[i].attach, devs[i].name, nclasses);
+        switch (devs[i].kind) {
+        case 1:  /* pointer: two absolute axes + three buttons */
+            add_valuator(&b, devs[i].id, 0, 0, sw, MW_XI_MODE_ABSOLUTE);
+            add_valuator(&b, devs[i].id, 1, 0, sh, MW_XI_MODE_ABSOLUTE);
+            add_buttons(&b, devs[i].id, 3);
+            break;
+        case 2:  /* keyboard */
+            add_keys(&b, devs[i].id, 8, 255);
+            break;
+        default: /* touch: direct mode, normalised x/y */
+            add_touch(&b, devs[i].id, 10);
+            add_valuator(&b, devs[i].id, 0, 0, 1, MW_XI_MODE_ABSOLUTE);
+            add_valuator(&b, devs[i].id, 1, 0, 1, MW_XI_MODE_ABSOLUTE);
+            break;
+        }
         n++;
     }
-    unsigned char *buf = calloc(1, total ? total : 1);
-    size_t o = 0;
-    if (buf) {
-        for (int i = 0; i < MW_XI_NDEVICES; i++) {
-            if (filter && xi_devices[i].id != filter) continue;
-            int nl = (int)strlen(xi_devices[i].name);
-            put16(buf, (int)o + 0, xi_devices[i].id);
-            put16(buf, (int)o + 2, xi_devices[i].use);
-            put16(buf, (int)o + 4, xi_devices[i].attachment);
-            put16(buf, (int)o + 6, 0);      /* num_classes */
-            put16(buf, (int)o + 8, nl);     /* name_len */
-            buf[o + 10] = xi_devices[i].enabled;
-            o += 12;                        /* sizeof xXIDeviceInfo */
-            memcpy(buf + o, xi_devices[i].name, nl);
-            o += (nl + 3) & ~(size_t)3;
-        }
-    }
     *count = n;
-    *len = total;
-    dp->xi2_data = buf;
-    dp->xi2_data_len = total;
+    *len = b.len;
+    dp->xi2_data = b.p;
+    dp->xi2_data_len = b.len;
     dp->xi2_data_off = 0;
 }
 
@@ -178,4 +279,152 @@ void mw_xi2_forget_request(Display *d)
         dp->xi2_data = NULL;
         dp->xi2_data_len = dp->xi2_data_off = 0;
     }
+}
+
+/* --------------------------------------------------- events / selection */
+
+int mw_xi2_touch_device(Display *d)
+{
+    return (MWD(d)->seat_caps & WL_SEAT_CAPABILITY_TOUCH) ? MW_XI_TOUCH_ID : 0;
+}
+
+void mw_xi2_fini(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    MwXiSelect *s = dp->xi_selects;
+    while (s) { MwXiSelect *n = s->next; free(s); s = n; }
+    dp->xi_selects = NULL;
+}
+
+static MwXiSelect *xi_select_find(Display *d, Window win, bool create)
+{
+    XDisplayImpl *dp = MWD(d);
+    for (MwXiSelect *s = dp->xi_selects; s; s = s->next)
+        if (s->win == win) return s;
+    if (!create) return NULL;
+    MwXiSelect *s = calloc(1, sizeof *s);
+    if (!s) return NULL;
+    s->win = win;
+    s->next = dp->xi_selects;
+    dp->xi_selects = s;
+    return s;
+}
+
+/* XISelectEvents (minor 46): store the union of the requested event masks.  We
+ * do not distinguish devices; touch is what matters here. */
+void mw_xi2_request(Display *d, const unsigned char *req, size_t len)
+{
+    if (len < 4 || req[0] != MW_XI_OPCODE) return;
+    if (req[1] != 46 /* X_XISelectEvents */) return;
+    if (len < 12) return;
+
+    Window win;
+    unsigned short num;
+    memcpy(&win, req + 4, 4);
+    memcpy(&num, req + 8, 2);
+
+    MwXiSelect *s = xi_select_find(d, win, true);
+    if (!s) return;
+    memset(s->mask, 0, sizeof s->mask);
+
+    size_t off = 12;
+    for (unsigned i = 0; i < num && off + 4 <= len; i++) {
+        unsigned short mwords;
+        memcpy(&mwords, req + off + 2, 2);
+        off += 4;
+        size_t bytes = (size_t)mwords * 4;
+        if (off + bytes > len) break;
+        for (size_t b = 0; b < bytes; b++) {
+            for (int k = 0; k < 8; k++) {
+                if (!(req[off + b] & (1 << k))) continue;
+                unsigned ev = (unsigned)b * 8 + (unsigned)k;
+                if (ev < 128) s->mask[ev / 32] |= 1u << (ev % 32);
+            }
+        }
+        off += bytes;
+    }
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: XISelectEvents win=0x%lx masks=%u now=%08x\n",
+                (unsigned long)win, num, s->mask[0]);
+}
+
+static bool xi_mask_has(const MwXiSelect *s, int evtype)
+{
+    if (!s || evtype < 0 || evtype >= 128) return false;
+    return (s->mask[evtype / 32] >> (evtype % 32)) & 1u;
+}
+
+bool mw_xi2_selected(Display *d, Window win, int evtype)
+{
+    return xi_mask_has(xi_select_find(d, win, false), evtype);
+}
+
+/* The window that selected `evtype`, searching from `win` up through its
+ * ancestors (XI2 events propagate up the hierarchy). */
+static Window xi_event_target(Display *d, Window win, int evtype)
+{
+    for (MwWindow *w = mw_window(d, win); w; w = w->parent)
+        if (xi_mask_has(xi_select_find(d, w->id, false), evtype))
+            return w->id;
+    return None;
+}
+
+/* A touch event is an XIDeviceEvent delivered as a GenericEvent cookie.  The
+ * masks/values are packed with the struct so XFreeEventData's single free
+ * releases everything. */
+struct mw_xi_dev_event {
+    XIDeviceEvent  ev;
+    unsigned char  button_mask[4];
+    unsigned char  valuator_mask[4];
+    double         valuator_values[2];
+};
+
+void mw_xi2_touch(Display *d, Window win, int evtype, int touchid, int deviceid,
+                  int sourceid, double x, double y, Time time)
+{
+    Window target = xi_event_target(d, win, evtype);
+    if (target == None) return;
+
+    struct mw_xi_dev_event *e = calloc(1, sizeof *e);
+    if (!e) return;
+    XIDeviceEvent *ev = &e->ev;
+    ev->type = GenericEvent;
+    ev->display = d;
+    ev->extension = MW_XI_OPCODE;
+    ev->evtype = evtype;
+    ev->time = time ? time : mw_now();
+    ev->deviceid = deviceid;
+    ev->sourceid = sourceid;
+    ev->detail = touchid;
+    ev->root = MWSCR(d)->root;
+    ev->event = target;
+    ev->child = None;
+    ev->root_x = x;
+    ev->root_y = y;
+    ev->event_x = x;
+    ev->event_y = y;
+    ev->flags = 0;
+    ev->buttons.mask_len = 0;
+    ev->buttons.mask = NULL;
+    ev->valuators.mask_len = 1;
+    ev->valuators.mask = e->valuator_mask;
+    e->valuator_mask[0] = 0x3;            /* valuators 0 (x) and 1 (y) */
+    ev->valuators.values = e->valuator_values;
+    e->valuator_values[0] = x;
+    e->valuator_values[1] = y;
+    memset(&ev->mods, 0, sizeof ev->mods);
+    memset(&ev->group, 0, sizeof ev->group);
+
+    XEvent xev;
+    memset(&xev, 0, sizeof xev);
+    XGenericEventCookie *c = &xev.xcookie;
+    c->type = GenericEvent;
+    c->extension = MW_XI_OPCODE;
+    c->evtype = evtype;
+    c->data = e;
+    mw_put_event(d, &xev);
+
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: XI touch evtype=%d id=%d win=0x%lx (%.0f,%.0f)\n",
+                evtype, touchid, (unsigned long)target, x, y);
 }

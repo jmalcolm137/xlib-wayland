@@ -357,6 +357,36 @@ else
     exit 1
 fi
 
+say "XInput2 touch bridged from Wayland"
+# The seat advertises touch, so the shim exposes a touch device (with an
+# XITouchClassInfo) via XIQueryDevice and delivers XI_TouchBegin/Update/End
+# from a Wayland touch sequence to the window that selected them.
+XI_SOCK="mwxi$$"
+printf 'sleep 900\ntouch 100 50\nsleep 900\n' > "$WORK/xi2.input"
+XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+    --socket "$XI_SOCK" --size 200x200 --timeout 8 \
+    --output "$WORK/xi2.png" --input "$WORK/xi2.input" \
+    >"$WORK/xi2.ready" 2>"$WORK/xi2.hc" &
+XIHC=$!
+for _ in $(seq 1 100); do
+    grep -q READY "$WORK/xi2.ready" 2>/dev/null && break; sleep 0.05
+done
+LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XI_SOCK" \
+    "$BUILD/xi2_touch_x" >"$WORK/xi2.out" 2>&1
+XIRC=$?
+kill "$XIHC" 2>/dev/null || true
+wait "$XIHC" 2>/dev/null || true
+if [ "$XIRC" = 0 ] \
+   && grep -Eq 'XI2:devices=[0-9]+ touchdevice=[1-9][0-9]*' "$WORK/xi2.out" \
+   && grep -q 'XI2:RESULT begin=1 update=1 end=1' "$WORK/xi2.out"; then
+    echo "  ok   XInput2 touch device + XI_TouchBegin/Update/End from Wayland"
+else
+    echo "  FAIL: XInput2 touch"
+    sed 's/^/  /' "$WORK/xi2.out"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys

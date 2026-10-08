@@ -90,7 +90,7 @@ static size_t mw_event_size(int type)
     case ColormapNotify:                       return sizeof(XColormapEvent);
     case ClientMessage:                        return sizeof(XClientMessageEvent);
     case MappingNotify:                        return sizeof(XMappingEvent);
-    case GenericEvent:                         return sizeof(XGenericEvent);
+    case GenericEvent:                         return sizeof(XGenericEventCookie);
     /* The XFIXES selection-notify event is larger than XAnyEvent; copy it in
      * full so its owner/selection/timestamp fields survive. */
     case MW_XFIXES_EVENT_BASE:                 return sizeof(XFixesSelectionNotifyEvent);

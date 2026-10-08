@@ -1007,6 +1007,79 @@ static const struct wl_pointer_listener pointer_listener = {
     .axis_value120 = ptr_axis_value120,
 };
 
+/* ------------------------------------------------------------- touch */
+
+/* Wayland touch -> XI2 touch events (XI_TouchBegin/Update/End).  The seat's
+ * touch device is exposed through XIQueryDevice; here we only deliver events,
+ * to the window that selected them.  Deferring to Wayland: the touch points,
+ * timing and target surface all come straight from wl_touch. */
+#define MW_XI_TOUCHBEGIN  18
+#define MW_XI_TOUCHUPDATE 19
+#define MW_XI_TOUCHEND    20
+
+static void touch_send(Display *d, struct wl_surface *surface, int evtype,
+                       int32_t id, wl_fixed_t sx, wl_fixed_t sy, uint32_t time)
+{
+    if (!surface) return;
+    MwWindow *top = window_for_surface(d, surface);
+    if (!top) return;
+    int dev = mw_xi2_touch_device(d);
+    if (!dev) dev = 6;
+    int off = top->tl ? mw_toplevel_content_offset(top->tl) : 0;
+    mw_xi2_touch(d, top->id, evtype, id, dev, dev,
+                 wl_fixed_to_double(sx), wl_fixed_to_double(sy) - off, time);
+}
+
+static void touch_down(void *data, struct wl_touch *t, uint32_t serial,
+                       uint32_t time, struct wl_surface *surface, int32_t id,
+                       wl_fixed_t x, wl_fixed_t y)
+{
+    (void)t; (void)serial;
+    Display *d = data;
+    MWD(d)->touch_surface = surface;
+    MWD(d)->touch_lx = x;
+    MWD(d)->touch_ly = y;
+    touch_send(d, surface, MW_XI_TOUCHBEGIN, id, x, y, time);
+}
+
+static void touch_up(void *data, struct wl_touch *t, uint32_t serial,
+                     uint32_t time, int32_t id)
+{
+    (void)t; (void)serial;
+    Display *d = data;
+    touch_send(d, MWD(d)->touch_surface, MW_XI_TOUCHEND, id,
+               MWD(d)->touch_lx, MWD(d)->touch_ly, time);
+}
+
+static void touch_motion(void *data, struct wl_touch *t, uint32_t time,
+                         int32_t id, wl_fixed_t x, wl_fixed_t y)
+{
+    (void)t;
+    Display *d = data;
+    MWD(d)->touch_lx = x;
+    MWD(d)->touch_ly = y;
+    touch_send(d, MWD(d)->touch_surface, MW_XI_TOUCHUPDATE, id, x, y, time);
+}
+
+static void touch_frame(void *data, struct wl_touch *t) { (void)data; (void)t; }
+static void touch_cancel(void *data, struct wl_touch *t) { (void)data; (void)t; }
+static void touch_shape(void *data, struct wl_touch *t, int32_t id,
+                        wl_fixed_t x, wl_fixed_t y)
+{ (void)data; (void)t; (void)id; (void)x; (void)y; }
+static void touch_orientation(void *data, struct wl_touch *t, int32_t id,
+                              wl_fixed_t o)
+{ (void)data; (void)t; (void)id; (void)o; }
+
+static const struct wl_touch_listener touch_listener = {
+    .down = touch_down,
+    .up = touch_up,
+    .motion = touch_motion,
+    .frame = touch_frame,
+    .cancel = touch_cancel,
+    .shape = touch_shape,
+    .orientation = touch_orientation,
+};
+
 /* ------------------------------------------------------------- seat */
 
 static void seat_caps(void *data, struct wl_seat *seat, uint32_t caps)
@@ -1021,6 +1094,10 @@ static void seat_caps(void *data, struct wl_seat *seat, uint32_t caps)
     if ((caps & WL_SEAT_CAPABILITY_POINTER) && !dp->wl_pointer) {
         dp->wl_pointer = wl_seat_get_pointer(seat);
         wl_pointer_add_listener(dp->wl_pointer, &pointer_listener, d);
+    }
+    if ((caps & WL_SEAT_CAPABILITY_TOUCH) && !dp->wl_touch) {
+        dp->wl_touch = wl_seat_get_touch(seat);
+        wl_touch_add_listener(dp->wl_touch, &touch_listener, d);
     }
 }
 
@@ -1043,8 +1120,10 @@ void mw_input_fini(Display *d)
     XDisplayImpl *dp = MWD(d);
     if (dp->wl_keyboard) wl_keyboard_destroy(dp->wl_keyboard);
     if (dp->wl_pointer) wl_pointer_destroy(dp->wl_pointer);
+    if (dp->wl_touch) wl_touch_destroy(dp->wl_touch);
     dp->wl_keyboard = NULL;
     dp->wl_pointer = NULL;
+    dp->wl_touch = NULL;
     MwBtnGrab *bg = dp->btn_grabs;
     while (bg) { MwBtnGrab *n = bg->next; free(bg); bg = n; }
     MwKeyGrab *kg = dp->key_grabs;
