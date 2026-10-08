@@ -107,6 +107,25 @@ void mw_load_resources(Display *d)
 
     if (!buf) { buf = strdup(""); len = 0; cap = 1; }
 
+    /* The session manager's colour server (dtsession) publishes the CDE palette
+     * as RESOURCE_MANAGER.  Every client here runs its own X server, so that
+     * write is invisible to the others; it reaches them through the shared
+     * property store (see smprops.c).  Merged after the files so the palette
+     * wins over the file defaults on conflicting resources, while everything
+     * the files set (fonts, per-application defaults) is kept. */
+    Atom rm = mw_intern_atom(d, "RESOURCE_MANAGER", False);
+    if (mw_smprop_is_shared(d, rm)) {
+        Atom st = None;
+        int sf = 0;
+        unsigned long sn = 0;
+        unsigned char *sd = NULL;
+        if (mw_smprop_lookup(d, rm, &st, &sf, &sn, &sd)) {
+            if (sd && sn > 0)
+                append_str(&buf, &len, &cap, (const char *)sd, (size_t)sn);
+            free(sd);
+        }
+    }
+
     free(dp->xdefaults);
     dp->xdefaults = buf;
 
