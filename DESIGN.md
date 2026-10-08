@@ -430,10 +430,22 @@ scope; we accept and ignore them so applications proceed.
 * **XShape** (`XShape*`): track a per-window bounding/clip region; `XShapeCombineRectangles`
   updates it and feeds the compositor clip. `XShapeQueryExtension` reports it as present.
 * **XKB**: `XkbLookupKeySym` provided from xkbcommon.
-* **Render / Xft / XInput2 / XKB-ext / Xinerama / DRI**: not implemented; `XQueryExtension`
-  reports absent so clients take their fallback paths. (Note: some clients call an extension
-  function unconditionally after checking; we provide weak no-op stubs for the handful Motif
-  and NEdit touch.)
+* **Render** (XRender): implemented on the shim's raster backend
+  (`src/xlib/render.c`) and reported as present, so Xft and cairo-xlib use their
+  real compositing paths. It passes rendercheck 1.6 in full — see
+  [docs/RENDER-STATUS.md](docs/RENDER-STATUS.md).
+* **Xft**: a small Xft over the shim's font path (`src/xft/`), with both the
+  draw-level and the Render-Picture entry points.
+* **XInput2** (`XI*`): the query surface plus core-like and touch events bridged
+  from Wayland (`src/xlib/xi2.c`, [docs/XI2-STATUS.md](docs/XI2-STATUS.md)).
+* **Xinerama** (`Xinerama*`): a facade over the single `wl_output`
+  (`src/xlib/xinerama.c`).
+* **XFIXES / DAMAGE / XEmbed / session manager relay / XEXT**: implemented as
+  noted in their `docs/*-STATUS.md` files.
+* **XKB-ext / DRI**: not implemented; `XQueryExtension` reports absent so
+  clients take their fallback paths. (Note: some clients call an extension
+  function unconditionally after checking; we provide weak no-op stubs for the
+  handful Motif and NEdit touch.)
 
 ### 3.10 XIM (input methods)
 
@@ -595,10 +607,15 @@ xlib-wayland/
 ## 7. Known gaps / deliberate simplifications (v1)
 
 * No true server-side backing store *policy*: we always keep backings.
-* No XRender/Xft, no XInput2 (raw events, multiple pointers), no XKB extension beyond
-  `XkbLookupKeySym`.
+* Render is complete (rendercheck-clean), with two simplifications: a 1-bit clip
+  mask (`XSetClipMask`) is approximated by its bounding box, and the software
+  compositor used for masked/Disjoint operations ignores destination picture
+  transforms.
+* XInput2 lacks tablet/tool classes, touch grabs/ownership, `XIGetSelectedEvents`
+  and smooth-scroll valuators ([docs/XI2-STATUS.md](docs/XI2-STATUS.md)).
+* No XKB extension beyond `XkbLookupKeySym`.
 * No XIM preedit/status UI (local IM only).
-* Single screen, single seat, no Xinerama/DRM-lease.
+* Single screen, single seat, no DRM-lease; Xinerama is a single-output facade.
 * No `_NET_WM_STATE`/EWMH negotiation, no inter-client exchange.
 * Server-side titlebar decorations not requested; apps get undecorated toplevels unless the
   compositor decorates.
