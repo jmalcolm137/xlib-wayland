@@ -1206,6 +1206,12 @@ void mw_render_init(Display *d);
 int  mw_render_picture_drawable(Display *d, XID picture, unsigned long *drawable);
 int  mw_render_picture_solid(Display *d, XID picture, unsigned short rgba[4]);
 
+/* Xinerama (xinerama.c): the monitor list, from the Wayland output(s).  The
+ * shim is single-output today, so this reports one screen covering the root;
+ * the libXinerama facade turns it into XineramaScreenInfo. */
+int  mw_xinerama_count(Display *d);
+void mw_xinerama_screen(Display *d, int i, int *x, int *y, int *w, int *h);
+
 /* render marker for a window (surface.c) */
 void      mw_queue_render(Display *d);
 

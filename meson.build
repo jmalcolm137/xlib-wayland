@@ -80,7 +80,7 @@ xlib_sources = files(
   'src/xlib/xresources.c', 'src/xlib/xftbridge.c', 'src/xlib/render.c',
   'src/xlib/xshape.c', 'src/xlib/broker.c', 'src/xlib/smprops.c', 'src/xlib/dnd.c',
   'src/xlib/xsettings.c', 'src/xlib/xdnd.c', 'src/xlib/xfixes.c', 'src/xlib/xsync.c',
-  'src/xlib/xdamage.c', 'src/xlib/session.c')
+  'src/xlib/xdamage.c', 'src/xlib/session.c', 'src/xlib/xinerama.c')
 
 # Installed as libX11.so.6 so that -lX11, dlopen("libX11.so.6") and the
 # transitive dependency of libXext/libXrender/libcairo all resolve to us.
@@ -248,6 +248,24 @@ pkg.generate(libxcomposite,
   requires: 'x11',
   subdirs: 'X11')
 
+# libXinerama: the pre-RandR multi-monitor extension.  Reports the Wayland
+# output(s) as Xinerama screens (src/xlib/xinerama.c).
+libxinerama = shared_library('Xinerama',
+  'src/xinerama/xinerama.c',
+  include_directories: inc,
+  link_with: libx11,
+  version: '1.1.6',
+  soversion: '1',
+  install: true)
+
+pkg.generate(libxinerama,
+  name: 'xinerama',
+  filebase: 'xinerama',
+  version: '1.1.6',
+  description: 'Xinerama monitor geometry over the Motif/Wayland shim',
+  requires: 'x11',
+  subdirs: 'X11')
+
 # ---------------------------------------------------------------- tests/tools
 
 if get_option('tests')
@@ -351,6 +369,13 @@ if get_option('tests')
     include_directories: inc,
     dependencies: [wl_dep, dependency('xrender'), dependency('xft')],
     link_with: [libx11, libxft],
+    install: false)
+
+  # Xinerama monitors from the Wayland output.
+  executable('xinerama_x', 'tests/xinerama_x.c',
+    include_directories: inc,
+    dependencies: [wl_dep],
+    link_with: [libx11, libxinerama],
     install: false)
 
   # X XDND drag source (owns XdndSelection) for the X->Wayland XDND path.

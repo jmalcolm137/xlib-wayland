@@ -475,6 +475,30 @@ else
     exit 1
 fi
 
+say "Xinerama reports the Wayland output"
+XIN_SOCK="mwin$$"
+XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+    --socket "$XIN_SOCK" --size 200x200 --timeout 6 \
+    --output "$WORK/xinerama.png" >"$WORK/xinerama.ready" 2>"$WORK/xinerama.hc" &
+XINHC=$!
+for _ in $(seq 1 100); do
+    grep -q READY "$WORK/xinerama.ready" 2>/dev/null && break; sleep 0.05
+done
+LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XIN_SOCK" \
+    timeout 8 "$BUILD/xinerama_x" >"$WORK/xinerama.out" 2>&1
+XINC=$?
+kill "$XINHC" 2>/dev/null || true
+wait "$XINHC" 2>/dev/null || true
+if [ "$XINC" = 0 ] && grep -q 'XINERAMA:ext=1 ver=1.1 active=1 n=1 screen0=200x200+0+0 root=200x200' \
+   "$WORK/xinerama.out"; then
+    echo "  ok   XineramaQueryScreens reports the output"
+else
+    echo "  FAIL: Xinerama"
+    sed 's/^/  /' "$WORK/xinerama.out"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys
