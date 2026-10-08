@@ -58,7 +58,11 @@ consumes never reach this process at all), and `XmbLookupString` /
 `XLookupChars`. `XmbResetIC` returns the current preedit as committed text and
 resets the IME with a `disable`/`enable` cycle.
 
-`delete_surrounding_text` has no XIM client equivalent and is currently ignored.
+`delete_surrounding_text` has no XIM request that means "delete the client's
+surrounding text", so it is realised the way a user would do it: BackSpace is
+synthesised `before_length` times and Delete `after_length` times to the
+focused widget (`mw_key_send`), which is what an input method asking for it
+expects.
 
 ## Tests
 

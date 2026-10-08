@@ -890,6 +890,9 @@ void mw_process_events(Display *d, bool block);
  * repeated from the event pump (see input.c). */
 void mw_kbd_repeat_pump(Display *d);
 int  mw_kbd_repeat_timeout(Display *d);
+/* Synthesise a key press/release to the focused window (used by the XIM bridge
+ * to turn a Wayland text-input delete_surrounding_text into editing keys). */
+void mw_key_send(Display *d, KeyCode kc, Bool press);
 /* Session-wide auto-repeat state, shared with the Style Manager's Keyboard
  * panel (auto_repeat is AutoRepeatModeOn/Off). */
 int  mw_keyboard_autorepeat_mode(Display *d);
@@ -1198,6 +1201,10 @@ void mw_render_drain(Display *d);
  * display's async handlers (see render.c). */
 void mw_render_dispatch_async(Display *d);
 void mw_render_init(Display *d);
+/* For the Xft Render-level entry points: the drawable behind a Picture, and
+ * whether it is a solid fill (with its colour).  Return non-zero on success. */
+int  mw_render_picture_drawable(Display *d, XID picture, unsigned long *drawable);
+int  mw_render_picture_solid(Display *d, XID picture, unsigned short rgba[4]);
 
 /* render marker for a window (surface.c) */
 void      mw_queue_render(Display *d);

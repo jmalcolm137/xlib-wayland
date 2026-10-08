@@ -608,55 +608,105 @@ FcBool XftInitFtLibrary(void) { return 1; }
 
 /* ------------------------------------------------ Render-level entry points
  *
- * These composite through Render Pictures.  XftDrawPicture() hands out a real
- * picture, but these upload glyphs through Render glyph sets, which the shim
- * does not implement, so they remain stubs; pangoxft only reaches them when a
- * caller has explicitly installed a source Picture with
- * pango_xft_renderer_set_source(); its normal path draws through the draw-level
- * API above, which is implemented.  They exist so pangoxft (marco and
- * mate-panel) links.  Each says so once on stderr: a toolkit that needs one
- * should show up as "missing text" in triage, not as a silent blank.
+ * These composite glyphs through Render Pictures rather than an XftDraw.  The
+ * shim's Render pictures know their drawable, so a run is drawn with the same
+ * raster path the draw-level API uses; the source is used as the text colour
+ * when it is a solid fill.  Render glyph-set *upload* (XRenderCreateGlyphSet/
+ * AddGlyphs) is still not implemented, so XftDefaultHasRender() stays false and
+ * pangoxft takes the draw path; a caller that drives these directly now gets
+ * its text instead of a blank.
  */
+static unsigned render_argb(Display *dpy, Picture src)
+{
+    unsigned short rgba[4];
+    if (!mw_render_picture_solid(dpy, (XID)src, rgba))
+        return 0xffffffffu;              /* no usable source: opaque black */
+    unsigned a = rgba[3] >> 8, r = rgba[0] >> 8, g = rgba[1] >> 8, b = rgba[2] >> 8;
+    if (!a) a = 0xff;
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+static void render_glyph_run(Display *dpy, Picture dst, XftFont *pub,
+                             const unsigned int *glyphs, const int *xs,
+                             const int *ys, int n, unsigned argb)
+{
+    if (!dst || !pub || !glyphs || n <= 0) return;
+    unsigned long dr;
+    if (!mw_render_picture_drawable(dpy, (XID)dst, &dr)) return;
+    mw_xft_draw_glyphs(dpy, dr, ((MwXftFont *)pub)->raster, glyphs, xs, ys, n,
+                       argb, NULL, 0);
+}
+
 void XftGlyphSpecRender(Display *dpy, int op, Picture src, XftFont *pub,
                         Picture dst, int srcx, int srcy,
                         _Xconst XftGlyphSpec *glyphs, int nglyphs)
 {
-    static int warned;
-    if (!warned++)
-        fprintf(stderr, "MW: XftGlyphSpecRender is a stub: Render glyph-set "
-                        "upload is not implemented, so its text is missing\n");
-    (void)dpy; (void)op; (void)src; (void)pub; (void)dst; (void)srcx; (void)srcy; (void)glyphs; (void)nglyphs;
+    (void)op; (void)srcx; (void)srcy;
+    /* The shim drains Render requests lazily; the Picture was created by an
+     * earlier request, so process it before looking it up. */
+    mw_render_finish(dpy);
+    if (!pub || !glyphs || nglyphs <= 0) return;
+    unsigned int *gl = malloc(sizeof(unsigned int) * (size_t)nglyphs);
+    int *xs = malloc(sizeof(int) * (size_t)nglyphs);
+    int *ys = malloc(sizeof(int) * (size_t)nglyphs);
+    if (!gl || !xs || !ys) { free(gl); free(xs); free(ys); return; }
+    for (int i = 0; i < nglyphs; i++) {
+        gl[i] = glyphs[i].glyph;
+        xs[i] = glyphs[i].x;
+        ys[i] = glyphs[i].y;
+    }
+    render_glyph_run(dpy, dst, pub, gl, xs, ys, nglyphs, render_argb(dpy, src));
+    free(gl); free(xs); free(ys);
 }
 
 void XftCharSpecRender(Display *dpy, int op, Picture src, XftFont *pub,
                        Picture dst, int srcx, int srcy,
                        _Xconst XftCharSpec *chars, int len)
 {
-    static int warned;
-    if (!warned++)
-        fprintf(stderr, "MW: XftCharSpecRender is a stub: Render glyph-set "
-                        "upload is not implemented, so its text is missing\n");
-    (void)dpy; (void)op; (void)src; (void)pub; (void)dst; (void)srcx; (void)srcy; (void)chars; (void)len;
+    (void)op; (void)srcx; (void)srcy;
+    /* The shim drains Render requests lazily; the Picture was created by an
+     * earlier request, so process it before looking it up. */
+    mw_render_finish(dpy);
+    if (!pub || !chars || len <= 0) return;
+    unsigned argb = render_argb(dpy, src);
+    for (int i = 0; i < len; i++) {
+        unsigned int g = XftCharIndex(dpy, pub, chars[i].ucs4);
+        int x = chars[i].x, y = chars[i].y;
+        render_glyph_run(dpy, dst, pub, &g, &x, &y, 1, argb);
+    }
 }
 
 void XftGlyphFontSpecRender(Display *dpy, int op, Picture src, Picture dst,
                             int srcx, int srcy,
                             _Xconst XftGlyphFontSpec *glyphs, int nglyphs)
 {
-    static int warned;
-    if (!warned++)
-        fprintf(stderr, "MW: XftGlyphFontSpecRender is a stub: Render glyph-set "
-                        "upload is not implemented, so its text is missing\n");
-    (void)dpy; (void)op; (void)src; (void)dst; (void)srcx; (void)srcy; (void)glyphs; (void)nglyphs;
+    (void)op; (void)srcx; (void)srcy;
+    /* The shim drains Render requests lazily; the Picture was created by an
+     * earlier request, so process it before looking it up. */
+    mw_render_finish(dpy);
+    if (!glyphs || nglyphs <= 0) return;
+    unsigned argb = render_argb(dpy, src);
+    for (int i = 0; i < nglyphs; i++) {
+        unsigned int g = glyphs[i].glyph;
+        int x = glyphs[i].x, y = glyphs[i].y;
+        render_glyph_run(dpy, dst, glyphs[i].font, &g, &x, &y, 1, argb);
+    }
 }
 
 void XftCharFontSpecRender(Display *dpy, int op, Picture src, Picture dst,
                            int srcx, int srcy,
                            _Xconst XftCharFontSpec *chars, int len)
 {
-    static int warned;
-    if (!warned++)
-        fprintf(stderr, "MW: XftCharFontSpecRender is a stub: Render glyph-set "
-                        "upload is not implemented, so its text is missing\n");
-    (void)dpy; (void)op; (void)src; (void)dst; (void)srcx; (void)srcy; (void)chars; (void)len;
+    (void)op; (void)srcx; (void)srcy;
+    /* The shim drains Render requests lazily; the Picture was created by an
+     * earlier request, so process it before looking it up. */
+    mw_render_finish(dpy);
+    if (!chars || len <= 0) return;
+    unsigned argb = render_argb(dpy, src);
+    for (int i = 0; i < len; i++) {
+        XftFont *pub = chars[i].font;
+        unsigned int g = XftCharIndex(dpy, pub, chars[i].ucs4);
+        int x = chars[i].x, y = chars[i].y;
+        render_glyph_run(dpy, dst, pub, &g, &x, &y, 1, argb);
+    }
 }

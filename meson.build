@@ -346,6 +346,13 @@ if get_option('tests')
     link_with: [libx11],
     install: false)
 
+  # Xft Render-level entry points draw through a Picture.
+  executable('xftrender_x', 'tests/xftrender_x.c',
+    include_directories: inc,
+    dependencies: [wl_dep, dependency('xrender'), dependency('xft')],
+    link_with: [libx11, libxft],
+    install: false)
+
   # X XDND drag source (owns XdndSelection) for the X->Wayland XDND path.
   executable('xdnd_src_x', 'tests/xdnd_src_x.c',
     include_directories: inc,

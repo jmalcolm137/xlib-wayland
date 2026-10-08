@@ -256,6 +256,15 @@ static void deliver_key(Display *d, KeyCode kc, int type)
     }
 }
 
+/* Public wrapper: synthesise a key press/release to the focused window.  The
+ * XIM bridge uses it to realise text-input delete_surrounding_text, which XIM
+ * itself has no message for. */
+void mw_key_send(Display *d, KeyCode kc, Bool press)
+{
+    if (!kc) return;
+    deliver_key(d, kc, press ? KeyPress : KeyRelease);
+}
+
 /* Mirror the repeat deadline to the wakeup helper so it can wake the client's
  * select() exactly when a repeat is due, rather than waiting for unrelated
  * traffic on the Wayland connection (see src/wayland/wakeup.c). */

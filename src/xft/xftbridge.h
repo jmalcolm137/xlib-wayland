@@ -43,4 +43,12 @@ void  mw_xft_fill_rect(Display *dpy, Drawable dr, int x, int y,
                        unsigned int w, unsigned int h, unsigned int argb,
                        const XRectangle *clip, int nclip);
 
+/* Render-level helpers (for the Xft*Render entry points): process any pending
+ * Render requests (the shim drains them lazily, but these entry points look the
+ * Picture up immediately), then the drawable behind a Picture, and a solid
+ * fill's colour as rgba[4].  Return non-zero on success. */
+void  mw_render_finish(Display *dpy);
+int   mw_render_picture_drawable(Display *dpy, XID picture, unsigned long *drawable);
+int   mw_render_picture_solid(Display *dpy, XID picture, unsigned short rgba[4]);
+
 #endif

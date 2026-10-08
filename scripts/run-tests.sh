@@ -452,6 +452,29 @@ else
     exit 1
 fi
 
+say "Xft Render-level entry points draw through a Picture"
+XFR_SOCK="mwfr$$"
+XDG_RUNTIME_DIR="$RUNTIME" "$BUILD/headless-compositor" \
+    --socket "$XFR_SOCK" --size 200x200 --timeout 6 \
+    --output "$WORK/xftrender.png" >"$WORK/xftrender.ready" 2>"$WORK/xftrender.hc" &
+XFRHC=$!
+for _ in $(seq 1 100); do
+    grep -q READY "$WORK/xftrender.ready" 2>/dev/null && break; sleep 0.05
+done
+LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+    XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XFR_SOCK" \
+    timeout 8 "$BUILD/xftrender_x" >"$WORK/xftrender.out" 2>&1
+XFRC=$?
+kill "$XFRHC" 2>/dev/null || true
+wait "$XFRHC" 2>/dev/null || true
+if [ "$XFRC" = 0 ] && grep -q 'XFT:glyph=[1-9][0-9]* red=1' "$WORK/xftrender.out"; then
+    echo "  ok   XftGlyphSpecRender drew through the destination Picture"
+else
+    echo "  FAIL: Xft Render entry points"
+    sed 's/^/  /' "$WORK/xftrender.out"
+    exit 1
+fi
+
 say "verify pixels"
 python3 - "$WORK/draw.png" <<'PY'
 import sys

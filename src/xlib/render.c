@@ -108,6 +108,29 @@ void mw_render_init(Display *d) { (void)d; }
 static MwRenderPicture *pic(Display *d, XID id)
 { return mw_lookup(d, id, MW_OBJ_PICTURE); }
 
+/* For the Xft Render-level entry points (xft.c): the drawable behind a Picture
+ * and, for a solid fill, its colour.  Return non-zero on success. */
+int mw_render_picture_drawable(Display *d, XID picture, unsigned long *drawable)
+{
+    MwRenderPicture *p = pic(d, picture);
+    if (!p || p->kind != PK_DRAWABLE) return 0;
+    if (drawable) *drawable = p->drawable;
+    return 1;
+}
+
+int mw_render_picture_solid(Display *d, XID picture, unsigned short rgba[4])
+{
+    MwRenderPicture *p = pic(d, picture);
+    if (!p || p->kind != PK_SOLID) return 0;
+    if (rgba) {
+        rgba[0] = p->color.red;
+        rgba[1] = p->color.green;
+        rgba[2] = p->color.blue;
+        rgba[3] = p->color.alpha;
+    }
+    return 1;
+}
+
 static MwGlyphSet *glyphset(Display *d, XID id)
 { return mw_lookup(d, id, MW_OBJ_GLYPHSET); }
 

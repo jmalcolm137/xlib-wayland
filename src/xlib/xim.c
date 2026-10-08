@@ -24,6 +24,8 @@
  */
 #include "internal.h"
 
+#include <X11/keysym.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -466,9 +468,25 @@ static void ti_commit_string(void *data, struct zwp_text_input_v3 *ti,
 static void ti_delete_surrounding_text(void *data, struct zwp_text_input_v3 *ti,
                                        uint32_t before_length, uint32_t after_length)
 {
-    (void)data; (void)ti; (void)before_length; (void)after_length;
-    /* No equivalent in the XIM client contract; the toolkit's own editing is
-     * left untouched. */
+    (void)ti;
+    Display *d = data;
+    /* XIM has no delete-surrounding request, so edit the way a user would:
+     * BackSpace `before_length` times and Delete `after_length` times, to the
+     * focused widget.  This is what the IM (e.g. ibus) is asking for when it
+     * sends delete_surrounding_text. */
+    KeyCode bs = XKeysymToKeycode(d, XK_BackSpace);
+    KeyCode del = XKeysymToKeycode(d, XK_Delete);
+    for (uint32_t i = 0; i < before_length; i++) {
+        mw_key_send(d, bs, True);
+        mw_key_send(d, bs, False);
+    }
+    for (uint32_t i = 0; i < after_length; i++) {
+        mw_key_send(d, del, True);
+        mw_key_send(d, del, False);
+    }
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: XIM delete_surrounding before=%u after=%u\n",
+                before_length, after_length);
 }
 
 static void ti_done(void *data, struct zwp_text_input_v3 *ti, uint32_t serial)
