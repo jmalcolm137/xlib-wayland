@@ -261,6 +261,7 @@ struct mw_action {
 	int value;        /* ACT_AXIS: signed wheel detents */
 	int delay_ms;
 	int has_xy;       /* motion only: the coordinates are meaningful */
+	int resizing;     /* ACT_RESIZE: carry XDG_TOPLEVEL_STATE_RESIZING */
 };
 
 struct mw_compositor {
@@ -2941,6 +2942,19 @@ static void parse_script(struct mw_compositor *comp, const char *path)
 			a.x = atoi(x);
 			a.y = atoi(y);
 			a.has_xy = 1;
+		} else if (!strcmp(tok, "resize_begin")) {
+			/* Like "resize", but the configure carries
+			 * XDG_TOPLEVEL_STATE_RESIZING: an interactive resize is in
+			 * progress (a later plain "resize" ends it). */
+			char *x = strtok_r(NULL, " \t\r\n", &save);
+			char *y = strtok_r(NULL, " \t\r\n", &save);
+			if (!x || !y)
+				continue;
+			a.kind = ACT_RESIZE;
+			a.x = atoi(x);
+			a.y = atoi(y);
+			a.has_xy = 1;
+			a.resizing = 1;
 		} else {
 			continue;
 		}
@@ -3203,6 +3217,11 @@ static void execute_action(struct mw_compositor *comp, struct mw_action *a)
 		if (xdg && xdg->toplevel) {
 			struct wl_array states;
 			wl_array_init(&states);
+			if (a->resizing) {
+				uint32_t *s = wl_array_add(&states, sizeof(uint32_t));
+				if (s)
+					*s = XDG_TOPLEVEL_STATE_RESIZING;
+			}
 			xdg_toplevel_send_configure(xdg->toplevel->resource,
 						    a->x, a->y, &states);
 			wl_array_release(&states);
