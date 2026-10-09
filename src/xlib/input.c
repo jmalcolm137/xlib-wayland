@@ -135,6 +135,8 @@ static void pt_event(Display *d, MwWindow *w, XEvent *ev, int type,
 
 static MwToplevel *win_toplevel(MwWindow *w);
 static bool same_toplevel(MwWindow *a, MwWindow *b);
+static bool is_transient_popup(MwWindow *w);
+static bool focus_moving_into_popup(Display *d, MwWindow *w);
 
 /* ---------------------------------------------------------- keyboard */
 
@@ -156,6 +158,18 @@ static void kbd_enter(void *data, struct wl_keyboard *kbd, uint32_t serial,
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: kbd_enter surface->win=%lx explicit=%d\n",
                 w ? w->id : 0UL, dp->focus_explicit);
+    /* The compositor focuses the popup surface for the duration of its
+     * xdg_popup grab (KWin does).  X keeps the input focus on the application
+     * toplevel and never puts it on an override-redirect menu, so ignore the
+     * enter: following it made Firefox's app menu see a focus change and hide
+     * itself the instant it opened. */
+    if (is_transient_popup(w) &&
+        (!dp->kbd_focus || !same_toplevel(dp->kbd_focus, w))) {
+        if (getenv("MW_TRACE"))
+            fprintf(stderr, "MW: kbd_enter popup 0x%lx ignored (focus stays 0x%lx)\n",
+                    w->id, dp->kbd_focus ? dp->kbd_focus->id : 0UL);
+        return;
+    }
     if (w) {
         /* Work out which window inside the surface that just took the
          * keyboard should hold the X focus.  The existing kbd_focus is only
@@ -211,6 +225,9 @@ static void kbd_leave(void *data, struct wl_keyboard *kbd, uint32_t serial,
     Display *d = data;
     XDisplayImpl *dp = MWD(d);
     MwWindow *w = window_for_surface(d, surface);
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: kbd_leave surface->win=%lx kbd_focus=%lx\n",
+                w ? w->id : 0UL, dp->kbd_focus ? dp->kbd_focus->id : 0UL);
     /* Only focus out the window this surface actually owns.  When focus moves
      * from one toplevel to another the compositor may deliver leave(A) after
      * the FocusIn we already emitted synchronously for B; acting on it aimed a
@@ -219,6 +236,13 @@ static void kbd_leave(void *data, struct wl_keyboard *kbd, uint32_t serial,
      * another subtest). */
     if (!w || (dp->kbd_focus && !same_toplevel(dp->kbd_focus, w)))
         return;
+    /* Focus is moving into an open menu popup of this toplevel, not leaving
+     * the application: X keeps the toplevel focused, so report nothing. */
+    if (focus_moving_into_popup(d, w)) {
+        if (getenv("MW_TRACE"))
+            fprintf(stderr, "MW: kbd_leave 0x%lx suppressed (menu open)\n", w->id);
+        return;
+    }
     if (dp->kbd_focus && (dp->kbd_focus->event_mask & FocusChangeMask)) {
         XFocusChangeEvent fe;
         memset(&fe, 0, sizeof fe);
@@ -708,6 +732,24 @@ static MwToplevel *win_toplevel(MwWindow *w)
 static bool same_toplevel(MwWindow *a, MwWindow *b)
 {
     return win_toplevel(a) == win_toplevel(b);
+}
+
+/* An override-redirect menu/popup window.  X does not move the input focus to
+ * one: such a window is the compositor's xdg_popup, whose grab makes the
+ * compositor focus the popup surface -- but that focus is not the X input
+ * focus, which stays on the application's own toplevel. */
+static bool is_transient_popup(MwWindow *w)
+{
+    return w && (w->override_redirect || (w->tl && w->tl->is_popup));
+}
+
+/* True when the pointer/keyboard focus is moving into the open menu popup that
+ * `w`'s toplevel owns (rather than leaving the application). */
+static bool focus_moving_into_popup(Display *d, MwWindow *w)
+{
+    XDisplayImpl *dp = MWD(d);
+    return w && dp->open_menu && dp->open_menu->popup_parent &&
+           same_toplevel(dp->open_menu->popup_parent, w);
 }
 
 /* Deepest window under the pointer, plus position relative to the toplevel. */
