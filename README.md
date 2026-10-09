@@ -16,6 +16,9 @@ This is not the same as Xwayland. NEdit run this way is a real native Wayland ap
 
 See [DESIGN.md](DESIGN.md) for the full rationale.
 
+Compatibility is good enough to run applications built with Xlib, the Athena Toolkit, the Xt Toolkit,
+CDE / OpenMotif, GIMP 2.10 over GTK2, and Firfox 157 over GTK3 (X11 back-end).
+
 ## Status
 
 The shim (`src/`, installed as `libX11.so.6`) is implemented and working.
