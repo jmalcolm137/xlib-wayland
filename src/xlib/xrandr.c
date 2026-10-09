@@ -271,3 +271,42 @@ Status XRRSetCrtcConfig(Display *dpy, XRRScreenResources *res, RRCrtc crtc,
 
 void XRRSetOutputPrimary(Display *dpy, Window window, RROutput output)
 { (void)dpy; (void)window; (void)output; }
+
+/* RandR 1.4 providers.  The compositor owns the single output, so there is no
+ * display-provider indirection to report: hand back an empty provider list.
+ * Firefox's GL probe reads nproviders and skips the provider lookup at zero. */
+XRRProviderResources *XRRGetProviderResources(Display *d, Window w)
+{
+    (void)d; (void)w;
+    XRRProviderResources *r = calloc(1, sizeof *r);
+    if (!r) return NULL;
+    r->timestamp = mw_now();
+    r->nproviders = 0;
+    r->providers = NULL;
+    return r;
+}
+
+void XRRFreeProviderResources(XRRProviderResources *r)
+{
+    if (!r) return;
+    free(r->providers);
+    free(r);
+}
+
+XRRProviderInfo *XRRGetProviderInfo(Display *d, XRRScreenResources *res,
+                                    RRProvider provider)
+{
+    (void)d; (void)res; (void)provider;
+    return NULL;
+}
+
+void XRRFreeProviderInfo(XRRProviderInfo *info)
+{
+    if (!info) return;
+    free(info->crtcs);
+    free(info->outputs);
+    free(info->name);
+    free(info->associated_providers);
+    free(info->associated_capability);
+    free(info);
+}
