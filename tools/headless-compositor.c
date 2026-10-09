@@ -760,6 +760,12 @@ static void drop_input_focus(struct mw_surface *surface)
 		if (dev->entered_surface == surface)
 			pointer_leave(dev, surface);
 	}
+	wl_list_for_each(dev, &comp->keyboards, link) {
+		if (dev->entered_surface == surface) {
+			dev->entered_surface = NULL;
+			dev->entered = 0;
+		}
+	}
 }
 
 static void surface_destroyed(struct wl_resource *resource)
@@ -3116,8 +3122,19 @@ static void execute_action(struct mw_compositor *comp, struct mw_action *a)
 		struct mw_device *dev = keyboard_for_surface(comp, surface);
 		if (!dev || !surface)
 			return;
-		if (!dev->entered)
+		/* Follow the input target: when the active window or popup
+		 * changes (a dialog opened from a menu, say), send the old
+		 * surface a leave and enter the new one, so the client routes
+		 * keys to the window that is actually in front. */
+		if (!dev->entered || dev->entered_surface != surface) {
+			if (dev->entered_surface)
+				wl_keyboard_send_leave(dev->resource,
+						       wl_display_next_serial(comp->display),
+						       dev->entered_surface->resource);
 			keyboard_enter(dev, surface);
+			dev->entered_surface = surface;
+			comp->input_surface = surface;
+		}
 		wl_keyboard_send_key(dev->resource,
 				     wl_display_next_serial(comp->display),
 				     now_ms(), a->code, a->state);
