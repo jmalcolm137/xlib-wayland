@@ -16,6 +16,7 @@ pixman_dep  = dependency('pixman-1')
 protos_dep  = dependency('wayland-protocols')
 threads_dep = dependency('threads')
 xrender_dep = dependency('xrender')
+xcb_dep     = dependency('xcb')
 m_dep       = cc.find_library('m', required: false)
 
 wl_scan = find_program('wayland-scanner')
@@ -263,6 +264,28 @@ pkg.generate(libxinerama,
   filebase: 'xinerama',
   version: '1.1.6',
   description: 'Xinerama monitor geometry over the Motif/Wayland shim',
+  requires: 'x11',
+  subdirs: 'X11')
+
+# libX11-xcb: XCB-based toolkits call XGetXCBConnection to reach the server's
+# MIT-SHM extension through XCB (Firefox's nsShmImage).  The shim has no XCB
+# transport, so XGetXCBConnection returns a libxcb error-state connection and
+# such probes see the extension as absent, falling back to XPutImage.  The
+# same soname as Xorg's library lets it shadow the host one at run time.
+libx11xcb = shared_library('X11-xcb',
+  'src/xlib/x11xcb.c',
+  include_directories: inc,
+  dependencies: [xcb_dep],
+  link_with: libx11,
+  version: '1.0.0',
+  soversion: '1',
+  install: true)
+
+pkg.generate(libx11xcb,
+  name: 'x11-xcb',
+  filebase: 'x11-xcb',
+  version: '1.8.13',
+  description: 'Xlib/XCB glue for the Motif/Wayland Xlib shim',
   requires: 'x11',
   subdirs: 'X11')
 
