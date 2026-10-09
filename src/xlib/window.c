@@ -1265,10 +1265,16 @@ int XSetWindowBackground(Display *d, Window w, unsigned long pixel)
 {
     MwWindow *win = mw_window(d, w);
     if (win) {
+        /* Setting the background only records the attribute.  X does not
+         * change the window's current contents here; the new background is
+         * used the next time the window is cleared or exposed.  Repainting
+         * immediately wiped whatever the client had already drawn -- GDK
+         * sets a window's background while handling a popup dismissal, which
+         * erased a software-composited window except for the region the
+         * client happened to redraw afterwards. */
         win->background_pixel = pixel;
         win->background_pixmap = None;
         win->have_background = true;
-        if (win->surface) paint_background(win, 0, 0, win->w, win->h);
     }
     return 1;
 }
@@ -1279,7 +1285,6 @@ int XSetWindowBackgroundPixmap(Display *d, Window w, Pixmap pixmap)
     if (win) {
         win->background_pixmap = pixmap;
         win->have_background = (pixmap != None);
-        if (win->surface) paint_background(win, 0, 0, win->w, win->h);
     }
     return 1;
 }
