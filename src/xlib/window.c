@@ -456,6 +456,9 @@ static MwWindow *open_menu_after(MwWindow *win)
 void mw_destroy_window(Display *d, MwWindow *win)
 {
     if (!win) return;
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: destroy 0x%lx override=%d toplevel=%d\n",
+                win->id, win->override_redirect, win->tl != NULL);
     /* destroy children */
     while (win->last_child) mw_destroy_window(d, win->last_child);
 
@@ -705,6 +708,9 @@ MwWindow *mw_any_mapped_toplevel(Display *d, MwWindow *avoid)
 void mw_unmap_window(Display *d, MwWindow *win)
 {
     if (!win || !win->mapped) return;
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: unmap 0x%lx override=%d toplevel=%d\n",
+                win->id, win->override_redirect, win->tl != NULL);
     win->mapped = false;
     win->map_state = IsUnmapped;
     if (MWD(d)->active_toplevel == win)
