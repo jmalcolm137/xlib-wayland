@@ -816,6 +816,48 @@ void mw_wm_net_wm_state(Display *d, XClientMessageEvent *cm)
     }
 }
 
+/* EWMH _NET_WM_MOVERESIZE: the client asks the window manager to run an
+ * interactive move or resize.  A client-side-decorated Firefox drags itself
+ * this way (gdk_window_begin_move_drag); we are the window manager, so turn it
+ * into an xdg-shell move/resize on the toplevel, with the serial of the press
+ * that started the drag. */
+void mw_wm_moveresize(Display *d, XClientMessageEvent *cm)
+{
+    XDisplayImpl *dp = MWD(d);
+    MwWindow *win = mw_window(d, cm->window);
+    if (!win || !win->tl) win = dp->active_toplevel;
+    MwToplevel *tl = win ? win->tl : NULL;
+    if (!tl || tl->is_popup || win->override_redirect ||
+        !tl->xdg_toplevel || !dp->wl_seat)
+        return;
+    uint32_t serial = dp->last_press_serial ? dp->last_press_serial
+                                            : dp->last_input_serial;
+    if (!serial) return;
+    long direction = cm->data.l[2];
+    if (direction == 8) {                 /* _NET_WM_MOVERESIZE_MOVE */
+        xdg_toplevel_move(tl->xdg_toplevel, dp->wl_seat, serial);
+    } else if (direction >= 0 && direction <= 7) {
+        static const uint32_t edges[8] = {
+            XDG_TOPLEVEL_RESIZE_EDGE_TOP_LEFT,
+            XDG_TOPLEVEL_RESIZE_EDGE_TOP,
+            XDG_TOPLEVEL_RESIZE_EDGE_TOP_RIGHT,
+            XDG_TOPLEVEL_RESIZE_EDGE_RIGHT,
+            XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_RIGHT,
+            XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM,
+            XDG_TOPLEVEL_RESIZE_EDGE_BOTTOM_LEFT,
+            XDG_TOPLEVEL_RESIZE_EDGE_LEFT,
+        };
+        xdg_toplevel_resize(tl->xdg_toplevel, dp->wl_seat, serial,
+                            edges[direction]);
+    } else {
+        return;
+    }
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: moveresize win=0x%lx dir=%ld serial=%u\n",
+                win->id, direction, serial);
+    if (dp->wl_display) wl_display_flush(dp->wl_display);
+}
+
 /* Maximize has no client-side geometry of its own: xdg_toplevel_set_maximized
  * lets the compositor size the window (keeping its decorations), and its
  * configure resizes the X window.  We only track the state and mirror it. */

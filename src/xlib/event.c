@@ -567,6 +567,15 @@ int XSendEvent(Display *d, Window w, Bool propagate, long event_mask, XEvent *ev
         mw_wm_net_wm_state(d, &event->xclient);
         return 1;
     }
+    /* Likewise _NET_WM_MOVERESIZE: a client-side-decorated window asks us to
+     * start an interactive move/resize (this is how a Firefox title-bar drag
+     * reaches the compositor). */
+    if (event->type == ClientMessage && w == MWSCR(d)->root &&
+        event->xclient.message_type ==
+            mw_intern_atom(d, "_NET_WM_MOVERESIZE", True)) {
+        mw_wm_moveresize(d, &event->xclient);
+        return 1;
+    }
     event->xany.send_event = True;
     event->xany.display = d;
     if (win->event_mask & event_mask || event_mask == 0 ||

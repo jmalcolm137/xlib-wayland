@@ -313,6 +313,40 @@ void mw_init_wm_window(Display *d)
     mw_set_prop(d, root, mwm_info, mwm_info, 32, (const unsigned char *)info, 2);
 
     mw_set_workspace_props(d, wm);
+
+    /* Minimal EWMH identification.  Toolkits decide whether to use the EWMH
+     * paths from the root's _NET_SUPPORTED: gdk_window_begin_move_drag, for
+     * one, only sends _NET_WM_MOVERESIZE when the hint is listed, so a
+     * client-side-decorated window (Firefox draws its own title bar) could not
+     * otherwise be dragged. */
+    {
+        Atom supported = mw_intern_atom(d, "_NET_SUPPORTED", False);
+        Atom check     = mw_intern_atom(d, "_NET_SUPPORTING_WM_CHECK", False);
+        unsigned long atoms[16];
+        int n = 0;
+        atoms[n++] = supported;
+        atoms[n++] = check;
+        atoms[n++] = mw_intern_atom(d, "_NET_WM_NAME", False);
+        atoms[n++] = mw_intern_atom(d, "_NET_WM_MOVERESIZE", False);
+        atoms[n++] = mw_intern_atom(d, "_NET_CLOSE_WINDOW", False);
+        atoms[n++] = mw_intern_atom(d, "_NET_ACTIVE_WINDOW", False);
+        atoms[n++] = mw_intern_atom(d, "_NET_WM_STATE", False);
+        atoms[n++] = mw_intern_atom(d, "_NET_WM_STATE_FULLSCREEN", False);
+        atoms[n++] = mw_intern_atom(d, "_NET_WM_STATE_MAXIMIZED_VERT", False);
+        atoms[n++] = mw_intern_atom(d, "_NET_WM_STATE_MAXIMIZED_HORZ", False);
+        XChangeProperty(d, root->id, supported, XA_ATOM, 32, PropModeReplace,
+                        (unsigned char *)atoms, n);
+        unsigned long wid = wm->id;
+        XChangeProperty(d, root->id, check, XA_WINDOW, 32, PropModeReplace,
+                        (unsigned char *)&wid, 1);
+        XChangeProperty(d, wm->id, check, XA_WINDOW, 32, PropModeReplace,
+                        (unsigned char *)&wid, 1);
+        const char *name = "xlib-wayland";
+        XChangeProperty(d, wm->id, mw_intern_atom(d, "_NET_WM_NAME", False),
+                        mw_intern_atom(d, "UTF8_STRING", False), 8,
+                        PropModeReplace, (const unsigned char *)name,
+                        (int)strlen(name));
+    }
 }
 
 /* ------------------------------------------------------------ creation */

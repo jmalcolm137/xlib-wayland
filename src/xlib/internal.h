@@ -865,6 +865,7 @@ void        mw_toplevel_reposition(MwToplevel *tl);
 /* Window-manager side of EWMH _NET_WM_STATE: the client asked us to add,
  * remove or toggle a state (fullscreen today). */
 void        mw_wm_net_wm_state(Display *d, XClientMessageEvent *cm);
+void        mw_wm_moveresize(Display *d, XClientMessageEvent *cm);
 void        mw_toplevel_set_fullscreen(Display *d, MwWindow *win, bool on);
 void        mw_toplevel_set_maximized(Display *d, MwWindow *win, bool on);
 
