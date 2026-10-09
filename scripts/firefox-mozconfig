@@ -1,0 +1,26 @@
+# Firefox 157 built against the xlib-wayland libX11 shim.
+# X11-only toolkit: no native Wayland backend is compiled in.
+#
+# Reference config.  Copy it to <firefox-src>/mozconfig, or point MOZCONFIG at
+# it, and adjust the prefix/objdir for your tree.  The shim must already be
+# installed with `meson install -C build` into PKG_CONFIG_PATH's prefix.
+
+export PKG_CONFIG_PATH="$HOME/.local/xlib-wayland/lib/pkgconfig"
+export LDFLAGS="-L$HOME/.local/xlib-wayland/lib -Wl,-rpath,$HOME/.local/xlib-wayland/lib"
+export CPPFLAGS="-I$HOME/.local/xlib-wayland/include"
+export PATH="$HOME/.cargo/bin:$PATH"
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=cc
+
+ac_add_options --enable-application=browser
+ac_add_options --enable-default-toolkit=cairo-gtk3-x11-only
+ac_add_options --enable-optimize
+ac_add_options --disable-debug
+ac_add_options --disable-tests
+ac_add_options --disable-updater
+ac_add_options --disable-crashreporter
+ac_add_options --disable-profiling
+ac_add_options --disable-warnings-as-errors
+ac_add_options --without-wasm-sandboxed-libraries
+ac_add_options --disable-elf-hack
+
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-x11

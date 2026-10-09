@@ -17,7 +17,7 @@ This is not the same as Xwayland. NEdit run this way is a real native Wayland ap
 See [DESIGN.md](DESIGN.md) for the full rationale.
 
 Compatibility is good enough to run applications built with Xlib, the Athena Toolkit, the Xt Toolkit,
-CDE / OpenMotif, GIMP 2.10 over GTK2, and Firfox 157 over GTK3 (X11 back-end).
+CDE / OpenMotif, GIMP 2.10 over GTK2, and Firefox 157 over GTK3 (X11 back-end).
 
 ## Status
 
@@ -41,6 +41,7 @@ Wayland compositor:
 | GTK+ 2.24.33 built unmodified; gtester 14/14 | ✅ done |
 | MATE 1.10 applications built unmodified (29 components) | ✅ done |
 | GIMP 2.10.24 built unmodified; runs and renders with no XWayland | ✅ done |
+| **Firefox 157 (GTK3, X11 toolkit) built unmodified and running** | ✅ **done** ([docs/FIREFOX-STATUS.md](docs/FIREFOX-STATUS.md)) |
 | EWMH window-manager messages (`_NET_WM_STATE` fullscreen/maximize) | ✅ done |
 | XSETTINGS `_XSETTINGS_S*` manager (theme/font/Xft from a config file) | ✅ done ([docs/XSETTINGS-STATUS.md](docs/XSETTINGS-STATUS.md)) |
 | Clipboard carries non-text (image/uri-list) both ways | ✅ done ([docs/CLIPBOARD-STATUS.md](docs/CLIPBOARD-STATUS.md)) |
@@ -66,8 +67,8 @@ events, atoms and window properties, Xrm, X's integer pixel grid for 1px
 stroked lines, and menu interaction — an override-redirect popup is promoted to
 an `xdg_popup`, takes a grab, arms items on `EnterNotify`, and routes presses
 to the item window.  Beyond the unit/golden tests, the stock **libXt**,
-**libXm**, **XV** and **NEdit** have all been built from unmodified sources
-against the prefix and run under the headless compositor.
+**libXm**, **XV**, **NEdit** and **Firefox 157** have all been built from
+unmodified sources against the prefix and run under the headless compositor.
 
 > Note: Open Motif needs `-std=gnu17` (its build tools predate C23) and its
 > `configure` must be given `--disable-xft`; NEdit needs `-std=gnu89 -fcommon`.
@@ -147,7 +148,8 @@ tools/          headless-compositor.c (test compositor)
 tests/          test_core.c (unit), test_draw.c (Xlib), test_xt.c (Xt),
                 test_xm_menu.c (Motif menu), test_popup.c (menu interaction,
                 Motif-free), popup.input (scripted clicks for test_popup)
-scripts/        run-tests.sh, build-stack.sh, build-xv.sh, build-nedit.sh
+scripts/        run-tests.sh, run-x11-clients.sh, run-firefox-headless.sh,
+                build-stack.sh, build-xv.sh, build-nedit.sh, firefox-mozconfig
 ```
 
 ## Building the full stack
