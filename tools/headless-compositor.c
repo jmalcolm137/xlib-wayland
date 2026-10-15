@@ -786,6 +786,14 @@ static void surface_destroyed(struct wl_resource *resource)
 
 	if (surface->comp->last_toplevel == surface)
 		surface->comp->last_toplevel = NULL;
+	/* A dismissed popup (or the surface under a drag) also has to be forgotten:
+	 * execute_action prefers comp->popup_surface, so a destroyed one left it
+	 * calling wl_resource_get_client() on a freed resource -- a segfault in
+	 * script_timer_func once the client had taken its popup down. */
+	if (surface->comp->popup_surface == surface)
+		surface->comp->popup_surface = NULL;
+	if (surface->comp->drag_surface == surface)
+		surface->comp->drag_surface = NULL;
 	drop_input_focus(surface);
 	wl_list_remove(&surface->link);
 	free(surface);
