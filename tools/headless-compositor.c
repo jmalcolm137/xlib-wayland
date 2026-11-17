@@ -1753,6 +1753,9 @@ struct hc_data_offer {
 	 * type and a chosen action. */
 	int                    accepted;
 	uint32_t               action;
+	int                    dropped;    /* dropped, waiting for finish */
+	struct mw_compositor  *comp;       /* set for drag offers */
+	struct wl_resource    *resource;
 };
 
 static void broadcast_selection(struct mw_compositor *comp);
@@ -1858,14 +1861,22 @@ static void data_offer_destroy(struct wl_client *client,
 	wl_resource_destroy(resource);
 }
 
+static void drag_source_finished(struct hc_data_offer *offer);
+
 static void data_offer_finish(struct wl_client *client,
 			      struct wl_resource *resource)
 {
 	struct hc_data_offer *offer = wl_resource_get_user_data(resource);
 	(void)client;
-	if (offer && (!offer->accepted || !offer->action))
+	if (offer && (!offer->accepted || !offer->action)) {
 		wl_resource_post_error(resource, WL_DATA_OFFER_ERROR_INVALID_FINISH,
 				       "finish without an accepted type and action");
+		return;
+	}
+	/* The source hears dnd_finished only now, once the target has its
+	 * data -- a source may free itself on it. */
+	if (offer && offer->dropped)
+		drag_source_finished(offer);
 }
 
 /* Choose the action: the target's preferred one if the source allows it,
@@ -1901,11 +1912,25 @@ static const struct wl_data_offer_interface data_offer_implementation = {
 	.set_actions = data_offer_set_actions,
 };
 
+static void drag_source_finished(struct hc_data_offer *offer)
+{
+	offer->dropped = 0;
+	if (offer->source && offer->source->resource &&
+	    wl_resource_get_version(offer->source->resource) >= 3)
+		wl_data_source_send_dnd_finished(offer->source->resource);
+}
+
 static void data_offer_destroyed(struct wl_resource *resource)
 {
 	struct hc_data_offer *offer = wl_resource_get_user_data(resource);
 	if (!offer)
 		return;
+	/* A target that took the drop but never called finish (a v1/v2 client)
+	 * is done with it once it destroys the offer. */
+	if (offer->dropped)
+		drag_source_finished(offer);
+	if (offer->comp && offer->comp->drag_offer == resource)
+		offer->comp->drag_offer = NULL;
 	wl_list_remove(&offer->link);
 	free(offer);
 }
@@ -2057,6 +2082,7 @@ static void drag_enter(struct mw_compositor *comp, struct mw_surface *surface,
 		return;
 	offer->source = comp->drag_source;
 	offer->primary = 0;
+	offer->comp = comp;
 	wl_list_insert(&comp->drag_source->offers, &offer->link);
 
 	struct wl_resource *offer_res = wl_resource_create(
@@ -2096,8 +2122,10 @@ static void drag_drop(struct mw_compositor *comp)
 	if (offer && offer->accepted) {
 		if (comp->drag_device)
 			wl_data_device_send_drop(comp->drag_device);
-		if (comp->drag_source && comp->drag_source->resource)
-			wl_data_source_send_dnd_finished(comp->drag_source->resource);
+		if (comp->drag_source && comp->drag_source->resource &&
+		    wl_resource_get_version(comp->drag_source->resource) >= 3)
+			wl_data_source_send_dnd_drop_performed(comp->drag_source->resource);
+		offer->dropped = 1;     /* dnd_finished follows the target's finish */
 	} else {
 		/* No type accepted: like wlroots, the drag is cancelled. */
 		if (getenv("HC_TRACE"))
