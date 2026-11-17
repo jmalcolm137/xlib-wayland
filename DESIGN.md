@@ -677,8 +677,10 @@ re-learned:
    stroked lines are half a pixel off.  `mw_set_snap()` applies the standard
    `+0.5` nudge for stroke primitives; filled primitives are unaffected.
    Verified: a horizontal line requested at `y=260` lands exactly on row 260.
-7. **`XParseGeometry` stores magnitudes** and signals sign via
-   `XNegative`/`YNegative`, which is what `XWMGeometry` consumes.
+7. **Geometry parsing follows libX11 exactly.**  `XParseGeometry` returns
+   signed offsets with `XValue` set alongside `XNegative` (clients test
+   `XValue`, then measure from the far edge), and `XWMGeometry` counts sizes
+   in resize increments over the base size, as Xt's Shell expects.
 8. **Colour names must not assume `rgb.txt`.**  It is absent on some distros;
    a built-in table of the common X11 colour names backs it up.
 9. **fontconfig/FreeType are always available**; `XLoadQueryFont` must never

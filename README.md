@@ -82,8 +82,12 @@ scripts/run-tests.sh
 ```
 
 The test runner needs `python3`+Pillow for pixel verification; it builds the
-shim with meson, runs `test_core`, renders `test_draw` under the bundled
-`headless-compositor`, and asserts the captured frame pixel-for-pixel.
+shim with meson, runs the unit tests (`test_core` and `test_internal`, each
+against a private `headless-compositor`), renders `test_draw` under the
+bundled compositor, and asserts the captured frame pixel-for-pixel.
+`meson test -C build` runs just the unit tests; configure a second build with
+`-Db_sanitize=address,undefined` to run them under the sanitizers.  See
+[docs/CODE-REVIEW.md](docs/CODE-REVIEW.md) for the latest review.
 
 ## Verifying against real X11 programs
 
@@ -145,7 +149,7 @@ src/xlib/       the Xlib implementation (display, window, gcontext, image,
                 region, XIM, XRandR, XShape, and xlibint.c: the internal ABI
                 that libXext/libXrender/libcairo depend on)
 tools/          headless-compositor.c (test compositor)
-tests/          test_core.c (unit), test_draw.c (Xlib), test_xt.c (Xt),
+tests/          test_core.c, test_internal.c (unit), test_draw.c (Xlib), test_xt.c (Xt),
                 test_xm_menu.c (Motif menu), test_popup.c (menu interaction,
                 Motif-free), popup.input (scripted clicks for test_popup)
 scripts/        run-tests.sh, run-x11-clients.sh, run-firefox-headless.sh,
