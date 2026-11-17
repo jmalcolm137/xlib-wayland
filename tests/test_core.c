@@ -74,6 +74,8 @@ static void check_xrm(void)
     CHECK(XStringToKeysym("U00E9") == XK_eacute);
     CHECK(XStringToKeysym("0x1008ff13") == 0x1008ff13);
     CHECK(XStringToKeysym("Uxyz") == NoSymbol);
+    CHECK(XStringToKeysym("U0007") == NoSymbol);       /* control: none */
+    CHECK(XStringToKeysym("U0041") == XK_A);
     const char *ks = XKeysymToString(0x10020ac);
     CHECK(ks && !strcmp(ks, "U20AC"));
     CHECK(XKeysymToString(0x10020ac) == ks);         /* the same, stable */
@@ -136,6 +138,15 @@ static void check_properties(Display *d, Window win)
     XGetWindowProperty(d, win, p, 0, 0, False, AnyPropertyType,
                        &at, &af, &ni, &ba, &data);
     CHECK(ni == 0 && ba == 5 && af == 8 && at == XA_STRING);
+    XFree(data); data = NULL;
+
+    /* An offset past the end is BadValue and deletes nothing. */
+    CHECK(XGetWindowProperty(d, win, p, 5, 1, True, AnyPropertyType,
+                             &at, &af, &ni, &ba, &data) == BadValue);
+    CHECK(data == NULL);
+    XGetWindowProperty(d, win, p, 0, 100, False, AnyPropertyType,
+                       &at, &af, &ni, &ba, &data);
+    CHECK(ni == 5);
     XFree(data); data = NULL;
 
     /* Appending another format is BadMatch: the property is unchanged. */
@@ -219,6 +230,9 @@ static void check_text_apis(Display *d, Window win)
         char mb[8];
         r1 = Xutf8LookupString(NULL, &ke, mb, 0, &ks, &st);
         CHECK(r1 == 1 && st == XBufferOverflow);
+        /* The retry gets the same result for the same event. */
+        r1 = Xutf8LookupString(NULL, &ke, mb, sizeof mb, &ks, &st);
+        CHECK(r1 == 1 && mb[0] == 'a' && st == XLookupBoth);
     }
 }
 
@@ -437,6 +451,11 @@ static void check_copies(Display *d, Window root)
         XDestroyImage(im);
     }
 
+    /* Reading a depth-1 pixmap back gives bit values. */
+    XImage *bi = XGetImage(d, bm, 0, 0, 8, 1, AllPlanes, ZPixmap);
+    CHECK(bi && XGetPixel(bi, 1, 0) == 1 && XGetPixel(bi, 6, 0) == 0);
+    if (bi) XDestroyImage(bi);
+
     XFreeGC(d, bgc);
     XFreePixmap(d, bm);
     XFreePixmap(d, p24);
@@ -530,11 +549,58 @@ static void check_stipples(Display *d, Window root)
     CHECK(pixel_at(d, pm, 0, 3) == 0x00ff00);
     CHECK(pixel_at(d, pm, 1, 3) == 0x0000ff);
 
+
+    /* The raster op applies to stippled fills too: XOR through the set bits,
+     * holes untouched. */
+    XSetForeground(d, gc, 0x123456);
+    XSetFillStyle(d, gc, FillSolid);
+    XFillRectangle(d, pm, gc, 0, 0, 8, 1);
+    XSetFunction(d, gc, GXxor);
+    XSetForeground(d, gc, 0xffffff);
+    XSetFillStyle(d, gc, FillStippled);
+    XFillRectangle(d, pm, gc, 0, 0, 8, 1);
+    CHECK(pixel_at(d, pm, 0, 0) == 0xedcba9);
+    CHECK(pixel_at(d, pm, 1, 0) == 0x123456);
+
     XFreeGC(d, tgc);
     XFreePixmap(d, tile);
     XFreeGC(d, gc);
     XFreeGC(d, sgc);
     XFreePixmap(d, st);
+    XFreePixmap(d, pm);
+}
+
+/* XDrawImageString: GXcopy whatever the GC says, and a background box that
+ * is exactly the text's cells (it used to spill one pixel each way). */
+static void check_image_text(Display *d, Window root)
+{
+    Pixmap pm = filled_pixmap(d, root, 60, 40, 0x123456);
+    GC gc = XCreateGC(d, pm, 0, NULL);
+    XFontStruct *fs = XQueryFont(d, XGContextFromGC(gc));
+    int asc = fs ? fs->ascent : 10, desc = fs ? fs->descent : 3;
+    int w = XTextWidth(fs, "ab", 2);
+    if (fs) XFreeFontInfo(NULL, fs, 0);
+    XSetFunction(d, gc, GXxor);
+    XSetForeground(d, gc, 0xffffff);
+    XSetBackground(d, gc, 0x00ff00);
+    int x = 10, y = asc + 2;
+    XDrawImageString(d, pm, gc, x, y, "ab", 2);
+    CHECK(pixel_at(d, pm, x + w - 1, y + desc - 1) == 0x00ff00);  /* bg, copied */
+    CHECK(pixel_at(d, pm, x - 1, y) == 0x123456);                  /* left of box */
+    CHECK(pixel_at(d, pm, x + w, y) == 0x123456);                  /* right of box */
+    CHECK(pixel_at(d, pm, x + 1, y - asc - 1) == 0x123456);        /* above */
+    CHECK(pixel_at(d, pm, x + 1, y + desc) == 0x123456);           /* below */
+
+    /* XCopyGC carries an empty clip list (which disables output). */
+    GC empty = XCreateGC(d, pm, 0, NULL), copy = XCreateGC(d, pm, 0, NULL);
+    XSetClipRectangles(d, empty, 0, 0, NULL, 0, Unsorted);
+    XCopyGC(d, empty, GCClipMask, copy);
+    XSetForeground(d, copy, 0xff0000);
+    XFillRectangle(d, pm, copy, 0, 0, 60, 40);
+    CHECK(pixel_at(d, pm, 50, 35) == 0x123456);
+    XFreeGC(d, empty);
+    XFreeGC(d, copy);
+    XFreeGC(d, gc);
     XFreePixmap(d, pm);
 }
 
@@ -564,6 +630,74 @@ static void check_latin1_text(Display *d, Window root)
     XFreePixmap(d, b);
 }
 
+/* Core font metrics, as Motif and Xaw lay text out with them. */
+static void check_font_metrics(Display *d)
+{
+    XFontStruct *fs = XLoadQueryFont(d, "fixed");
+    CHECK(fs && fs->per_char);
+    if (!fs || !fs->per_char) return;
+    XCharStruct *W = &fs->per_char['W'], *I = &fs->per_char['i'];
+    /* rbearing is the ink's right edge from the origin (lbearing + ink
+     * width), not the right side bearing. */
+    CHECK(W->rbearing > W->lbearing);
+    CHECK(W->rbearing >= W->width / 2 && W->rbearing <= W->width + 2);
+
+    /* The font's bounds cover every character, not just 'x'. */
+    int minw = 1 << 30, maxw = 0, maxr = -1000;
+    for (int c = 32; c < 127; c++) {
+        XCharStruct *pc = &fs->per_char[c];
+        if (pc->width < minw) minw = pc->width;
+        if (pc->width > maxw) maxw = pc->width;
+        if (pc->rbearing > maxr) maxr = pc->rbearing;
+    }
+    CHECK(fs->max_bounds.width >= maxw && fs->min_bounds.width <= minw);
+    CHECK(fs->max_bounds.rbearing >= maxr);
+
+    /* XTextExtents places each character at its pen position. */
+    int dir, asc, desc;
+    XCharStruct all;
+    XTextExtents(fs, "iW", 2, &dir, &asc, &desc, &all);
+    CHECK(all.width == I->width + W->width);
+    CHECK(all.rbearing == I->width + W->rbearing);
+    int lb = I->lbearing < I->width + W->lbearing ? I->lbearing
+                                                  : I->width + W->lbearing;
+    CHECK(all.lbearing == lb);
+    CHECK(asc == fs->ascent && all.ascent > 0);
+
+    /* The 16-bit forms measure too (they used to return zeros). */
+    XChar2b two[2] = { { 0, 'i' }, { 0, 'W' } };
+    XCharStruct all16;
+    XTextExtents16(fs, two, 2, &dir, &asc, &desc, &all16);
+    CHECK(all16.width == all.width && all16.rbearing == all.rbearing &&
+          all16.ascent == all.ascent);
+    CHECK(XTextWidth16(fs, two, 2) == all.width);
+    XFreeFont(d, fs);
+}
+
+/* The font-set accessors return storage owned by the set (Motif and Xaw
+ * index the name list), each set has its own extents, and XFreeFontSet
+ * frees it all (LeakSanitizer checks). */
+static void check_font_sets(Display *d)
+{
+    char **missing = NULL, *def = NULL;
+    int nmissing = 0;
+    XFontSet a = XCreateFontSet(d, "fixed", &missing, &nmissing, &def);
+    XFontSet b = XCreateFontSet(d, "-*-helvetica-*-r-*-*-20-*", &missing, &nmissing, &def);
+    CHECK(a && b);
+    if (!a || !b) return;
+    XFontStruct **fl1, **fl2;
+    char **nl1, **nl2;
+    CHECK(XFontsOfFontSet(a, &fl1, &nl1) == 1);
+    CHECK(XFontsOfFontSet(a, &fl2, &nl2) == 1);
+    CHECK(fl1 == fl2 && nl1 == nl2 && fl1[0] && nl1 && nl1[0]);
+    CHECK(XBaseFontNameListOfFontSet(a) && !strcmp(XBaseFontNameListOfFontSet(a), "fixed"));
+    XFontSetExtents *ea = XExtentsOfFontSet(a), *eb = XExtentsOfFontSet(b);
+    CHECK(ea && eb && ea != eb);
+    CHECK(ea && ea->max_logical_extent.height > 0);
+    XFreeFontSet(d, a);
+    XFreeFontSet(d, b);
+}
+
 static void run_display_checks(Display *d)
 {
     Window root = DefaultRootWindow(d);
@@ -572,11 +706,14 @@ static void run_display_checks(Display *d)
     check_text_apis(d, win);
     check_drawing(d, root);
     check_fonts(d, root);
+    check_font_metrics(d);
+    check_font_sets(d);
     check_raster_ops(d, root);
     check_copies(d, root);
     check_clipping(d, root);
     check_stipples(d, root);
     check_latin1_text(d, root);
+    check_image_text(d, root);
     XDestroyWindow(d, win);
 }
 
@@ -652,7 +789,13 @@ int main(void)
     /* Colour parsing. */
     XColor c;
     XrmInitialize();
-    CHECK(XParseColor(NULL, 0, "#ff0000", &c) && c.red == 0xffff);
+    /* As in libX11, #-forms are left-justified in 16 bits. */
+    CHECK(XParseColor(NULL, 0, "#ff0000", &c) && c.red == 0xff00 && c.green == 0);
+    CHECK(XParseColor(NULL, 0, "#f80", &c) && c.red == 0xf000 && c.green == 0x8000);
+    CHECK(XParseColor(NULL, 0, "#123456789abc", &c) && c.red == 0x1234 &&
+          c.blue == 0x9abc);
+    CHECK(!XParseColor(NULL, 0, "#12345", &c));
+    CHECK(XParseColor(NULL, 0, "RGB:ff/0/0", &c) && c.red == 0xffff);
     CHECK(XParseColor(NULL, 0, "black", &c) && c.red == 0 && c.green == 0);
     CHECK(XParseColor(NULL, 0, "white", &c) && c.blue == 0xffff);
     XColor screen;
@@ -675,9 +818,13 @@ int main(void)
     }
     XrmDestroyDatabase(db);
 
-    /* XImage pixel round-trip. */
+    /* XImage pixel round-trip.  As in libX11, XCreateImage does not
+     * allocate the pixels: the caller supplies them (allocating here leaked
+     * a buffer for every client that sets img->data itself). */
     XImage *img = XCreateImage(NULL, NULL, 24, ZPixmap, 0, NULL, 8, 4, 32, 0);
-    CHECK(img != NULL);
+    CHECK(img != NULL && img->data == NULL);
+    if (!img) { fprintf(stderr, "test_core: XCreateImage failed\n"); return 1; }
+    img->data = calloc((size_t)img->bytes_per_line * img->height, 1);
     CHECK(img->width == 8 && img->height == 4);
     XPutPixel(img, 3, 2, 0x123456);
     CHECK(XGetPixel(img, 3, 2) == 0x123456);
@@ -703,11 +850,32 @@ int main(void)
     /* 1-bit bitmaps have a sub-image too (it used to return NULL). */
     XImage *bm = XCreateImage(NULL, NULL, 1, XYBitmap, 0, NULL, 16, 4, 8, 0);
     CHECK(bm != NULL);
+    if (!bm) { fprintf(stderr, "test_core: XCreateImage failed\n"); return 1; }
+    bm->data = calloc((size_t)bm->bytes_per_line * bm->height, 1);
     XPutPixel(bm, 9, 3, 1);
     sub = XSubImage(bm, 8, 2, 8, 2);
     CHECK(sub && XGetPixel(sub, 1, 1) == 1 && XGetPixel(sub, 0, 0) == 0);
     if (sub) XDestroyImage(sub);
     XDestroyImage(bm);
+
+    /* A depth-1 ZPixmap is one bit per pixel, as the server lays it out. */
+    XImage *z1 = XCreateImage(NULL, NULL, 1, ZPixmap, 0, NULL, 20, 2, 32, 0);
+    CHECK(z1 && z1->bits_per_pixel == 1 && z1->bytes_per_line == 4);
+    if (z1) {
+        z1->data = calloc((size_t)z1->bytes_per_line * z1->height, 1);
+        XPutPixel(z1, 19, 1, 1);
+        CHECK(XGetPixel(z1, 19, 1) == 1 && XGetPixel(z1, 18, 1) == 0);
+        XDestroyImage(z1);
+    }
+    /* An XYPixmap holds the pixel spread over `depth` bit planes. */
+    XImage *xy = XCreateImage(NULL, NULL, 24, XYPixmap, 0, NULL, 9, 2, 8, 0);
+    CHECK(xy && xy->bits_per_pixel == 1 && xy->bytes_per_line == 2);
+    if (xy) {
+        xy->data = calloc((size_t)xy->bytes_per_line * xy->height * 24, 1);
+        XPutPixel(xy, 8, 1, 0xa5c3e1);
+        CHECK(XGetPixel(xy, 8, 1) == 0xa5c3e1 && XGetPixel(xy, 7, 1) == 0);
+        XDestroyImage(xy);
+    }
 
     check_xrm();
 
@@ -716,8 +884,13 @@ int main(void)
     char envfile[] = "/tmp/mw-xenv-XXXXXX";
     int efd = mkstemp(envfile);
     if (efd >= 0) {
+        /* A continued value spans lines (the loader used to add a newline
+         * per line, which cut it at the first). */
         const char *res = "*background: red\nxterm.foreground: green\n"
-                          "Program.font: fixed\n";
+                          "Program.font: fixed\n"
+                          "xterm.translations: #override \\\n"
+                          "    <Key>a: b()\n"
+                          "xterm.after: yes\n";
         if (write(efd, res, strlen(res)) < 0) {}
         close(efd);
         setenv("XENVIRONMENT", envfile, 1);
@@ -736,6 +909,10 @@ int main(void)
         CHECK(bg && fg && bg != fg && !strcmp(bg, "red"));
         CHECK(fn && !strcmp(fn, "fixed"));
         CHECK(XGetDefault(d, "xterm", "nosuch") == NULL);
+        char *tr = XGetDefault(d, "xterm", "translations");
+        CHECK(tr && strstr(tr, "<Key>a: b()") != NULL);
+        char *after = XGetDefault(d, "xterm", "after");
+        CHECK(after && !strcmp(after, "yes"));
     }
     if (efd >= 0) unlink(envfile);
     if (d) {
@@ -757,6 +934,52 @@ int main(void)
                            &ni, &ba, &data);
         CHECK(ni == 5 && data && memcmp(data, "hello", 5) == 0);
         XFree(data);
+
+        /* A TrueColor visual has no writable cells (clients then fall back
+         * to XAllocColor). */
+        unsigned long cells[2];
+        CHECK(!XAllocColorCells(d, DefaultColormap(d, 0), False, NULL, 0, cells, 2));
+
+        /* Class 0 is StaticGray, not a wildcard. */
+        XVisualInfo vi;
+        CHECK(!XMatchVisualInfo(d, 0, 24, StaticGray, &vi));
+        CHECK(XMatchVisualInfo(d, 0, 24, TrueColor, &vi));
+        XColor scr, exact;
+        CHECK(XAllocNamedColor(d, DefaultColormap(d, 0), "red", &scr, &exact) &&
+              exact.pixel == scr.pixel && scr.pixel == 0xff0000);
+
+        /* An 8-element (pre-ICCCM-2) standard colormap reads back with the
+         * rest zeroed, without reading past the property. */
+        long old8[8] = { 0x21, 255, 65536, 255, 256, 255, 1, 0 };
+        XChangeProperty(d, root, XA_RGB_DEFAULT_MAP, XA_RGB_COLOR_MAP, 32,
+                        PropModeReplace, (unsigned char *)old8, 8);
+        XStandardColormap sc;
+        memset(&sc, 0xee, sizeof sc);
+        CHECK(XGetStandardColormap(d, root, &sc, XA_RGB_DEFAULT_MAP));
+        CHECK(sc.colormap == 0x21 && sc.red_max == 255 && sc.visualid == 0 &&
+              sc.killid == 0);
+
+        /* Text properties: UTF-8 by style, every string back (the last one
+         * need not end in a NUL), nitems without the final NUL. */
+        wchar_t w1[] = { 'a', 0xe9, 0x20ac, 0x1f600, 0 }, w2[] = { 'z', 0 };
+        wchar_t *wl[2] = { w1, w2 };
+        XTextProperty tp;
+        CHECK(XwcTextListToTextProperty(d, wl, 2, XUTF8StringStyle, &tp) == Success);
+        CHECK(tp.encoding == XInternAtom(d, "UTF8_STRING", False));
+        CHECK(tp.nitems == 1 + 2 + 3 + 4 + 1 + 1);
+        wchar_t **back = NULL; int nback = 0;
+        CHECK(XwcTextPropertyToTextList(d, &tp, &back, &nback) == Success);
+        CHECK(nback == 2 && back && !wcscmp(back[0], w1) && !wcscmp(back[1], w2));
+        if (back) XwcFreeStringList(back);
+        XFree(tp.value);
+        XTextProperty name = { (unsigned char *)"foo", XA_STRING, 8, 3 };
+        char **sl = NULL; int nsl = 0;
+        CHECK(XTextPropertyToStringList(&name, &sl, &nsl) && nsl == 1 &&
+              !strcmp(sl[0], "foo"));
+        if (sl) XFreeStringList(sl);
+        CHECK(XwcTextPropertyToTextList(d, &name, &back, &nback) == Success &&
+              nback == 1 && back[0][0] == 'f');
+        if (back) XwcFreeStringList(back);
 
         /* Visual/screen sanity. */
         CHECK(DefaultDepth(d, 0) == 24);
@@ -787,6 +1010,11 @@ int main(void)
         XCloseDisplay(d);
     } else {
         printf("note: no display; skipping display-dependent checks\n");
+        /* Under tests/with-compositor.sh there must be one. */
+        if (getenv("MW_TEST_REQUIRE_DISPLAY")) {
+            fprintf(stderr, "test_core: no display\n");
+            failures++;
+        }
     }
 
     if (failures == 0) { printf("test_core: all checks passed\n"); return 0; }

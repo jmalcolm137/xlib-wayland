@@ -10,13 +10,14 @@
 extern unsigned long mw_xdamage_new(Display *, Drawable, int);
 extern void          mw_xdamage_free(Display *, unsigned long);
 extern int           mw_xdamage_eventbase(void);
+extern int           mw_xdamage_errorbase(void);
 
 Bool XDamageQueryExtension(Display *dpy, int *event_base_return,
                            int *error_base_return)
 {
     (void)dpy;
     if (event_base_return) *event_base_return = mw_xdamage_eventbase();
-    if (error_base_return) *error_base_return = mw_xdamage_eventbase();
+    if (error_base_return) *error_base_return = mw_xdamage_errorbase();
     return True;
 }
 

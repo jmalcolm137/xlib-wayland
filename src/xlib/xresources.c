@@ -15,29 +15,50 @@
 #include <sys/stat.h>
 #include <limits.h>
 
+/* Append n bytes, then a newline unless they already end with one. */
 static void append_str(char **buf, size_t *len, size_t *cap,
                        const char *s, size_t n)
 {
     if (*len + n + 2 > *cap) {
-        *cap = (*cap ? *cap * 2 : 4096);
-        while (*len + n + 2 > *cap) *cap *= 2;
-        *buf = realloc(*buf, *cap);
+        size_t ncap = *cap ? *cap * 2 : 4096;
+        while (*len + n + 2 > ncap) ncap *= 2;
+        char *nb = realloc(*buf, ncap);
+        if (!nb) return;
+        *buf = nb;
+        *cap = ncap;
     }
     memcpy(*buf + *len, s, n);
     *len += n;
-    (*buf)[(*len)++] = '\n';
+    if (n == 0 || s[n - 1] != '\n') (*buf)[(*len)++] = '\n';
     (*buf)[*len] = 0;
 }
 
+/* A resource file goes in as it is.  Reading it line by line and adding a
+ * newline to each (fgets keeps its own) turned "...\\<newline>" into a
+ * continuation onto an empty line, cutting every multi-line resource (Motif
+ * translation tables) short, and split lines longer than the buffer. */
 static void append_file(char **buf, size_t *len, size_t *cap, const char *path)
 {
     if (!path || !*path) return;
     FILE *f = fopen(path, "r");
     if (!f) return;
-    char line[4096];
-    while (fgets(line, sizeof line, f))
-        append_str(buf, len, cap, line, strlen(line));
+    char *text = NULL;
+    size_t tl = 0, tc = 0;
+    for (;;) {
+        if (tl + 65536 > tc) {
+            size_t nc = tc ? tc * 2 : 65536;
+            char *nt = realloc(text, nc);
+            if (!nt) break;
+            text = nt;
+            tc = nc;
+        }
+        size_t n = fread(text + tl, 1, tc - tl, f);
+        if (n == 0) break;
+        tl += n;
+    }
     fclose(f);
+    if (text && tl) append_str(buf, len, cap, text, tl);
+    free(text);
 }
 
 static void append_dir(char **buf, size_t *len, size_t *cap, const char *dir)

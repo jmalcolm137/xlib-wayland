@@ -201,7 +201,8 @@ int XCopyGC(Display *d, GC src, unsigned long mask, GC dest)
         free(dest->clip_rects);
         dest->clip_rects = NULL;
         dest->nclip = 0;
-        dest->has_clip_rects = false;
+        /* An empty list is a clip too (it disables output). */
+        dest->has_clip_rects = src->has_clip_rects;
         if (src->clip_rects && src->nclip > 0) {
             dest->clip_rects = malloc((size_t)src->nclip * sizeof *dest->clip_rects);
             if (dest->clip_rects) {

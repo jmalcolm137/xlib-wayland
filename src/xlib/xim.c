@@ -835,17 +835,50 @@ static int im_lookup(struct _XIC *ic, XKeyEvent *event, char *buffer,
         if (status) *status = XLookupNone;
         return 0;
     }
+    /* A client that gets XBufferOverflow asks again for the same event with
+     * a bigger buffer.  Looking the key up again would feed the compose state
+     * a second time (a dead-key é came back as a bare e), so the result of an
+     * overflowed lookup is kept for that one event. */
+    static __thread struct {
+        bool valid, utf8;
+        Display *d;
+        unsigned long serial;
+        Time time;
+        unsigned int keycode;
+        int n;
+        KeySym ks;
+        char buf[64];
+    } retry;
     KeySym ks = NoSymbol;
     char tmp[64];
-    int n = XLookupString(event, tmp, (int)sizeof tmp, &ks, NULL);
-    if (keysym) *keysym = ks;
-    if (utf8 && n == 1 && (unsigned char)tmp[0] >= 0x80) {
-        unsigned char c = (unsigned char)tmp[0];
-        tmp[0] = (char)(0xc0 | (c >> 6));
-        tmp[1] = (char)(0x80 | (c & 0x3f));
-        n = 2;
+    int n;
+    if (retry.valid && retry.d == event->display && retry.serial == event->serial &&
+        retry.time == event->time && retry.keycode == event->keycode &&
+        retry.utf8 == utf8) {
+        n = retry.n;
+        ks = retry.ks;
+        memcpy(tmp, retry.buf, sizeof tmp);
+    } else {
+        n = XLookupString(event, tmp, (int)sizeof tmp, &ks, NULL);
+        if (utf8 && n == 1 && (unsigned char)tmp[0] >= 0x80) {
+            unsigned char c = (unsigned char)tmp[0];
+            tmp[0] = (char)(0xc0 | (c >> 6));
+            tmp[1] = (char)(0x80 | (c & 0x3f));
+            n = 2;
+        }
     }
+    retry.valid = false;
+    if (keysym) *keysym = ks;
     if (n > 0 && (!buffer || nbytes < n)) {
+        retry.valid = true;
+        retry.utf8 = utf8;
+        retry.d = event->display;
+        retry.serial = event->serial;
+        retry.time = event->time;
+        retry.keycode = event->keycode;
+        retry.n = n;
+        retry.ks = ks;
+        memcpy(retry.buf, tmp, sizeof tmp);
         if (status) *status = XBufferOverflow;
         return n;
     }

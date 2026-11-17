@@ -168,6 +168,12 @@ struct MwXFont {
     int            ascent, descent, max_width;
     int            refs;
     bool           released;
+    /* Set when the font is an XFontSet (XCreateFontSet): the storage its
+     * accessors return. */
+    char          *fs_base_name;
+    char          *fs_names[1];
+    XFontStruct   *fs_structs[1];
+    XFontSetExtents fs_extents;
 };
 
 /* A GC.  struct _XGC is opaque in Xlib.h (no XLIB_ILLEGAL_ACCESS). */
@@ -288,6 +294,11 @@ typedef struct MwClipServe {
     Atom     selection, property;
     Atom     target;             /* X target to convert for the peer */
     uint64_t deadline_ms;
+    /* The converted bytes, written as the peer's pipe takes them: a large
+     * transfer must not block the event loop (for a drag between two of our
+     * own windows the reader is this very thread). */
+    unsigned char *pend;
+    size_t   pend_len, pend_off;
 } MwClipServe;
 
 struct MwWindow {
@@ -714,6 +725,7 @@ typedef struct _XDisplayImpl {
     uint64_t                    wake_deadline;    /* __atomic: its deadline, ms */
     int                         wake_armed;       /* __atomic: watch the source fds */
     int                         wake_extra_fd;    /* __atomic: clipboard fetch fd, -1 */
+    int                         wake_out_fd;      /* __atomic: wake when writable, -1 */
     uint64_t                    wake_timer;       /* __atomic: one-shot deadline, 0 */
 
     /* selections */
@@ -721,6 +733,11 @@ typedef struct _XDisplayImpl {
 
     /* Xlib contexts (XSaveContext/XFindContext) */
     struct MwContext            *contexts;
+
+    char                        rr_mode_name[32]; /* XRRModeInfo.name storage */
+
+    /* data of the last cookie event taken, until XGetEventData claims it */
+    void                       *cookie_unclaimed;
 
     /* the database XGetDefault looks things up in (built on first use) */
     XrmDatabase                 defaults_db;
@@ -811,6 +828,11 @@ void      mw_unmap_window(Display *d, MwWindow *win);
 void      mw_set_focus(Display *d, MwWindow *win);
 int       mw_region_rectangles(Region r, XRectangle **out);
 int       mw_write_all(int fd, const void *buf, size_t len, int timeout_ms);
+ssize_t   mw_write_some(int fd, const void *buf, size_t len);
+bool      mw_runtime_dir(char *buf, size_t n);
+XImage   *mw_create_image_alloc(Display *d, Visual *visual, unsigned int depth,
+                                int format, unsigned int width,
+                                unsigned int height, int bitmap_pad);
 int       mw_draw_utf8(Display *d, Drawable dr, GC gc, int x, int y,
                        const char *s, int length, int fill_bg);
 void      mw_selection_owner_destroyed(Display *d, Window w);
@@ -918,6 +940,7 @@ void      mw_apply_gc(MwCanvas *c, Display *d, struct _XGC *gc);
 /* ------------------------------------------------------------------ events */
 
 void mw_put_event(Display *d, XEvent *ev);
+void mw_queue_event(Display *d, XEvent *ev);
 void mw_process_events(Display *d, bool block);
 /* Keyboard auto-repeat: Wayland leaves it to the client, so a held key is
  * repeated from the event pump (see input.c). */
@@ -937,7 +960,7 @@ int  mw_wakeup_start(XDisplayImpl *dp);
 void mw_wakeup_stop(XDisplayImpl *dp);
 void mw_wakeup_set(XDisplayImpl *dp, int active, uint64_t deadline_ms);
 void mw_wakeup_drain(XDisplayImpl *dp);
-void mw_wakeup_watch(XDisplayImpl *dp, int fd, uint64_t timer_ms);
+void mw_wakeup_watch(XDisplayImpl *dp, int fd, int out_fd, uint64_t timer_ms);
 /* Block until at least one more Wayland event has been read and dispatched,
  * even when events are already queued.  mw_process_events(d, true) only blocks
  * on an empty queue, which is not enough for the mask-based event selectors
@@ -1127,6 +1150,7 @@ Cursor    mw_cursor_load_shape(Display *d, unsigned int shape);
 Cursor    mw_cursor_from_image(Display *d, int w, int h, int xhot, int yhot,
                                const uint32_t *pixels);
 char     *mw_cursor_theme_get(Display *d);
+const char *mw_cursor_theme_peek(Display *d);
 int       mw_cursor_size_get(Display *d);
 void      mw_cursor_theme_set(Display *d, const char *theme);
 void      mw_cursor_size_set(Display *d, int size);
@@ -1134,7 +1158,11 @@ void      mw_cursor_size_set(Display *d, int size);
 /* XFIXES (xfixes.c): the subset GDK uses for clipboard owner-change
  * notifications, regions and cursor changes.  The public entry points live in
  * the libXfixes facade (src/xfixes/xfixes.c), which calls these. */
-#define MW_XFIXES_EVENT_BASE 128
+/* Extension event numbers must be unique and below 128 (bit 7 of an event
+ * type is the send_event flag): SHAPE 64, XInput 70-86, RANDR 90-91,
+ * XFIXES 92-93, DAMAGE 94, MIT-SHM 95, SYNC 96-97.  Error numbers likewise:
+ * XFIXES 128, XInput 137-141, DAMAGE 155, SYNC 156-158. */
+#define MW_XFIXES_EVENT_BASE 92
 #define MW_XFIXES_ERROR_BASE 128
 Bool      mw_xfixes_query(int *event_base, int *error_base);
 void      mw_xfixes_init(Display *d);
@@ -1152,7 +1180,11 @@ unsigned long mw_xsync_new_counter(Display *d);
  * _NET_WM_CM_S0 (so gdk_screen_is_composited() is true) and reports DAMAGE;
  * damage objects are local and XDamageNotify is emitted from the shim's own
  * damage so GDK repaints. */
-#define MW_XDAMAGE_EVENT_BASE 131
+#define MW_XDAMAGE_EVENT_BASE 94
+#define MW_XDAMAGE_ERROR_BASE 155
+#define MW_XSHM_EVENT_BASE    95
+#define MW_XSYNC_EVENT_BASE   96
+#define MW_XSYNC_ERROR_BASE   156
 int       mw_xdamage_eventbase(void);
 void      mw_xdamage_init(Display *d);
 void      mw_xdamage_fini(Display *d);
@@ -1200,6 +1232,9 @@ Atom      mw_xdnd_selection(Display *d);
 /* Create a Wayland data source bound to `selection` (with the clipboard's send
  * listener) and add it to the display's source list (clipboard.c). */
 struct wl_data_source *mw_clipboard_make_source(Display *d, Atom selection);
+void mw_clipboard_free_source(Display *d, struct wl_data_source *src);
+void mw_io_update_wake(Display *d);
+uint64_t mw_broker_deadline(Display *d);
 
 /* Start fetching `mime` from a Wayland offer and serving it to an X requestor
  * as `selection`/`target` (clipboard.c). */

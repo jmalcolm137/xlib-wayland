@@ -1,5 +1,6 @@
 /* xrandr.c — a single-output XRandR facade over wl_output. */
 #include "internal.h"
+#include <stdio.h>
 
 #include <X11/extensions/Xrandr.h>
 #include <stdlib.h>
@@ -35,8 +36,11 @@ static void fill_mode(Display *d, XRRModeInfo *m)
     m->vSyncStart = m->height;
     m->vSyncEnd = m->height;
     m->vTotal = m->height;
-    m->name = NULL;
-    m->nameLength = 0;
+    /* libXrandr always supplies a NUL-terminated name ("1920x1080");
+     * clients print and compare it.  It lives with the display. */
+    snprintf(dp->rr_mode_name, sizeof dp->rr_mode_name, "%ux%u", m->width, m->height);
+    m->name = dp->rr_mode_name;
+    m->nameLength = (unsigned)strlen(dp->rr_mode_name);
     m->modeFlags = RR_HSyncPositive | RR_VSyncPositive;
 }
 

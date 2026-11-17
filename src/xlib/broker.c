@@ -284,13 +284,17 @@ static void *broker_thread(void *arg)
         int armed = __atomic_load_n(&b->armed, __ATOMIC_SEQ_CST);
         int armed_listen = __atomic_load_n(&b->armed_listen, __ATOMIC_SEQ_CST);
         int conn = armed ? b->xfer_fd : -1;
-        struct pollfd pfd[4] = {
+        /* A connection accepted but not yet fully read is watched too, or a
+         * request arriving after the first read never woke the client. */
+        int acc = armed ? __atomic_load_n(&b->accept_fd, __ATOMIC_SEQ_CST) : -1;
+        struct pollfd pfd[5] = {
             { armed_listen ? b->listen_fd : -1, POLLIN, 0 },
             { b->cmd_fd,    POLLIN, 0 },
             { b->stop_fd,   POLLIN, 0 },
             { conn,         POLLIN, 0 },
+            { acc,          POLLIN, 0 },
         };
-        int r = poll(pfd, 4, -1);
+        int r = poll(pfd, 5, -1);
         if (r < 0) {
             if (errno == EINTR) continue;
             break;
@@ -299,9 +303,11 @@ static void *broker_thread(void *arg)
         if (pfd[1].revents) {                            /* fd set changed */
             uint64_t v; ssize_t n = read(b->cmd_fd, &v, sizeof v); (void)n;
         }
-        if (pfd[0].revents || (conn >= 0 && pfd[3].revents)) {
+        if (pfd[0].revents || (conn >= 0 && pfd[3].revents) ||
+            (acc >= 0 && pfd[4].revents)) {
             if (pfd[0].revents) __atomic_store_n(&b->armed_listen, 0, __ATOMIC_SEQ_CST);
-            if (conn >= 0 && pfd[3].revents) __atomic_store_n(&b->armed, 0, __ATOMIC_SEQ_CST);
+            if ((conn >= 0 && pfd[3].revents) || (acc >= 0 && pfd[4].revents))
+                __atomic_store_n(&b->armed, 0, __ATOMIC_SEQ_CST);
             broker_wake(dp);
         }
     }
@@ -329,6 +335,7 @@ void mw_broker_init(Display *d)
 
     /* parse the comma-separated prefix list */
     char *list = strdup(env);
+    if (!list) { free(b); return; }
     char *save_tok = NULL;
     for (char *tok = strtok_r(list, ",", &save_tok); tok; tok = strtok_r(NULL, ",", &save_tok)) {
         while (*tok == ' ') tok++;
@@ -338,10 +345,12 @@ void mw_broker_init(Display *d)
     }
     free(list);
 
-    const char *rt = getenv("XDG_RUNTIME_DIR");
-    if (!rt || !*rt) rt = "/tmp";
-    snprintf(b->dir, sizeof b->dir, "%s/xlib-wayland", rt);
-    mkdir(b->dir, 0700);
+    if (!mw_runtime_dir(b->dir, sizeof b->dir)) {     /* no safe directory */
+        for (int i = 0; i < b->nsets; i++) free(b->sets[i]);
+        free(b->sets);
+        free(b);
+        return;
+    }
     snprintf(b->sock_path, sizeof b->sock_path, "%s/sel-%d.sock", b->dir, b->mypid);
     snprintf(b->reg_path, sizeof b->reg_path, "%s/selections", b->dir);
 
@@ -489,6 +498,7 @@ static bool xfer_start(Display *d, Atom selection, Atom target, Atom property,
     b->xfer.time = time;
     b->xfer.len = 0;
     b->xfer.deadline_ms = now_ms() + MWB_DEADLINE_MS;
+    mw_io_update_wake(d);
     poke(b);
     return true;
 }
@@ -726,6 +736,10 @@ static void serve_read(Display *d)
     TR("serve request fd=%d sel=%s tgt=%s prop=%s\n", fd, selname, tname, pname);
     Window owner = XGetSelectionOwner(d, sel);
     if (owner == None || (dp->clip_window != None && owner == dp->clip_window)) {
+        /* An explicit refusal, so the requestor need not wait for EOF. */
+        char msg[1600];
+        int l = snprintf(msg, sizeof msg, "R %u %s %s %s\n", id, hs, ht, hp);
+        if (l > 0 && (size_t)l < sizeof msg) mw_write_all(fd, msg, (size_t)l, 1000);
         close(fd);
         b->accept_fd = -1;
         b->accept_len = 0;
@@ -757,6 +771,7 @@ static void serve_read(Display *d)
     b->serve.property = prop;
     b->serve.got_prop = false;
     b->serve.deadline_ms = now_ms() + MWB_DEADLINE_MS;
+    mw_io_update_wake(d);
 
     /* Ask the local owner for the data through the normal XConvertSelection
      * path -- the same one the clipboard bridge uses -- rather than
@@ -814,6 +829,7 @@ static void xfer_read(Display *d)
     XDisplayImpl *dp = MWD(d);
     MwBroker *b = dp->broker;
     size_t *len = &b->xfer.len;
+    bool eof = false;
     TR("xfer_read fd=%d len=%zu\n", b->xfer.fd, *len);
     for (;;) {
         /* The buffer grows with the reply (a fixed 16 KiB one stalled every
@@ -839,7 +855,8 @@ static void xfer_read(Display *d)
             continue;
         }
         if (n < 0 && errno == EINTR) continue;
-        break;              /* EAGAIN/EOF: wait for the next pump */
+        if (n == 0) eof = true;  /* the owner closed: no more is coming */
+        break;              /* EAGAIN: wait for the next pump */
     }
     if (!b->xfer.buf) return;
     char *buf = b->xfer.buf;
@@ -847,7 +864,10 @@ static void xfer_read(Display *d)
     char *nl = strchr(buf, '\n');
     bool complete = nl && (buf[0] == 'R' || strchr(nl + 1, '\n'));
     if (!complete) {
-        if (now_ms() > b->xfer.deadline_ms) {
+        /* Refused (the owner closed without a full reply) or timed out.
+         * Waiting out the deadline on a closed socket spun both threads --
+         * it stays readable at EOF -- and delayed the answer by 5 s. */
+        if (eof || now_ms() >= b->xfer.deadline_ms) {
             /* give up */
             close(b->xfer.fd);
             b->xfer_fd = -1; b->xfer.fd = -1; b->xfer.active = false;
@@ -955,6 +975,19 @@ static void xfer_read(Display *d)
     xfer_next(d);
 }
 
+/* The earliest broker deadline (a transfer or a serve in progress), 0 for
+ * none: the wakeup thread fires it, so a stalled conversion is given up even
+ * in an idle client that sits in select(). */
+uint64_t mw_broker_deadline(Display *d)
+{
+    MwBroker *b = MWD(d)->broker;
+    if (!b) return 0;
+    uint64_t t = 0;
+    if (b->xfer.active) t = b->xfer.deadline_ms;
+    if (b->serve.active && (!t || b->serve.deadline_ms < t)) t = b->serve.deadline_ms;
+    return t;
+}
+
 int mw_broker_poll_fd(Display *d)
 {
     MwBroker *b = MWD(d)->broker;
@@ -974,8 +1007,9 @@ void mw_broker_handle_ready(Display *d)
     /* Drop a stalled serve before accepting anything new: otherwise one
      * conversion whose owner never answers blocks every later request (the
      * accept is refused and the client waits forever). */
-    if (b->serve.active && now_ms() > b->serve.deadline_ms)
+    if (b->serve.active && now_ms() >= b->serve.deadline_ms)
         serve_finish(d, true);
     if (b->listen_fd >= 0) serve_accept(d);
     broker_rearm(b);
+    mw_io_update_wake(d);
 }

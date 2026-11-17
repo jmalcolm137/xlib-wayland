@@ -9,6 +9,7 @@
 #include <X11/extensions/Xrender.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -63,7 +64,8 @@ int main(void)
 
     Damage dm = damage ? XDamageCreate(d, w, XDamageReportBoundingBox) : None;
 
-    XImage *img = XCreateImage(d, list[0].visual, 32, ZPixmap, 0, NULL, 32, 32, 32, 0);
+    XImage *img = XCreateImage(d, list[0].visual, 32, ZPixmap, 0,
+                               calloc(32 * 32, 4), 32, 32, 32, 0);
     for (int i = 0; i < 32 * 32; i++)
         ((unsigned int *)img->data)[i] = 0x80ff0000u;   /* half-alpha red */
     GC gc = XCreateGC(d, w, 0, NULL);

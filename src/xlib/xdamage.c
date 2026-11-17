@@ -15,6 +15,7 @@
 #include <string.h>
 
 int mw_xdamage_eventbase(void) { return MW_XDAMAGE_EVENT_BASE; }
+int mw_xdamage_errorbase(void) { return MW_XDAMAGE_ERROR_BASE; }
 
 void mw_xdamage_init(Display *d)
 {

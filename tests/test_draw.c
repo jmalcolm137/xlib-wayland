@@ -41,13 +41,14 @@ static void draw(Display *d, Window w, GC gc, int W, int H)
     XFillPolygon(d, w, gc, poly, 3, Convex, CoordModeOrigin);
 
     XSetForeground(d, gc, 0x000000);
-    const char *msg = "Motif on Wayland — Xlib shim";
+    const char *msg = "Motif on Wayland - Xlib shim";   /* core text is Latin-1 */
     XDrawString(d, w, gc, 30, 150, msg, (int)strlen(msg));
 
     /* An XImage blit (XV's main pixel path). */
     int iw = 200, ih = 60;
     XImage *img = XCreateImage(d, DefaultVisual(d, 0), 24, ZPixmap, 0,
                                NULL, iw, ih, 32, 0);
+    img->data = malloc((size_t)img->bytes_per_line * ih);   /* the caller's */
     for (int y = 0; y < ih; y++)
         for (int x = 0; x < iw; x++) {
             unsigned long r = (x * 255 / iw), g = (y * 255 / ih), b = 128;

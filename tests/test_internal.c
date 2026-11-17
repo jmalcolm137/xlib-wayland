@@ -6,6 +6,7 @@
 #include "internal.h"
 
 #include <X11/XKBlib.h>
+#include <X11/Xatom.h>
 #include <X11/keysym.h>
 #include <X11/cursorfont.h>
 #include <wayland-cursor.h>
@@ -13,11 +14,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <signal.h>
+#include <pthread.h>
 #include <time.h>
 
 static int failures;
@@ -195,6 +198,16 @@ static void check_window_tree(Display *d, Window root)
     CHECK(wa.map_state == IsUnviewable);
     XGetWindowAttributes(d, p, &wa);
     CHECK(wa.map_state == IsUnmapped);
+    /* ... and viewable once the parent is mapped too (the root, which is
+     * never mapped itself, must not make everything look unviewable). */
+    XMapWindow(d, p);
+    XGetWindowAttributes(d, c, &wa);
+    CHECK(wa.map_state == IsViewable);
+    XGetWindowAttributes(d, p, &wa);
+    CHECK(wa.map_state == IsViewable);
+    XGetWindowAttributes(d, root, &wa);
+    CHECK(wa.map_state == IsViewable);
+    XUnmapWindow(d, p);
 
     /* XTranslateCoordinates names the child of dest under the point. */
     int dx, dy; Window child = 0;
@@ -515,6 +528,31 @@ static void check_crossings(Display *d, Window root)
     CHECK(n == 1 && c[0].type == EnterNotify && c[0].w == top &&
           c[0].detail == NotifyInferior && c[0].sub == b);
     (void)A1;
+
+    /* XI2 gets one Enter for the window entered -- not one more for each
+     * virtual crossing of the windows in between (an XI2-selecting ancestor
+     * used to receive them all). */
+    unsigned char req[20];
+    memset(req, 0, sizeof req);
+    req[0] = 131; req[1] = 46;
+    uint32_t w32 = (uint32_t)top;
+    memcpy(req + 4, &w32, 4);
+    unsigned short one = 1;
+    memcpy(req + 8, &one, 2);
+    memcpy(req + 14, &one, 2);
+    req[16] = 1u << 7;                        /* XI_Enter */
+    mw_xi2_request(d, req, sizeof req);
+    mw_pointer_move_to(d, NULL);
+    drain(d);
+    mw_pointer_move_to(d, A1);
+    int xi_enters = 0;
+    XEvent ev;
+    while (XCheckTypedEvent(d, GenericEvent, &ev)) {
+        xi_enters++;
+        if (xi_enters == 1 && XGetEventData(d, &ev.xcookie))
+            XFreeEventData(d, &ev.xcookie);   /* the others are freed for us */
+    }
+    CHECK(xi_enters == 1);
     mw_pointer_move_to(d, NULL);
     XDestroyWindow(d, top);
     drain(d);
@@ -664,7 +702,7 @@ static void check_wakeup(Display *d)
     if (!dp->wake_running) { printf("note: no wakeup thread\n"); return; }
     int p[2];
     CHECK(pipe(p) == 0);
-    mw_wakeup_watch(dp, p[0], 0);
+    mw_wakeup_watch(dp, p[0], -1, 0);
     CHECK(settle(d));
     CHECK(write(p[1], "x", 1) == 1);
     CHECK(conn_ready(d, 1000));
@@ -675,24 +713,172 @@ static void check_wakeup(Display *d)
     ioctl(dp->wake_pipe[0], FIONREAD, &pending);
     CHECK(pending <= 2);
 
-    mw_wakeup_watch(dp, -1, 0);
+    mw_wakeup_watch(dp, -1, -1, 0);
     CHECK(settle(d));
-    mw_wakeup_watch(dp, -1, mw_now() + 150);
+    mw_wakeup_watch(dp, -1, -1, mw_now() + 150);
     CHECK(conn_ready(d, 1000));
-    mw_wakeup_watch(dp, -1, 0);
+    mw_wakeup_watch(dp, -1, -1, 0);
     mw_wakeup_drain(dp);
     close(p[0]); close(p[1]);
+}
+
+/* A serve to a peer that has not read yet is queued and written as the pipe
+ * drains -- on the event loop, so a reader in the same thread (a drag
+ * between two of our own windows) gets everything, without a stall. */
+static void check_async_serve(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    int p[2];
+    CHECK(pipe(p) == 0);
+    fcntl(p[0], F_SETFL, O_NONBLOCK);
+    size_t total = 1 << 20;
+    unsigned char *data = malloc(total);
+    for (size_t i = 0; i < total; i++) data[i] = (unsigned char)(i * 7);
+    MwClipServe *sv = &dp->clip_serve;
+    CHECK(!sv->active);
+    sv->active = true;
+    sv->fd = p[1];
+    sv->pend = data;
+    sv->pend_len = total;
+    sv->pend_off = 0;
+    sv->deadline_ms = mw_now() + 5000;
+    size_t got = 0;
+    bool same = true;
+    unsigned char buf[65536];
+    uint64_t t0 = mw_now();
+    while (got < total && mw_now() - t0 < 3000) {
+        mw_clipboard_handle_ready(d);              /* writes what fits */
+        ssize_t n;
+        while ((n = read(p[0], buf, sizeof buf)) > 0) {
+            for (ssize_t i = 0; i < n; i++)
+                if (buf[i] != (unsigned char)((got + (size_t)i) * 7)) same = false;
+            got += (size_t)n;
+        }
+    }
+    CHECK(got == total && same);
+    CHECK(mw_now() - t0 < 2000);
+    CHECK(!sv->active && sv->pend == NULL);       /* finished, fd closed */
+    close(p[0]);
+}
+
+/* With SIGPIPE blocked by the application, the EPIPE's SIGPIPE stays
+ * pending for it, as a plain write would leave it. */
+static void check_sigpipe_blocked(void)
+{
+    sigset_t set, old;
+    sigemptyset(&set);
+    sigaddset(&set, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &set, &old);
+    int p[2];
+    CHECK(pipe(p) == 0);
+    close(p[0]);
+    CHECK(mw_write_some(p[1], "x", 1) == -1);
+    sigset_t pend;
+    sigpending(&pend);
+    CHECK(sigismember(&pend, SIGPIPE));
+    struct timespec zero = { 0, 0 };
+    sigtimedwait(&set, NULL, &zero);
+    close(p[1]);
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+}
+
+static void write_text(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "w");
+    if (f) { fputs(text, f); fclose(f); }
+}
+
+/* The shared property store is input from other processes: malformed
+ * records are rejected (a wrapped size used to overflow the reader), values
+ * are served on the root only, with the usual offset/length/type rules, and
+ * an append republishes the whole property. */
+static void check_shared_store(Display *d, Window w)
+{
+    char dir[256], path[300];
+    CHECK(mw_runtime_dir(dir, sizeof dir));
+    snprintf(path, sizeof path, "%s/smprops", dir);
+    setenv("XLIB_WAYLAND_SHARE_PROPERTIES", "MW_SHARED_", 1);
+    write_text(path,
+        "MW_SHARED_BIG\tSTRING\t32\t4611686018427387905\t00000000\n"
+        "MW_SHARED_ODD\tSTRING\t7\t3\t616263\n"
+        "MW_SHARED_SHORT\tSTRING\t8\t5\t616263\n"
+        "MW_SHARED_OK\tSTRING\t8\t5\t68656c6c6f\n");
+    Window root = DefaultRootWindow(d);
+    Atom at; int af; unsigned long ni, ba; unsigned char *data = NULL;
+    const char *bad[] = { "MW_SHARED_BIG", "MW_SHARED_ODD", "MW_SHARED_SHORT" };
+    for (int i = 0; i < 3; i++) {
+        XGetWindowProperty(d, root, XInternAtom(d, bad[i], False), 0, 100, False,
+                           AnyPropertyType, &at, &af, &ni, &ba, &data);
+        CHECK(at == None && ni == 0 && data == NULL);
+        XFree(data); data = NULL;
+    }
+    Atom ok = XInternAtom(d, "MW_SHARED_OK", False);
+    XGetWindowProperty(d, root, ok, 0, 100, False, AnyPropertyType,
+                       &at, &af, &ni, &ba, &data);
+    CHECK(at == XA_STRING && ni == 5 && data && !memcmp(data, "hello", 5));
+    XFree(data); data = NULL;
+    /* offset/length and type apply as to a local property */
+    XGetWindowProperty(d, root, ok, 1, 1, False, AnyPropertyType,
+                       &at, &af, &ni, &ba, &data);
+    CHECK(ni == 1 && ba == 0 && data && data[0] == 'o');
+    XFree(data); data = NULL;
+    XGetWindowProperty(d, root, ok, 0, 100, False, XA_ATOM,
+                       &at, &af, &ni, &ba, &data);
+    CHECK(ni == 0 && data == NULL && at == XA_STRING && ba == 5);
+    /* not on an ordinary window */
+    XGetWindowProperty(d, w, ok, 0, 100, False, AnyPropertyType,
+                       &at, &af, &ni, &ba, &data);
+    CHECK(at == None && data == NULL);
+
+    /* An append publishes the merged value. */
+    Atom ap = XInternAtom(d, "MW_SHARED_APPEND", False);
+    XChangeProperty(d, root, ap, XA_STRING, 8, PropModeReplace,
+                    (const unsigned char *)"ab", 2);
+    XChangeProperty(d, root, ap, XA_STRING, 8, PropModeAppend,
+                    (const unsigned char *)"cd", 2);
+    FILE *f = fopen(path, "r");
+    char buf[4096] = "";
+    if (f) { size_t n = fread(buf, 1, sizeof buf - 1, f); buf[n] = 0; fclose(f); }
+    CHECK(strstr(buf, "MW_SHARED_APPEND\tSTRING\t8\t4\t61626364") != NULL);
+    unsetenv("XLIB_WAYLAND_SHARE_PROPERTIES");
+    unlink(path);
+
+    /* A runtime directory open to others is not used. */
+    chmod(dir, 0755);
+    CHECK(!mw_runtime_dir(dir, sizeof dir));
+    chmod(dir, 0700);
+    CHECK(mw_runtime_dir(dir, sizeof dir));
+}
+
+/* Extension event numbers are distinct and below 128 (bit 7 of a type is
+ * the send_event flag). */
+static void check_extension_numbers(void)
+{
+    int ev[] = { MW_XFIXES_EVENT_BASE, MW_XFIXES_EVENT_BASE + 1,
+                 MW_XDAMAGE_EVENT_BASE, MW_XSHM_EVENT_BASE,
+                 MW_XSYNC_EVENT_BASE, MW_XSYNC_EVENT_BASE + 1,
+                 64 /* SHAPE */, 90, 91 /* RANDR */ };
+    int n = (int)(sizeof ev / sizeof ev[0]);
+    for (int i = 0; i < n; i++) {
+        CHECK(ev[i] >= LASTEvent && ev[i] < 128);
+        for (int j = i + 1; j < n; j++) CHECK(ev[i] != ev[j]);
+        CHECK(ev[i] < 70 || ev[i] > 86);      /* XInput's range */
+    }
+    CHECK(MW_XDAMAGE_ERROR_BASE != MW_XSYNC_ERROR_BASE);
 }
 
 int main(void)
 {
     check_write_all();
+    check_extension_numbers();
+    check_sigpipe_blocked();
     check_buttons();
 
     Display *d = XOpenDisplay(NULL);
     if (!d) {
         fprintf(stderr, "test_internal: no display\n");
-        return 77;                               /* meson: skipped */
+        /* skipped, unless the wrapper promised a compositor */
+        return getenv("MW_TEST_REQUIRE_DISPLAY") ? 1 : 77;
     }
     Window root = DefaultRootWindow(d);
     Window w = XCreateSimpleWindow(d, root, 0, 0, 50, 50, 0, 0, 0);
@@ -712,6 +898,8 @@ int main(void)
     check_cursor_reload(d);
     check_scale_change(d, root);
     check_wakeup(d);
+    check_async_serve(d);
+    check_shared_store(d, w);
     check_keymap(d, w);
 
     XDestroyWindow(d, w);

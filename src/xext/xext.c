@@ -24,6 +24,8 @@ typedef struct _MwXextError xError;
 #include <X11/extensions/Xdbe.h>
 #include <X11/extensions/MITMisc.h>
 #include <X11/extensions/security.h>
+
+extern void mw_queue_event(Display *d, XEvent *ev);   /* libX11 (shim) */
 #include <X11/Xauth.h>
 
 #include <stdlib.h>
@@ -115,7 +117,13 @@ Status XShmQueryVersion(Display *dpy, int *major, int *minor, Bool *pixmaps)
     return True;
 }
 
-int XShmGetEventBase(Display *dpy) { (void)dpy; return 129; }
+/* Event numbers are allocated in src/xlib/internal.h (MW_XSHM_EVENT_BASE,
+ * MW_XSYNC_*): they must not collide with another extension's. */
+#define MW_XSHM_EVENT_BASE  95
+#define MW_XSYNC_EVENT_BASE 96
+#define MW_XSYNC_ERROR_BASE 156
+
+int XShmGetEventBase(Display *dpy) { (void)dpy; return MW_XSHM_EVENT_BASE; }
 
 /* The image struct is Xlib's, but its pixels belong to the caller's shm
  * segment, so destruction must not free them (XDestroyImage would). */
@@ -129,12 +137,10 @@ XImage *XShmCreateImage(Display *dpy, Visual *visual, unsigned int depth,
                         int format, char *data, XShmSegmentInfo *shminfo,
                         unsigned int width, unsigned int height)
 {
-    XImage *image = XCreateImage(dpy, visual, depth, format, 0, NULL,
+    XImage *image = XCreateImage(dpy, visual, depth, format, 0, data,
                                  width, height, 32, 0);
     if (!image) return NULL;
-    /* XCreateImage allocated a buffer; the client supplies the pixels. */
-    free(image->data);
-    image->data = data;
+    image->obdata = (char *)shminfo;          /* as libXext does */
     image->f.destroy_image = xshm_destroy_image;
     if (shminfo) shminfo->shmaddr = image->data;
     return image;
@@ -156,9 +162,24 @@ Bool XShmPutImage(Display *dpy, Drawable d, GC gc, XImage *image,
                   int src_x, int src_y, int dest_x, int dest_y,
                   unsigned int width, unsigned int height, Bool send_event)
 {
-    (void)send_event;
-    return XPutImage(dpy, d, gc, image, src_x, src_y, dest_x, dest_y,
-                     width, height);
+    Bool ok = XPutImage(dpy, d, gc, image, src_x, src_y, dest_x, dest_y,
+                        width, height);
+    /* With send_event the client waits for ShmCompletion before it reuses
+     * the segment (SDL, video players): without it they waited forever. */
+    if (send_event) {
+        XShmCompletionEvent ce;
+        memset(&ce, 0, sizeof ce);
+        ce.type = MW_XSHM_EVENT_BASE + ShmCompletion;
+        ce.display = dpy;
+        ce.drawable = d;
+        ce.major_code = 0;
+        ce.minor_code = 3;                  /* X_ShmPutImage */
+        XShmSegmentInfo *si = image ? (XShmSegmentInfo *)image->obdata : NULL;
+        ce.shmseg = si ? si->shmseg : 0;
+        ce.offset = 0;
+        mw_queue_event(dpy, (XEvent *)&ce);
+    }
+    return ok;
 }
 
 Bool XShmGetImage(Display *dpy, Drawable d, XImage *image, int x, int y,
@@ -190,8 +211,8 @@ int XShmPixmapFormat(Display *dpy) { (void)dpy; return ZPixmap; }
 Status XSyncQueryExtension(Display *dpy, int *event_base, int *error_base)
 {
     (void)dpy;
-    if (event_base) *event_base = 130;
-    if (error_base) *error_base = 130;
+    if (event_base) *event_base = MW_XSYNC_EVENT_BASE;
+    if (error_base) *error_base = MW_XSYNC_ERROR_BASE;
     return 1;
 }
 

@@ -46,6 +46,7 @@ static void *wake_thread(void *arg)
         uint64_t timer  = __atomic_load_n(&dp->wake_timer, __ATOMIC_SEQ_CST);
         int      armed  = __atomic_load_n(&dp->wake_armed, __ATOMIC_SEQ_CST);
         int      extra  = __atomic_load_n(&dp->wake_extra_fd, __ATOMIC_SEQ_CST);
+        int      outfd  = __atomic_load_n(&dp->wake_out_fd, __ATOMIC_SEQ_CST);
         int      timeout = -1;
         uint64_t now = mw_now();
 
@@ -64,14 +65,15 @@ static void *wake_thread(void *arg)
          * again until the main thread has drained the wake pipe (re-arming
          * it).  Watching it regardless made this thread spin whenever the
          * client was busy. */
-        struct pollfd pfd[5] = {
+        struct pollfd pfd[6] = {
             { armed ? dp->wl_fd : -1,      POLLIN, 0 },
             { dp->wake_stop,               POLLIN, 0 },
             { dp->wake_cmd,                POLLIN, 0 },
             { armed ? dp->session_fd : -1, POLLIN, 0 },
             { armed ? extra : -1,          POLLIN, 0 },
+            { armed ? outfd : -1,          POLLOUT, 0 },
         };
-        int r = poll(pfd, 5, timeout);
+        int r = poll(pfd, 6, timeout);
         if (r < 0) {
             if (errno == EINTR) continue;
             break;
@@ -84,8 +86,9 @@ static void *wake_thread(void *arg)
             (void)n;
             continue;
         }
-        if ((pfd[0].revents | pfd[3].revents | pfd[4].revents) &
-            (POLLIN | POLLHUP | POLLERR)) {
+        if (((pfd[0].revents | pfd[3].revents | pfd[4].revents) &
+             (POLLIN | POLLHUP | POLLERR)) ||
+            (pfd[5].revents & (POLLOUT | POLLHUP | POLLERR))) {
             /* Wayland data, a session command, or clipboard data (or the
              * peer's EOF) for a paste in progress. */
             __atomic_store_n(&dp->wake_armed, 0, __ATOMIC_SEQ_CST);
@@ -128,6 +131,7 @@ int mw_wakeup_start(XDisplayImpl *dp)
     dp->wake_deadline = 0;
     dp->wake_armed = 1;
     dp->wake_extra_fd = -1;
+    dp->wake_out_fd = -1;
     dp->wake_timer = 0;
     if (pthread_create(&dp->wake_thread, NULL, wake_thread, dp) != 0)
         goto fail;
@@ -197,16 +201,18 @@ void mw_wakeup_drain(XDisplayImpl *dp)
     }
 }
 
-/* Also wake the client for `fd` (an in-flight clipboard fetch, -1 for none)
- * and at `timer_ms` (0 for none): a paste's data, or its timeout, must reach
+/* Also wake the client for `fd` (an in-flight clipboard fetch, -1 for none),
+ * when `out_fd` becomes writable (a serve with data left, -1 for none), and
+ * at `timer_ms` (0 for none): a paste's data, or its timeout, must reach
  * an Xt client that is blocked in select() on ConnectionNumber. */
-void mw_wakeup_watch(XDisplayImpl *dp, int fd, uint64_t timer_ms)
+void mw_wakeup_watch(XDisplayImpl *dp, int fd, int out_fd, uint64_t timer_ms)
 {
     if (!dp->wake_running)
         return;
     int ofd = __atomic_exchange_n(&dp->wake_extra_fd, fd, __ATOMIC_SEQ_CST);
+    int oout = __atomic_exchange_n(&dp->wake_out_fd, out_fd, __ATOMIC_SEQ_CST);
     uint64_t ot = __atomic_exchange_n(&dp->wake_timer, timer_ms, __ATOMIC_SEQ_CST);
-    if (ofd != fd || ot != timer_ms) {
+    if (ofd != fd || oout != out_fd || ot != timer_ms) {
         uint64_t one = 1;
         ssize_t n = write(dp->wake_cmd, &one, sizeof one);
         (void)n;

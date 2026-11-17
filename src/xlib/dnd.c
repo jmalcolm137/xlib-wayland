@@ -855,7 +855,13 @@ void mw_dnd_maybe_start(Display *d)
     /* The private MIME names the initiator's selection and targets; the text
      * MIMEs let a plain Wayland application accept a text drag too. */
     char mime[4096];
-    if (x->payload) {
+    /* A Wayland message is at most 4096 bytes, and libwayland aborts the
+     * client rather than send a bigger one: a payload that cannot fit (with
+     * the request header and string length) is not offered at all -- a
+     * truncated one would name the wrong selection.  The drop then works as
+     * a plain text drag. */
+    if (x->payload &&
+        strlen(MOTIF_DRAG_MIME_PREFIX) + strlen(x->payload) < 3800) {
         snprintf(mime, sizeof mime, "%s%s", MOTIF_DRAG_MIME_PREFIX, x->payload);
         wl_data_source_offer(src, mime);
     }
@@ -863,9 +869,10 @@ void mw_dnd_maybe_start(Display *d)
     wl_data_source_offer(src, "UTF8_STRING");
     wl_data_source_offer(src, "text/plain");
     wl_data_source_offer(src, "STRING");
-    wl_data_source_set_actions(src,
-        WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
-        WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
+    if (wl_proxy_get_version((struct wl_proxy *)src) >= 3)   /* set_actions: v3 */
+        wl_data_source_set_actions(src,
+            WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
+            WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
     dp->dnd_src = src;
     wl_data_device_start_drag(dp->data_device, src, sw->tl->surface, NULL,
                               dp->last_press_serial);

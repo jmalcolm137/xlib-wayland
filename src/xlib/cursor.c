@@ -149,8 +149,8 @@ static void apply_cursor(Display *d, MwCursor *c)
 {
     XDisplayImpl *dp = MWD(d);
     /* Resolve an XFixesChangeCursor alias (a theme change replaced this
-     * cursor's image). */
-    while (c && c->alias_to != None) {
+     * cursor's image).  Bounded: A -> B -> A must not loop forever. */
+    for (int hops = 0; c && c->alias_to != None && hops < 16; hops++) {
         MwCursor *n = mw_cursor(d, c->alias_to);
         if (!n || n == c) break;
         c = n;
@@ -160,8 +160,10 @@ static void apply_cursor(Display *d, MwCursor *c)
         if (!c->img_buffer)
             c->img_buffer = make_argb_buffer(d, c->img_pixels, c->img_w, c->img_h);
         if (c->img_buffer) {
-            if (!c->surface)
+            if (!c->surface) {
                 c->surface = wl_compositor_create_surface(dp->wl_compositor);
+                c->created_surface = c->surface != NULL;
+            }
             wl_surface_attach(c->surface, c->img_buffer, 0, 0);
             wl_surface_damage(c->surface, 0, 0, c->img_w, c->img_h);
             wl_surface_commit(c->surface);
@@ -192,8 +194,10 @@ static void apply_cursor(Display *d, MwCursor *c)
         return;
     }
     struct wl_cursor_image *img = c->wl->images[0];
-    if (!c->surface)
+    if (!c->surface) {
         c->surface = wl_compositor_create_surface(dp->wl_compositor);
+        c->created_surface = c->surface != NULL;
+    }
     struct wl_buffer *buf = wl_cursor_image_get_buffer(img);
     wl_surface_attach(c->surface, buf, 0, 0);
     wl_surface_damage(c->surface, 0, 0, (int32_t)img->width, (int32_t)img->height);
@@ -266,6 +270,8 @@ static void cursor_theme_reload(Display *d)
         mw_unregister(d, dp->default_cursor->id);
         if (dp->default_cursor->img_buffer)
             wl_buffer_destroy(dp->default_cursor->img_buffer);
+        if (dp->default_cursor->created_surface && dp->default_cursor->surface)
+            wl_surface_destroy(dp->default_cursor->surface);
         free(dp->default_cursor->img_pixels);
         free(dp->default_cursor->wl_name);
         free(dp->default_cursor);
@@ -327,6 +333,12 @@ Cursor mw_cursor_from_image(Display *d, int w, int h, int xhot, int yhot,
     memcpy(c->img_pixels, pixels, (size_t)w * h * 4);
     mw_register(d, c->id, MW_OBJ_CURSOR, c);
     return c->id;
+}
+
+/* The theme name, owned by the display (NULL when none is set). */
+const char *mw_cursor_theme_peek(Display *d)
+{
+    return MWD(d)->xcursor_theme;
 }
 
 char *mw_cursor_theme_get(Display *d)

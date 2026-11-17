@@ -179,11 +179,23 @@ static void force_opaque(MwSurface *s, int x, int y, int w, int h)
     if (w <= 0 || h <= 0) return;
     cairo_surface_t *cs = mw_surface_native(s);
     if (cs) cairo_surface_flush(cs);
-    for (int j = 0; j < h; j++) {
-        uint32_t *row = px + (size_t)(y + j) * stride + x;
-        for (int i = 0; i < w; i++) row[i] |= 0xff000000u;
+    /* x/y/w/h are logical; a HiDPI window surface is `scale` times larger. */
+    int sc = mw_surface_scale(s);
+    for (int j = 0; j < h * sc; j++) {
+        uint32_t *row = px + (size_t)(y * sc + j) * stride + (size_t)x * sc;
+        for (int i = 0; i < w * sc; i++) row[i] |= 0xff000000u;
     }
     if (cs) cairo_surface_mark_dirty(cs);
+}
+
+/* Store a computed pixel at logical (x,y) of a possibly device-scaled
+ * surface: the whole scale x scale block of physical pixels. */
+static inline void put_logical(uint32_t *dp, int dstride, int sc, int x, int y,
+                               uint32_t v)
+{
+    for (int j = 0; j < sc; j++)
+        for (int i = 0; i < sc; i++)
+            dp[(size_t)(y * sc + j) * dstride + (size_t)(x * sc + i)] = v;
 }
 
 /* ------------------------------------------------------------- operators */
@@ -457,6 +469,7 @@ static void apply_disjoint(Display *d, MwRenderPicture *dst, int op,
     cairo_surface_flush(dcs);
     uint32_t *dp = mw_surface_data(ds);
     int dstride = mw_surface_stride(ds) / 4;
+    int dsc = mw_surface_scale(ds);            /* HiDPI: physical = logical * dsc */
     int dw = mw_surface_width(ds), dh = mw_surface_height(ds);
     int dsta_opaque = (fmt_is_opaque(dst->format));
 
@@ -480,7 +493,7 @@ static void apply_disjoint(Display *d, MwRenderPicture *dst, int op,
                 int i = xx - xd, j = yy - yd;
                 if (i < 0 || j < 0 || i >= w || j >= h) continue;
                 uint32_t sv = sp[(size_t)j * sstride + i];
-                uint32_t dv = dp[(size_t)yy * dstride + xx];
+                uint32_t dv = dp[(size_t)(yy * dsc) * dstride + (size_t)(xx * dsc)];
                 uint32_t dcanon = fmt_dst_rgb(dv, dst->format);
                 double sa = ((sv >> 24) & 0xff) / 255.0;
                 double sr = ((sv >> 16) & 0xff) / 255.0;
@@ -501,9 +514,9 @@ static void apply_disjoint(Display *d, MwRenderPicture *dst, int op,
                 uint32_t rg8 = (uint32_t)lround(rg * 255.0);
                 uint32_t rb8 = (uint32_t)lround(rb * 255.0);
                 if (dsta_opaque) ra8 = 255;
-                dp[(size_t)yy * dstride + xx] =
+                put_logical(dp, dstride, dsc, xx, yy,
                     fmt_from_argb((ra8 << 24) | (rr8 << 16) | (rg8 << 8) | rb8,
-                                  dst->format);
+                                  dst->format));
             }
         }
     }
@@ -645,6 +658,8 @@ static cairo_surface_t *clip_mask_image(Display *d, MwRenderPicture *dst,
                 int mx = xd + i - dst->cm_x;
                 if (mx < 0 || mx >= mw) continue;
                 uint32_t v = mp[(size_t)(my * sc) * mst + (size_t)(mx * sc)];
+                /* Depth 1: bit 0 is the value (Render keeps A1 pixels in
+                 * that form too, see a1_normalize). */
                 uint32_t a = bit ? ((v & 1u) ? 0xff : 0) : (v >> 24);
                 op[(size_t)j * ost + i] = a * 0x01010101u;
             }
@@ -703,6 +718,7 @@ static void composite_manual(Display *d, MwRenderPicture *dst, MwRenderPicture *
     cairo_surface_flush(dcs);
     uint32_t *dp = mw_surface_data(ds);
     int dstride = mw_surface_stride(ds) / 4;
+    int dsc = mw_surface_scale(ds);            /* HiDPI: physical = logical * dsc */
     int dw = mw_surface_width(ds), dh = mw_surface_height(ds);
     int dsta_opaque = (fmt_is_opaque(dst->format));
 
@@ -726,12 +742,12 @@ static void composite_manual(Display *d, MwRenderPicture *dst, MwRenderPicture *
                 int i = xx - xd, j = yy - yd;
                 if (i < 0 || j < 0 || i >= w || j >= h) continue;
                 uint32_t sv = sp[(size_t)j * sstride + i];
-                uint32_t dv = dp[(size_t)yy * dstride + xx];
+                uint32_t dv = dp[(size_t)(yy * dsc) * dstride + (size_t)(xx * dsc)];
                 uint32_t mv = mp_px ? mp_px[(size_t)j * mstride + i] : 0;
                 uint32_t cv = cp_px ? cp_px[(size_t)j * cstride + i] : 0;
-                dp[(size_t)yy * dstride + xx] =
+                put_logical(dp, dstride, dsc, xx, yy,
                     manual_op(op, component, dsta_opaque, dst->format,
-                              sv, dv, mv, mp_px != NULL, cv, cp_px != NULL);
+                              sv, dv, mv, mp_px != NULL, cv, cp_px != NULL));
             }
         }
     }
@@ -865,10 +881,50 @@ static void composite_manual_xform(Display *d, MwRenderPicture *dst,
 }
 
 /* The core Composite. */
+/* An A1 picture shares its pixmap with core drawing, which keeps a bitmap's
+ * value in bit 0 (and may leave alpha set for a 0 pixel).  Store Render's
+ * coverage the same way -- set pixels all ones, clear ones zero -- so a
+ * mask drawn either way reads the same (as a clip mask, a stipple ...). */
+static void a1_normalize(MwSurface *s, int x, int y, int w, int h)
+{
+    if (!s || w <= 0 || h <= 0) return;
+    int sw = mw_surface_width(s), sh = mw_surface_height(s);
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > sw) w = sw - x;
+    if (y + h > sh) h = sh - y;
+    if (w <= 0 || h <= 0) return;
+    cairo_surface_t *cs = mw_surface_native(s);
+    cairo_surface_flush(cs);
+    uint32_t *px = mw_surface_data(s);
+    int stride = mw_surface_stride(s) / 4, sc = mw_surface_scale(s);
+    for (int j = y * sc; j < (y + h) * sc; j++)
+        for (int i = x * sc; i < (x + w) * sc; i++) {
+            uint32_t *p = &px[(size_t)j * stride + i];
+            *p = (*p >> 24) >= 0x80 ? 0xffffffffu : 0;
+        }
+    cairo_surface_mark_dirty(cs);
+}
+
+static void do_composite_inner(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
+                               MwRenderPicture *mask, int op,
+                               int xs, int ys, int xm, int ym,
+                               int xd, int yd, int w, int h);
+
 static void do_composite(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
                          MwRenderPicture *mask, int op,
                          int xs, int ys, int xm, int ym,
                          int xd, int yd, int w, int h)
+{
+    do_composite_inner(d, dst, src, mask, op, xs, ys, xm, ym, xd, yd, w, h);
+    if (dst && dst->format == FMT_A1 && dst->kind == PK_DRAWABLE && !dst->have_transform)
+        a1_normalize(pic_surface(d, dst), xd, yd, w, h);
+}
+
+static void do_composite_inner(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
+                               MwRenderPicture *mask, int op,
+                               int xs, int ys, int xm, int ym,
+                               int xd, int yd, int w, int h)
 {
     if (!dst || w <= 0 || h <= 0) return;
     /* Rendering *to* a gradient/solid picture is a BadDrawable, as on a real
@@ -999,7 +1055,7 @@ static void apply_values(MwRenderPicture *p, CARD32 mask, const CARD32 *v)
          * clip-to-None used to lose their text). */
         p->clip_mask = cm;
         p->has_clip_mask = (cm != None);
-        if (cm == None && p->has_clip) {
+        if (p->has_clip) {                 /* either way, rectangles go */
             pixman_region32_fini(&p->clip);
             p->has_clip = 0;
         }
@@ -1378,7 +1434,8 @@ static void req_add_glyphs(Display *d, const unsigned char *b, size_t len)
 /* Draw one glyph at (x,y) in dst, using `src` (usually solid) and the glyph's
  * mask surface; the bitmap's top-left is at (x - xOff, y - yOff). */
 static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
-                       int op, MwGlyphSet *gs, int gid, int x, int y)
+                       int op, MwGlyphSet *gs, int gid, int x, int y,
+                       int src_dx, int src_dy, int src_x, int src_y)
 {
     MwGlyph *gp = glyph_slot(gs, (CARD32)gid, 0);
     if (!gp || !gp->surface) {
@@ -1406,8 +1463,31 @@ static void draw_glyph(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
     cairo_rectangle(cr, bx, by, w, h);
     cairo_clip(cr);
     apply_dst_clip(cr, dst);
-    set_source(d, cr, src, bx, by, bx, by);
-    cairo_mask_surface(cr, mw_surface_native(mask), bx, by);
+    /* The source is sampled at (xSrc,ySrc) + (pixel - first glyph element's
+     * position), as the server does -- not at the destination position. */
+    set_source(d, cr, src, src_dx, src_dy, src_x, src_y);
+    /* A CPClipMask on the destination scales the glyph's coverage. */
+    cairo_surface_t *cm = clip_mask_image(d, dst, bx, by, w, h);
+    if (cm) {
+        cairo_surface_t *gm = mw_surface_native(mask);
+        cairo_surface_flush(gm);
+        const uint32_t *gp = (const uint32_t *)cairo_image_surface_get_data(gm);
+        int gst = cairo_image_surface_get_stride(gm) / 4;
+        uint32_t *cp = (uint32_t *)cairo_image_surface_get_data(cm);
+        int cst = cairo_image_surface_get_stride(cm) / 4;
+        for (int j = 0; j < h; j++)
+            for (int i = 0; i < w; i++) {
+                uint32_t c = cp[(size_t)j * cst + i] >> 24;
+                uint32_t g = gp[(size_t)j * gst + i];
+                uint32_t a = (((g >> 24) & 0xff) * c) / 255;
+                cp[(size_t)j * cst + i] = a << 24;
+            }
+        cairo_surface_mark_dirty(cm);
+        cairo_mask_surface(cr, cm, bx, by);
+        cairo_surface_destroy(cm);
+    } else {
+        cairo_mask_surface(cr, mw_surface_native(mask), bx, by);
+    }
     cairo_restore(cr);
     cairo_destroy(cr);
     if (fmt_is_opaque(dst->format)) force_opaque(ds, bx, by, w, h);
@@ -1437,6 +1517,8 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
      * element's glyph data is padded to a 4-byte boundary. */
     int pen_x = 0, pen_y = 0;
     int total = 0;
+    bool first = true;
+    int xdst = 0, ydst = 0;                /* the first element's position */
     while (p + sz_xGlyphElt <= end) {
         xGlyphElt elt;
         memcpy(&elt, p, sz_xGlyphElt);
@@ -1457,6 +1539,7 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
         if (p + need > end) break;
         int px = pen_x + elt.deltax;
         int py = pen_y + elt.deltay;
+        if (first) { xdst = px; ydst = py; first = false; }
         if (getenv("MW_TRACE_RENDER"))
             fprintf(stderr, "MW: glyph elt len=%d dx=%d dy=%d start=%d,%d\n",
                     count, (int)elt.deltax, (int)elt.deltay, px, py);
@@ -1465,7 +1548,8 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
             if (glyph_bytes == 1) gid = p[i];
             else if (glyph_bytes == 2) { CARD16 v; memcpy(&v, p + i*2, 2); gid = v; }
             else { memcpy(&gid, p + i*4, 4); }
-            draw_glyph(d, dst, src, r->op, gs, (int)gid, px, py);
+            draw_glyph(d, dst, src, r->op, gs, (int)gid, px, py,
+                       xdst, ydst, r->xSrc, r->ySrc);
             /* The glyph's stored xOff/yOff is its advance (cairo/Xft); a
              * zero-size glyph (space) has no surface but still advances. */
             MwGlyph *gp = glyph_slot(gs, gid, 0);
@@ -1488,14 +1572,38 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
  * there.  cairo_fill() only touches the interior, so build one coverage mask
  * for the whole request, merge the shapes into it, then rasterise the source
  * through that mask and composite. */
-static cairo_surface_t *poly_mask_new(MwSurface *ds, cairo_t **out)
+/* A coverage mask for the polygons' bounding box [bx,bx+bw) x [by,by+bh)
+ * (clipped to the drawable), not the whole drawable: cairo-xlib sends many
+ * small trapezoid batches.  The context is translated, so paths are built in
+ * destination coordinates.  NULL when the box is empty. */
+static cairo_surface_t *poly_mask_new(MwSurface *ds, double x1, double y1,
+                                      double x2, double y2, int *bx, int *by,
+                                      cairo_t **out)
 {
     int mw = mw_surface_width(ds), mh = mw_surface_height(ds);
-    cairo_surface_t *mask = cairo_image_surface_create(CAIRO_FORMAT_A8, mw, mh);
+    int l = (int)floor(x1), t = (int)floor(y1);
+    int r = (int)ceil(x2), b = (int)ceil(y2);
+    if (l < 0) l = 0;
+    if (t < 0) t = 0;
+    if (r > mw) r = mw;
+    if (b > mh) b = mh;
+    if (r <= l || b <= t) return NULL;
+    cairo_surface_t *mask = cairo_image_surface_create(CAIRO_FORMAT_A8, r - l, b - t);
     cairo_t *c = cairo_create(mask);
+    cairo_translate(c, -l, -t);
     cairo_set_source_rgba(c, 1, 1, 1, 1);
+    *bx = l; *by = t;
     *out = c;
     return mask;
+}
+
+/* x of a Render line (an infinite line through p1 and p2) at height y. */
+static double line_x(const xLineFixed *ln, double y)
+{
+    double x1 = frac(ln->p1.x), y1 = frac(ln->p1.y);
+    double x2 = frac(ln->p2.x), y2 = frac(ln->p2.y);
+    if (y2 == y1) return x1;
+    return x1 + (y - y1) * (x2 - x1) / (y2 - y1);
 }
 
 /* Composite `src` through a polygon coverage mask.  As in the X server, only
@@ -1504,6 +1612,7 @@ static cairo_surface_t *poly_mask_new(MwSurface *ds, cairo_t **out)
  * src + (dst - first vertex). */
 static void apply_poly_mask(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
                             int op, cairo_surface_t *mask, cairo_t *mc,
+                            int mbx, int mby,
                             int xs, int ys, int xfirst, int yfirst)
 {
     double ex1, ey1, ex2, ey2;
@@ -1527,7 +1636,7 @@ static void apply_poly_mask(Display *d, MwRenderPicture *dst, MwRenderPicture *s
     cairo_t *tc = cairo_create(tmp);
     cairo_set_operator(tc, CAIRO_OPERATOR_SOURCE);
     set_source(d, tc, src, xfirst - x0, yfirst - y0, xs, ys);
-    cairo_mask_surface(tc, mask, -x0, -y0);
+    cairo_mask_surface(tc, mask, mbx - x0, mby - y0);
     cairo_destroy(tc);
     cairo_surface_flush(tmp);
     uint32_t *tp = (uint32_t *)cairo_image_surface_get_data(tmp);
@@ -1574,20 +1683,40 @@ static void req_trapezoids(Display *d, const unsigned char *b, size_t len)
                 frac(t0.right.p1.x), frac(t0.right.p2.x));
     }
     MwSurface *ds = pic_surface(d, dst);
-    if (!ds) return;
-    cairo_t *mc = NULL;
-    cairo_surface_t *mask = poly_mask_new(ds, &mc);
+    if (!ds || n == 0) return;
+    /* The edges are lines through p1 and p2, evaluated at top and bottom
+     * (cairo-xlib's tessellator shares edges across several trapezoids, so
+     * p1.y/p2.y are generally not top/bottom). */
+    double bx1 = 1e30, by1 = 1e30, bx2 = -1e30, by2 = -1e30;
     for (size_t i = 0; i < n; i++) {
         xTrapezoid t; memcpy(&t, p + i*sz_xTrapezoid, sz_xTrapezoid);
-        cairo_move_to(mc, frac(t.left.p1.x),  t.top / 65536.0);
-        cairo_line_to(mc, frac(t.right.p1.x), t.top / 65536.0);
-        cairo_line_to(mc, frac(t.right.p2.x), t.bottom / 65536.0);
-        cairo_line_to(mc, frac(t.left.p2.x),  t.bottom / 65536.0);
+        double top = frac(t.top), bot = frac(t.bottom);
+        double xs4[4] = { line_x(&t.left, top), line_x(&t.right, top),
+                          line_x(&t.right, bot), line_x(&t.left, bot) };
+        for (int k = 0; k < 4; k++) {
+            if (xs4[k] < bx1) bx1 = xs4[k];
+            if (xs4[k] > bx2) bx2 = xs4[k];
+        }
+        if (top < by1) by1 = top;
+        if (bot > by2) by2 = bot;
+    }
+    cairo_t *mc = NULL;
+    int mbx = 0, mby = 0;
+    cairo_surface_t *mask = poly_mask_new(ds, bx1, by1, bx2, by2, &mbx, &mby, &mc);
+    if (!mask) return;
+    for (size_t i = 0; i < n; i++) {
+        xTrapezoid t; memcpy(&t, p + i*sz_xTrapezoid, sz_xTrapezoid);
+        double top = frac(t.top), bot = frac(t.bottom);
+        if (bot <= top) continue;
+        cairo_move_to(mc, line_x(&t.left, top),  top);
+        cairo_line_to(mc, line_x(&t.right, top), top);
+        cairo_line_to(mc, line_x(&t.right, bot), bot);
+        cairo_line_to(mc, line_x(&t.left, bot),  bot);
         cairo_close_path(mc);
     }
     xTrapezoid t0 = { 0 };
     if (n) memcpy(&t0, p, sz_xTrapezoid);
-    apply_poly_mask(d, dst, src, r->op, mask, mc, r->xSrc, r->ySrc,
+    apply_poly_mask(d, dst, src, r->op, mask, mc, mbx, mby, r->xSrc, r->ySrc,
                     t0.left.p1.x >> 16, t0.left.p1.y >> 16);
     cairo_surface_destroy(mask);
 }
@@ -1607,9 +1736,23 @@ static void req_triangles(Display *d, const unsigned char *b, size_t len)
                     r->op, n, (unsigned)r->maskFormat);
     }
     MwSurface *ds = pic_surface(d, dst);
-    if (!ds) return;
+    if (!ds || n == 0) return;
+    double bx1 = 1e30, by1 = 1e30, bx2 = -1e30, by2 = -1e30;
+    for (size_t i = 0; i < n; i++) {
+        xTriangle t; memcpy(&t, p + i*sz_xTriangle, sz_xTriangle);
+        xPointFixed q[3] = { t.p1, t.p2, t.p3 };
+        for (int k = 0; k < 3; k++) {
+            double x = frac(q[k].x), y = frac(q[k].y);
+            if (x < bx1) bx1 = x;
+            if (x > bx2) bx2 = x;
+            if (y < by1) by1 = y;
+            if (y > by2) by2 = y;
+        }
+    }
     cairo_t *mc = NULL;
-    cairo_surface_t *mask = poly_mask_new(ds, &mc);
+    int mbx = 0, mby = 0;
+    cairo_surface_t *mask = poly_mask_new(ds, bx1, by1, bx2, by2, &mbx, &mby, &mc);
+    if (!mask) return;
     for (size_t i = 0; i < n; i++) {
         xTriangle t; memcpy(&t, p + i*sz_xTriangle, sz_xTriangle);
         cairo_move_to(mc, frac(t.p1.x), frac(t.p1.y));
@@ -1619,7 +1762,7 @@ static void req_triangles(Display *d, const unsigned char *b, size_t len)
     }
     xTriangle t0 = { 0 };
     if (n) memcpy(&t0, p, sz_xTriangle);
-    apply_poly_mask(d, dst, src, r->op, mask, mc, r->xSrc, r->ySrc,
+    apply_poly_mask(d, dst, src, r->op, mask, mc, mbx, mby, r->xSrc, r->ySrc,
                     t0.p1.x >> 16, t0.p1.y >> 16);
     cairo_surface_destroy(mask);
 }
@@ -1639,8 +1782,19 @@ static void req_tri_fan(Display *d, const unsigned char *b, size_t len)
     xPointFixed a; memcpy(&a, p, 8);
     MwSurface *ds = pic_surface(d, dst);
     if (!ds) return;
+    double bx1 = 1e30, by1 = 1e30, bx2 = -1e30, by2 = -1e30;
+    for (size_t i = 0; i < n; i++) {
+        xPointFixed q; memcpy(&q, p + i * 8, 8);
+        double x = frac(q.x), y = frac(q.y);
+        if (x < bx1) bx1 = x;
+        if (x > bx2) bx2 = x;
+        if (y < by1) by1 = y;
+        if (y > by2) by2 = y;
+    }
     cairo_t *mc = NULL;
-    cairo_surface_t *mask = poly_mask_new(ds, &mc);
+    int mbx = 0, mby = 0;
+    cairo_surface_t *mask = poly_mask_new(ds, bx1, by1, bx2, by2, &mbx, &mby, &mc);
+    if (!mask) return;
     for (size_t i = 1; i + 1 < n; i++) {
         xPointFixed q, c;
         memcpy(&q, p + i * 8, 8);
@@ -1650,7 +1804,7 @@ static void req_tri_fan(Display *d, const unsigned char *b, size_t len)
         cairo_line_to(mc, frac(c.x), frac(c.y));
         cairo_close_path(mc);
     }
-    apply_poly_mask(d, dst, src, r->op, mask, mc, r->xSrc, r->ySrc,
+    apply_poly_mask(d, dst, src, r->op, mask, mc, mbx, mby, r->xSrc, r->ySrc,
                     a.x >> 16, a.y >> 16);
     cairo_surface_destroy(mask);
 }
@@ -1663,9 +1817,20 @@ static void req_tri_strip(Display *d, const unsigned char *b, size_t len)
     size_t n = (len - sz_xRenderTriStripReq) / 8;
     const unsigned char *p = b + sz_xRenderTriStripReq;
     MwSurface *ds = pic_surface(d, dst);
-    if (!ds) return;
+    if (!ds || n < 3) return;
+    double bx1 = 1e30, by1 = 1e30, bx2 = -1e30, by2 = -1e30;
+    for (size_t i = 0; i < n; i++) {
+        xPointFixed q; memcpy(&q, p + i * 8, 8);
+        double x = frac(q.x), y = frac(q.y);
+        if (x < bx1) bx1 = x;
+        if (x > bx2) bx2 = x;
+        if (y < by1) by1 = y;
+        if (y > by2) by2 = y;
+    }
     cairo_t *mc = NULL;
-    cairo_surface_t *mask = poly_mask_new(ds, &mc);
+    int mbx = 0, mby = 0;
+    cairo_surface_t *mask = poly_mask_new(ds, bx1, by1, bx2, by2, &mbx, &mby, &mc);
+    if (!mask) return;
     for (size_t i = 0; i + 2 < n; i++) {
         xPointFixed p0, p1, p2;
         memcpy(&p0, p + i * 8, 8);
@@ -1678,7 +1843,7 @@ static void req_tri_strip(Display *d, const unsigned char *b, size_t len)
     }
     xPointFixed f0 = { 0, 0 };
     if (n) memcpy(&f0, p, 8);
-    apply_poly_mask(d, dst, src, r->op, mask, mc, r->xSrc, r->ySrc,
+    apply_poly_mask(d, dst, src, r->op, mask, mc, mbx, mby, r->xSrc, r->ySrc,
                     f0.x >> 16, f0.y >> 16);
     cairo_surface_destroy(mask);
 }

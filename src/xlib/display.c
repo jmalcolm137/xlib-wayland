@@ -411,6 +411,12 @@ int XCloseDisplay(Display *d)
         free(dp->atom_names);
     }
     if (dp->defaults_db) XrmDestroyDatabase(dp->defaults_db);
+    free(dp->cookie_unclaimed);
+    /* Cookie data still queued was never handed out. */
+    for (int i = 0; i < dp->qcount; i++) {
+        XEvent *e = &dp->queue[(dp->qhead + i) % dp->qcap];
+        if (e->type == GenericEvent) free(e->xcookie.data);
+    }
     free(dp->private12);                 /* Xlib output buffer */
     free(dp->atom_buf);
     free(dp->queue);

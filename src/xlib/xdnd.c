@@ -386,10 +386,16 @@ static void xdnd_start_wayland_drag(Display *d, const Atom *targets, int nt)
         }
         XFree((char *)nm);
     }
-    if (!offered) { TR("no targets to offer\n"); return; }
+    if (!offered) {
+        TR("no targets to offer\n");
+        mw_clipboard_free_source(d, src);    /* it would never be used */
+        return;
+    }
 
-    wl_data_source_set_actions(src,
-        WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY | WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
+    if (wl_proxy_get_version((struct wl_proxy *)src) >= 3)   /* set_actions: v3 */
+        wl_data_source_set_actions(src,
+            WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
+            WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
     x->drag_started = true;
     wl_data_device_start_drag(dp->data_device, src, sw->tl->surface, NULL,
                               dp->last_press_serial);

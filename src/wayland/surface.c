@@ -13,6 +13,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <spawn.h>
+#include <sys/wait.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -410,8 +411,18 @@ void mw_apply_motif_functions(Display *d, MwWindow *win)
     for (int i = 0; i < n; i++) {
         char *argv[] = { (char *)helper, "decor", "-a", (char *)profiles[i],
                          "-t", target, NULL };
-        pid_t pid;
-        posix_spawnp(&pid, helper, NULL, NULL, argv, environ);
+        /* Double fork: the intermediate child spawns the helper and exits at
+         * once, so it is reaped here and the helper is re-parented to init.
+         * Spawning directly left a zombie per helper, and an application's
+         * own waitpid(-1) could collect pids it never started. */
+        pid_t mid = fork();
+        if (mid == 0) {
+            pid_t pid;
+            int rc = posix_spawnp(&pid, helper, NULL, NULL, argv, environ);
+            _exit(rc == 0 ? 0 : 1);
+        }
+        if (mid > 0)
+            while (waitpid(mid, NULL, 0) < 0 && errno == EINTR) {}
     }
     win->tl->motif_functions_sent = true;
 }
@@ -1165,9 +1176,13 @@ void mw_toplevel_render(MwToplevel *tl)
         xdg_surface_ack_configure(tl->xdg_surface, tl->ack_serial);
         tl->ack_serial = 0;
     }
-    wl_surface_set_buffer_scale(tl->surface, sc);
+    /* set_buffer_scale is wl_surface v3, damage_buffer v4: an older
+     * compositor gets surface-coordinate damage (and must be at scale 1). */
+    uint32_t sv = proxy_version(tl->surface);
+    if (sv >= 3) wl_surface_set_buffer_scale(tl->surface, sc);
     wl_surface_attach(tl->surface, tl->bufs[idx].buffer, 0, 0);
-    wl_surface_damage_buffer(tl->surface, 0, 0, w * sc, h * sc);
+    if (sv >= 4) wl_surface_damage_buffer(tl->surface, 0, 0, w * sc, h * sc);
+    else         wl_surface_damage(tl->surface, 0, 0, w, h);
     wl_surface_commit(tl->surface);
     tl->bufs[idx].busy = true;
     tl->last_idx = idx;

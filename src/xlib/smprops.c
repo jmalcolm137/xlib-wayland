@@ -17,6 +17,7 @@
 #define _GNU_SOURCE
 #include "internal.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,14 +25,47 @@
 #include <sys/file.h>
 #include <unistd.h>
 
-#define SMP_MAX 65536
+#define SMP_MAX       65536              /* largest property value, bytes */
+#define SMP_FILE_MAX  (8u << 20)         /* largest store file read */
 
-static const char *smp_path(char *buf, size_t n)
+/* The store's path in the validated runtime directory; false if none. */
+static bool smp_path(char *buf, size_t n)
 {
-    const char *rt = getenv("XDG_RUNTIME_DIR");
-    if (!rt || !*rt) rt = "/tmp";
-    snprintf(buf, n, "%s/xlib-wayland/smprops", rt);
-    return buf;
+    char dir[200];
+    if (!mw_runtime_dir(dir, sizeof dir)) return false;
+    int w = snprintf(buf, n, "%s/smprops", dir);
+    return w > 0 && (size_t)w < n;
+}
+
+/* The whole store, NUL-terminated, read under a shared lock (a writer
+ * truncates and rewrites it under an exclusive one).  NULL if absent. */
+static char *smp_read_all(void)
+{
+    char path[256];
+    if (!smp_path(path, sizeof path)) return NULL;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    flock(fd, LOCK_SH);
+    char *text = NULL;
+    size_t len = 0, cap = 0;
+    for (;;) {
+        if (len + 4096 + 1 > cap) {
+            if (cap >= SMP_FILE_MAX) break;
+            size_t ncap = cap ? cap * 2 : 16384;
+            char *t = realloc(text, ncap);
+            if (!t) break;
+            text = t;
+            cap = ncap;
+        }
+        ssize_t n = read(fd, text + len, cap - 1 - len);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        len += (size_t)n;
+    }
+    flock(fd, LOCK_UN);
+    close(fd);
+    if (text) text[len] = 0;
+    return text;
 }
 
 static bool smp_interest(const char *name)
@@ -41,6 +75,7 @@ static bool smp_interest(const char *name)
     size_t len = strlen(name);
     char  *list = strdup(env);
     bool   ok = false;
+    if (!list) return false;
     char *save_t = NULL;
     for (char *t = strtok_r(list, ",", &save_t); t && !ok; t = strtok_r(NULL, ",", &save_t)) {
         while (*t == ' ') t++;
@@ -92,6 +127,7 @@ void mw_smprop_publish(Display *d, Atom prop, Atom type, int format,
                        const unsigned char *data, unsigned long nitems)
 {
     if (!data || !mw_smprop_is_shared(d, prop)) return;
+    if (format != 8 && format != 16 && format != 32) return;
     const char *pname = XGetAtomName(d, prop);
     const char *tname = XGetAtomName(d, type);
     if (!pname) return;
@@ -107,8 +143,8 @@ void mw_smprop_publish(Display *d, Atom prop, Atom type, int format,
     if (ll < 0) ll = 0;
 
     char path[256];
-    smp_path(path, sizeof path);
-    int fd = open(path, O_RDWR | O_CREAT, 0600);
+    int fd = smp_path(path, sizeof path)
+             ? open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600) : -1;
     if (fd >= 0) {
         flock(fd, LOCK_EX);
         char  *text = NULL;
@@ -162,28 +198,17 @@ void mw_smprop_publish(Display *d, Atom prop, Atom type, int format,
     if (tname) XFree((char *)tname);
 }
 
-/* Does the store hold a value for this property name? */
-static bool smp_has(const char *name)
+/* Does the store text hold a value for this property name? */
+static bool smp_has(const char *text, const char *name)
 {
-    char path[256];
-    smp_path(path, sizeof path);
-    int fd = open(path, O_RDONLY, 0600);
-    if (fd < 0) return false;
-    char   buf[SMP_MAX];
-    ssize_t n = read(fd, buf, sizeof buf - 1);
-    close(fd);
-    if (n <= 0) return false;
-    buf[n] = 0;
     size_t nl = strlen(name);
-    char  *p = buf;
-    bool   found = false;
-    while (*p) {
-        char *e = strchr(p, '\n');
+    for (const char *p = text; p && *p; ) {
+        const char *e = strchr(p, '\n');
         size_t sl = e ? (size_t)(e - p) : strlen(p);
-        if (sl > nl && p[nl] == '\t' && strncmp(p, name, nl) == 0) { found = true; break; }
+        if (sl > nl && p[nl] == '\t' && strncmp(p, name, nl) == 0) return true;
         p = e ? e + 1 : p + sl;
     }
-    return found;
+    return false;
 }
 
 /* Look up a shared property.  On success the caller owns *data (XFree it). */
@@ -193,63 +218,54 @@ bool mw_smprop_lookup(Display *d, Atom prop, Atom *type, int *format,
     if (!mw_smprop_is_shared(d, prop)) return false;
     const char *pname = XGetAtomName(d, prop);
     if (!pname) return false;
-
-    char path[256];
-    smp_path(path, sizeof path);
-    int fd = open(path, O_RDONLY, 0600);
+    char *buf = smp_read_all();
     bool found = false;
-    if (fd >= 0) {
-        char   buf[SMP_MAX];
-        ssize_t n = read(fd, buf, sizeof buf - 1);
-        close(fd);
-        if (n > 0) {
-            buf[n] = 0;
-            size_t pn = strlen(pname);
-            char  *p = buf;
-            while (*p) {
-                char *nl = strchr(p, '\n');
-                size_t sl = nl ? (size_t)(nl - p) : strlen(p);
-                if (sl > pn && p[pn] == '\t' && strncmp(p, pname, pn) == 0) {
-                    p[sl] = 0;
-                    char *f = p + pn + 1;
-                    char *tn = strsep(&f, "\t");
-                    char *fm = strsep(&f, "\t");
-                    char *ni = strsep(&f, "\t");
-                    char *hx = f;
-                    if (tn && fm && ni && hx) {
-                        int fmt = atoi(fm);
-                        unsigned long nit = strtoul(ni, NULL, 10);
-                        Atom t = XInternAtom(d, tn, False);
-                        size_t bytes = (size_t)fmt / 8 * nit;
-                        unsigned char *out = malloc(bytes ? bytes : 1);
-                        if (out) {
-                            size_t got = hexdec(hx, out, bytes);
-                            if (got == bytes || bytes == 0) {
-                                if (type) *type = t;
-                                if (format) *format = fmt;
-                                if (nitems) *nitems = nit;
-                                *data = out;
-                                found = true;
-                            } else {
-                                free(out);
-                            }
-                        }
-                    }
-                    break;
-                }
-                p = nl ? nl + 1 : p + sl;
-            }
+    size_t pn = strlen(pname);
+    for (char *p = buf; p && *p; ) {
+        char *nl = strchr(p, '\n');
+        size_t sl = nl ? (size_t)(nl - p) : strlen(p);
+        if (!(sl > pn && p[pn] == '\t' && strncmp(p, pname, pn) == 0)) {
+            p = nl ? nl + 1 : p + sl;
+            continue;
         }
+        p[sl] = 0;
+        char *f = p + pn + 1;
+        char *tn = strsep(&f, "\t");
+        char *fm = strsep(&f, "\t");
+        char *ni = strsep(&f, "\t");
+        char *hx = f;
+        if (!tn || !fm || !ni || !hx) break;
+        /* The file is input: the format must be a real one and the item
+         * count must describe exactly the hex that follows (a wrapped size
+         * computation used to be accepted and overflowed the reader). */
+        int fmt = atoi(fm);
+        char *end;
+        unsigned long nit = strtoul(ni, &end, 10);
+        if ((fmt != 8 && fmt != 16 && fmt != 32) || *end || nit > SMP_MAX)
+            break;
+        size_t bytes = (size_t)fmt / 8 * nit;
+        if (bytes > SMP_MAX || strlen(hx) != bytes * 2) break;
+        unsigned char *out = malloc(bytes ? bytes : 1);
+        if (!out) break;
+        if (hexdec(hx, out, bytes) != bytes) { free(out); break; }
+        if (type) *type = tn[0] ? XInternAtom(d, tn, False) : None;
+        if (format) *format = fmt;
+        if (nitems) *nitems = nit;
+        *data = out;
+        found = true;
+        break;
     }
     /* dtstyle treats a present _DT_SM_WINDOW_INFO as "the session manager is
      * here", then insists on its state and screen-saver settings and exits if
      * they are missing.  A manager that has not published those is worse than
      * none, so do not offer the window until it has. */
-    if (found && pname && strcmp(pname, "_DT_SM_WINDOW_INFO") == 0 &&
-        (!smp_has("_DT_SM_STATE_INFO") || !smp_has("_DT_SM_SAVER_INFO"))) {
-        if (data && *data) { free(*data); *data = NULL; }
+    if (found && strcmp(pname, "_DT_SM_WINDOW_INFO") == 0 &&
+        (!smp_has(buf, "_DT_SM_STATE_INFO") || !smp_has(buf, "_DT_SM_SAVER_INFO"))) {
+        free(*data);
+        *data = NULL;
         found = false;
     }
+    free(buf);
     XFree((char *)pname);
     return found;
 }

@@ -83,12 +83,13 @@ int XAllocColorCells(Display *d, Colormap cmap, Bool contig,
                      unsigned long *planes, unsigned int nplanes,
                      unsigned long *pixels, unsigned int ncolors)
 {
-    (void)contig; (void)planes; (void)nplanes;
-    MwColormap *cm = mw_colormap(d, cmap);
-    int base = cm ? cm->alloc_count : 0;
-    for (unsigned int i = 0; i < ncolors; i++) pixels[i] = (unsigned long)(base + i);
-    if (cm) cm->alloc_count += (int)ncolors;
-    return 1;
+    /* The only visuals are TrueColor, whose colormaps are read-only: a real
+     * server fails this, and clients fall back to XAllocColor.  Claiming
+     * success handed out pixels 0, 1, 2 ... that XStoreColor cannot change,
+     * so everything came out black. */
+    (void)d; (void)cmap; (void)contig; (void)planes; (void)nplanes;
+    (void)pixels; (void)ncolors;
+    return 0;
 }
 
 int XFreeColors(Display *d, Colormap cmap, unsigned long *pixels,
@@ -203,8 +204,9 @@ static int parse_rgb_spec(const char *spec, unsigned short out[3])
             p++; n++;
         }
         if (n < 1 || n > 4) return 0;
-        v <<= (4 - n) * 4;      /* left-justify to 16 bits, as Xlib does */
-        out[i] = (unsigned short)v;
+        /* rgb: components are scaled to 16 bits (rgb:f/0/0 is full red),
+         * unlike the legacy # form, which is left-justified. */
+        out[i] = (unsigned short)((v * 0xffffu) / ((1u << (4 * n)) - 1));
         if (i < 2) {
             while (*p == ' ' || *p == '\t') p++;
             if (*p != '/') return 0;
@@ -249,16 +251,16 @@ int XParseColor(Display *d, Colormap cmap, _Xconst char *spec, XColor *def)
             if (h < 0) return 0;
             v[i / per] = (v[i / per] << 4) | (unsigned)h;
         }
-        if (per == 1)      { r = v[0]*17; g = v[1]*17; b = v[2]*17; }
-        else if (per == 2) { r = v[0];    g = v[1];    b = v[2]; }
-        else if (per == 3) { r = v[0]>>4; g = v[1]>>4; b = v[2]>>4; }
-        else               { r = v[0]>>8; g = v[1]>>8; b = v[2]>>8; }
-        def->red = c8to16(r); def->green = c8to16(g); def->blue = c8to16(b);
+        /* libX11 left-justifies each component: "#f00" is red 0xf000,
+         * "#ff0000" 0xff00. */
+        int shift = 16 - 4 * per;
+        def->red = (unsigned short)(v[0] << shift);
+        def->green = (unsigned short)(v[1] << shift);
+        def->blue = (unsigned short)(v[2] << shift);
         def->flags = DoRed | DoGreen | DoBlue;
         return 1;
     }
-    if (spec[0] == 'r' && spec[1] == 'g' && spec[2] == 'b' && spec[3] == ':' &&
-        spec[4] != 'i') {
+    if (strncasecmp(spec, "rgb:", 4) == 0) {
         unsigned short v[3];
         if (parse_rgb_spec(spec, v)) {
             def->red = v[0]; def->green = v[1]; def->blue = v[2];
@@ -301,6 +303,7 @@ int XAllocNamedColor(Display *d, Colormap cmap, _Xconst char *spec,
 {
     if (!XParseColor(d, cmap, spec, exact)) return 0;
     XLookupColor(d, cmap, spec, exact, screen);
+    exact->pixel = screen->pixel;         /* libX11 sets it in both */
     return 1;
 }
 
@@ -344,7 +347,7 @@ Status XMatchVisualInfo(Display *d, int screen, int depth, int class,
                         XVisualInfo *vinfo)
 {
     (void)screen;
-    if ((class != TrueColor && class != 0)) return 0;
+    if (class != TrueColor) return 0;     /* 0 is StaticGray, not "any" */
     XDisplayImpl *dp = MWD(d);
     Visual *v;
     if (depth == 24) v = &dp->visual;

@@ -58,9 +58,13 @@ int main(void)
                 img->data = info.shmaddr;
                 memset(img->data, 0x7f, (size_t)img->bytes_per_line * img->height);
                 XShmAttach(d, &info);
-                XShmPutImage(d, w, gc, img, 0, 0, 0, 0, 16, 16, False);
+                /* send_event: a ShmCompletion must follow (clients wait for
+                 * it before reusing the segment). */
+                XShmPutImage(d, w, gc, img, 0, 0, 0, 0, 16, 16, True);
                 XFlush(d);
-                put_ok = 1;
+                XEvent ce;
+                put_ok = XCheckTypedEvent(d, XShmGetEventBase(d) + ShmCompletion, &ce) &&
+                         ((XShmCompletionEvent *)&ce)->drawable == w;
                 XShmDetach(d, &info);
                 shmdt(info.shmaddr);
                 shmctl(info.shmid, IPC_RMID, NULL);

@@ -4,7 +4,9 @@
  * with the same font objects and drawing code as the core Xlib API.
  */
 #include "internal.h"
+#include <X11/Xatom.h>
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -15,19 +17,24 @@ struct _XOC { struct _XOM *om; };
 
 static MwXFont *fs_font(XFontSet fs) { return (MwXFont *)fs; }
 
+/* Decode one UTF-8 character; a malformed or truncated sequence yields
+ * U+FFFD and consumes one byte (never reading past `end`). */
 static unsigned int utf8_next(const char **sp, const char *end)
 {
     const unsigned char *s = (const unsigned char *)*sp;
-    if (s >= (const unsigned char *)end) return 0;
-    unsigned int c = *s++;
-    if (c >= 0xF0 && s + 2 < (const unsigned char *)end)
-        c = ((c & 0x07) << 18) | ((s[0] & 0x3F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F), s += 3;
-    else if (c >= 0xE0 && s + 1 < (const unsigned char *)end)
-        c = ((c & 0x0F) << 12) | ((s[0] & 0x3F) << 6) | (s[1] & 0x3F), s += 2;
-    else if (c >= 0xC0)
-        c = ((c & 0x1F) << 6) | (s[0] & 0x3F), s += 1;
-    *sp = (const char *)s;
-    return c;
+    const unsigned char *e = (const unsigned char *)end;
+    if (s >= e) return 0;
+    unsigned int c = *s;
+    int n = c < 0x80 ? 0 : (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2
+          : (c & 0xF8) == 0xF0 ? 3 : -1;
+    if (n < 0 || s + 1 + n > e) { *sp = (const char *)(s + 1); return 0xFFFD; }
+    unsigned int v = n == 0 ? c : c & (0x3Fu >> n);
+    for (int i = 1; i <= n; i++) {
+        if ((s[i] & 0xC0) != 0x80) { *sp = (const char *)(s + 1); return 0xFFFD; }
+        v = (v << 6) | (s[i] & 0x3F);
+    }
+    *sp = (const char *)(s + 1 + n);
+    return v;
 }
 
 static int utf8_text_width(XFontSet fs, _Xconst char *s, int n)
@@ -258,47 +265,88 @@ char *XSetOCValues(XOC oc, ...) { (void)oc; return NULL; }
 
 /* --------------------------------------------------- wc text properties */
 
+static size_t utf8_put(unsigned char *o, unsigned int c)
+{
+    if (c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) c = 0xFFFD;
+    if (c < 0x80) { o[0] = (unsigned char)c; return 1; }
+    if (c < 0x800) { o[0] = (unsigned char)(0xC0 | (c >> 6));
+                     o[1] = (unsigned char)(0x80 | (c & 0x3F)); return 2; }
+    if (c < 0x10000) { o[0] = (unsigned char)(0xE0 | (c >> 12));
+                       o[1] = (unsigned char)(0x80 | ((c >> 6) & 0x3F));
+                       o[2] = (unsigned char)(0x80 | (c & 0x3F)); return 3; }
+    o[0] = (unsigned char)(0xF0 | (c >> 18));
+    o[1] = (unsigned char)(0x80 | ((c >> 12) & 0x3F));
+    o[2] = (unsigned char)(0x80 | ((c >> 6) & 0x3F));
+    o[3] = (unsigned char)(0x80 | (c & 0x3F));
+    return 4;
+}
+
+/* As in libX11: the strings NUL-separated, nitems not counting the final
+ * NUL, and the encoding by `style` -- XStringStyle is Latin-1 STRING (a
+ * character outside it fails the conversion: XNoMemory is not right, so the
+ * count of unconvertible characters is returned, as libX11 does);
+ * everything else here is UTF8_STRING. */
 int XwcTextListToTextProperty(Display *d, wchar_t **list, int count,
                               XICCEncodingStyle style, XTextProperty *tp)
 {
-    (void)d; (void)style;
     size_t total = 0;
-    for (int i = 0; i < count; i++) total += wcslen(list[i]) * 4 + 1;
+    for (int i = 0; i < count; i++) total += (list[i] ? wcslen(list[i]) : 0) * 4 + 1;
     unsigned char *buf = calloc(total + 1, 1);
+    if (!buf) return XNoMemory;
+    bool latin1 = style == XStringStyle;
+    int unconvertible = 0;
     size_t o = 0;
     for (int i = 0; i < count; i++) {
-        for (wchar_t *w = list[i]; *w; w++) {
+        for (const wchar_t *w = list[i]; w && *w; w++) {
             unsigned int c = (unsigned int)*w;
-            if (c < 0x80) buf[o++] = (unsigned char)c;
-            else if (c < 0x800) { buf[o++] = (unsigned char)(0xC0|(c>>6)); buf[o++] = (unsigned char)(0x80|(c&0x3F)); }
-            else { buf[o++] = (unsigned char)(0xE0|(c>>12)); buf[o++] = (unsigned char)(0x80|((c>>6)&0x3F)); buf[o++] = (unsigned char)(0x80|(c&0x3F)); }
+            if (latin1) {
+                if (c > 0xFF) { c = '?'; unconvertible++; }
+                buf[o++] = (unsigned char)c;
+            } else {
+                o += utf8_put(buf + o, c);
+            }
         }
-        buf[o++] = 0;
+        if (i + 1 < count) buf[o++] = 0;
     }
-    tp->value = buf; tp->encoding = XA_STRING; tp->format = 8; tp->nitems = o;
-    return Success;
+    tp->value = buf;
+    tp->encoding = latin1 ? XA_STRING
+                          : (d ? XInternAtom(d, "UTF8_STRING", False) : XA_STRING);
+    tp->format = 8;
+    tp->nitems = o;
+    return unconvertible;
 }
 
 int XwcTextPropertyToTextList(Display *d, const XTextProperty *tp,
                               wchar_t ***list, int *count)
 {
-    (void)d;
-    int n = 0;
+    if (!tp || !list || !count) return XConverterNotFound;
+    if (tp->format != 8 && tp->nitems) return XConverterNotFound;
+    bool utf8 = d && tp->encoding == XInternAtom(d, "UTF8_STRING", True);
+    /* NUL-separated, and the last string need not end in a NUL (WM_NAME as
+     * XStoreName writes it). */
+    int n = 1;
     for (unsigned long i = 0; i < tp->nitems; i++) if (tp->value[i] == 0) n++;
-    if (n == 0) n = 1;
-    wchar_t **v = calloc(n + 1, sizeof(wchar_t *));
-    int i = 0, start = 0;
-    for (unsigned long k = 0; k < tp->nitems; k++) {
-        if (tp->value[k] == 0) {
-            int len = (int)k - start;
-            wchar_t *w = calloc(len + 1, sizeof(wchar_t));
-            for (int j = 0; j < len; j++) w[j] = (wchar_t)tp->value[start + j];
-            v[i++] = w;
-            start = (int)k + 1;
-        }
+    wchar_t **v = calloc((size_t)n + 1, sizeof(wchar_t *));
+    if (!v) return XNoMemory;
+    int i = 0;
+    unsigned long start = 0;
+    for (unsigned long k = 0; k <= tp->nitems; k++) {
+        if (k < tp->nitems && tp->value[k] != 0) continue;
+        if (k == tp->nitems && start == k && k != 0) break;   /* ended in NUL */
+        const char *p = (const char *)tp->value + start;
+        const char *end = (const char *)tp->value + k;
+        wchar_t *w = calloc((size_t)(k - start) + 1, sizeof(wchar_t));
+        if (!w) { XwcFreeStringList(v); return XNoMemory; }
+        int j = 0;
+        while (p < end)
+            w[j++] = utf8 ? (wchar_t)utf8_next(&p, end)
+                          : (wchar_t)(unsigned char)*p++;      /* Latin-1 */
+        v[i++] = w;
+        start = k + 1;
     }
     v[i] = NULL;
-    *list = v; *count = i;
+    *list = v;
+    *count = i;
     return Success;
 }
 

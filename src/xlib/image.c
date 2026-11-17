@@ -7,16 +7,35 @@
 
 /* ---------------------------------------------------------- XImage funcs */
 
+/* As the server lays images out: XY formats are one bit per pixel per
+ * plane, a depth-1 ZPixmap is one bit, deeper ones 8/16/32. */
 static int img_bpp(int depth, int format)
 {
-    if (format == XYBitmap || format == XYPixmap) return depth;
+    if (format == XYBitmap || format == XYPixmap || depth == 1) return 1;
     if (depth <= 8) return 8;
     if (depth <= 16) return 16;
     return 32;
 }
 
+/* An XYPixmap holds `depth` bit planes of bytes_per_line * height bytes each,
+ * most significant plane first. */
+static bool img_planar(const XImage *img)
+{
+    return img->format == XYPixmap && img->depth > 1;
+}
+
 static unsigned long img_get_pixel(XImage *img, int x, int y)
-{    long off = (long)y * img->bytes_per_line;
+{
+    long off = (long)y * img->bytes_per_line;
+    if (img_planar(img)) {
+        size_t plane = (size_t)img->bytes_per_line * img->height;
+        unsigned long v = 0;
+        for (int p = 0; p < img->depth; p++) {
+            unsigned char b = (unsigned char)img->data[plane * p + off + (x >> 3)];
+            v = (v << 1) | ((b >> (x & 7)) & 1);
+        }
+        return v;
+    }
     switch (img->bits_per_pixel) {
     case 32: return ((uint32_t *)(img->data + off))[x];
     case 16: return ((uint16_t *)(img->data + off))[x];
@@ -29,6 +48,15 @@ static unsigned long img_get_pixel(XImage *img, int x, int y)
 static int img_put_pixel(XImage *img, int x, int y, unsigned long v)
 {
     long off = (long)y * img->bytes_per_line;
+    if (img_planar(img)) {
+        size_t plane = (size_t)img->bytes_per_line * img->height;
+        for (int p = 0; p < img->depth; p++) {
+            char *b = &img->data[plane * p + off + (x >> 3)];
+            if ((v >> (img->depth - 1 - p)) & 1) *b |= (char)(1 << (x & 7));
+            else                                 *b &= (char)~(1 << (x & 7));
+        }
+        return 1;
+    }
     switch (img->bits_per_pixel) {
     case 32: ((uint32_t *)(img->data + off))[x] = (uint32_t)v; break;
     case 16: ((uint16_t *)(img->data + off))[x] = (uint16_t)v; break;
@@ -81,6 +109,7 @@ XImage *XCreateImage(Display *d, Visual *visual, unsigned int depth, int format,
                      unsigned int height, int bitmap_pad, int bytes_per_line)
 {
     XImage *img = calloc(1, sizeof *img);
+    if (!img) return NULL;
     img->width = (int)width;
     img->height = (int)height;
     img->xoffset = offset;
@@ -98,15 +127,29 @@ XImage *XCreateImage(Display *d, Visual *visual, unsigned int depth, int format,
     img->blue_mask = v ? v->blue_mask : 0x000000ff;
     if (bytes_per_line > 0) img->bytes_per_line = bytes_per_line;
     else {
-        int bits = (int)(width * img->bits_per_pixel);
+        long bits = (long)width * img->bits_per_pixel;
         int pad = img->bitmap_pad;
         if (pad <= 0) pad = 8;
-        img->bytes_per_line = ((bits + pad - 1) / pad) * (pad / 8);
+        img->bytes_per_line = (int)(((bits + pad - 1) / pad) * (pad / 8));
     }
-    if (data) img->data = data;
-    else img->data = calloc((size_t)img->bytes_per_line * (height ? height : 1), 1);
+    /* As in libX11, the pixels are the caller's: NULL stays NULL. */
+    img->data = data;
     img->obdata = NULL;
     set_funcs(img);
+    return img;
+}
+
+/* An image with its own zeroed pixels (XGetImage, XSubImage, MIT-SHM). */
+XImage *mw_create_image_alloc(Display *d, Visual *visual, unsigned int depth,
+                              int format, unsigned int width,
+                              unsigned int height, int bitmap_pad)
+{
+    XImage *img = XCreateImage(d, visual, depth, format, 0, NULL, width,
+                               height, bitmap_pad, 0);
+    if (!img) return NULL;
+    size_t planes = (format == XYPixmap && depth > 1) ? depth : 1;
+    img->data = calloc((size_t)img->bytes_per_line * (height ? height : 1) * planes, 1);
+    if (!img->data) { free(img); return NULL; }
     return img;
 }
 
@@ -126,8 +169,8 @@ static XImage *img_sub_image(XImage *img, int x, int y, unsigned int w,
      * XDestroyImage), and the part of the rectangle outside the source is
      * left zero. */
     if (!img) return NULL;
-    XImage *sub = XCreateImage(NULL, NULL, img->depth, img->format, 0, NULL,
-                               w, h, img->bitmap_pad, 0);
+    XImage *sub = mw_create_image_alloc(NULL, NULL, img->depth, img->format,
+                                        w, h, img->bitmap_pad);
     if (!sub || !sub->data) { if (sub) img_destroy(sub); return NULL; }
     sub->red_mask = img->red_mask;
     sub->green_mask = img->green_mask;
@@ -157,9 +200,10 @@ XImage *XGetImage(Display *d, Drawable dr, int x, int y,
     int dw, dh, depth;
     MwSurface *s = mw_drawable_surface(d, dr, &dw, &dh, &depth);
     if (!s) return NULL;
-    XImage *img = XCreateImage(d, &MWD(d)->visual, (unsigned int)depth,
-                               format == XYPixmap ? ZPixmap : format,
-                               0, NULL, width, height, 32, 0);
+    XImage *img = mw_create_image_alloc(d, &MWD(d)->visual, (unsigned int)depth,
+                                        format == XYPixmap ? ZPixmap : format,
+                                        width, height, 32);
+    if (!img) return NULL;
     uint32_t *tmp = calloc((size_t)width * height, 4);
     mw_surface_get(s, x, y, (int)width, (int)height, tmp, (int)width);
     for (unsigned int j = 0; j < height; j++)
@@ -174,6 +218,7 @@ XImage *XGetImage(Display *d, Drawable dr, int x, int y,
             unsigned long out;
             if (depth == 8)       out = (px >> 24) & 0xff;
             else if (depth >= 32) out = px;
+            else if (depth == 1)  out = px & 1u;          /* bitmaps: bit values */
             else                  out = px & 0xffffffu;
             img_put_pixel(img, (int)i, (int)j, out);
         }
@@ -226,7 +271,7 @@ int XPutImage(Display *d, Drawable dr, GC gc, XImage *img,
      * in the GC background.  Treating the 0/1 values as pixels made every
      * bitmap image (Motif/XPM depth-1 graphics, the help viewer's bitonal
      * TIFF art, window icons, ...) come out solid black. */
-    int onebit = (img->bits_per_pixel == 1);
+    int onebit = (img->format == XYBitmap || img->depth == 1);
     uint32_t fg = 0xff000000u | ((uint32_t)(gc ? gc->foreground : 0) & 0xffffff);
     uint32_t bg = 0xff000000u | ((uint32_t)(gc ? gc->background : 0) & 0xffffff);
     /* A depth-32 drawable keeps the image's alpha: cairo uploads premultiplied

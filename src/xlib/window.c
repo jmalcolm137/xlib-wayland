@@ -114,9 +114,12 @@ void mw_window_origin(MwWindow *win, int *x, int *y)
     *x = ax; *y = ay;
 }
 
+/* Mapped, and so is every ancestor below the root.  The root itself is
+ * always viewable (it is never mapped through mw_map_window). */
 bool mw_window_is_viewable(MwWindow *win)
 {
-    for (MwWindow *w = win; w; w = w->parent)
+    if (!win) return false;
+    for (MwWindow *w = win; w && w->parent; w = w->parent)
         if (!w->mapped) return false;
     return true;
 }
@@ -454,24 +457,39 @@ static MwWindow *open_menu_after(MwWindow *win)
     return NULL;
 }
 
+static void destroy_tree(Display *d, MwWindow *win, bool top);
+
 void mw_destroy_window(Display *d, MwWindow *win)
+{
+    destroy_tree(d, win, true);
+}
+
+/* `top` is the window XDestroyWindow named; the rest are its inferiors. */
+static void destroy_tree(Display *d, MwWindow *win, bool top)
 {
     if (!win) return;
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: destroy 0x%lx override=%d toplevel=%d\n",
                 win->id, win->override_redirect, win->tl != NULL);
     /* destroy children */
-    while (win->last_child) mw_destroy_window(d, win->last_child);
+    while (win->last_child) destroy_tree(d, win->last_child, false);
 
-    /* As in X, a mapped window is unmapped before it is destroyed. */
-    if (win->mapped) mw_unmap_window(d, win);
+    /* As in X, the window named is unmapped first (UnmapNotify, exposing
+     * what it covered); its inferiors go with it and only get DestroyNotify.
+     * Unmapping each of them as well sent UnmapNotify per descendant and
+     * exposed siblings that were about to be destroyed too. */
+    if (win->mapped) {
+        if (top) mw_unmap_window(d, win);
+        else { win->mapped = false; win->map_state = IsUnmapped; }
+    }
 
     /* Popups (menus, tooltips) anchored to this window are root children, so
      * they survive it -- but their xdg_popup's parent is going away and they
      * would keep a pointer to freed memory.  Dismiss them the way the
      * compositor's popup_done does; mapping one again builds a new popup on
-     * a live anchor. */
-    {
+     * a live anchor.  Only a window with a Wayland surface can be an anchor,
+     * so the object table is not scanned for every child widget. */
+    if (win->tl) {
         XDisplayImpl *dp = MWD(d);
         for (size_t i = 0; i < dp->table_cap; i++) {
             if (!dp->table[i].id || dp->table[i].kind != MW_OBJ_WINDOW)
@@ -1265,7 +1283,8 @@ Status XGetWindowAttributes(Display *d, Window w, XWindowAttributes *attr)
     attr->save_under = win->save_under;
     attr->colormap = win->colormap;
     attr->map_installed = True;
-    attr->map_state = !win->mapped ? IsUnmapped
+    attr->map_state = !win->parent ? IsViewable          /* the root */
+                    : !win->mapped ? IsUnmapped
                     : mw_window_is_viewable(win) ? IsViewable : IsUnviewable;
     attr->all_event_masks = win->all_event_masks;
     attr->your_event_mask = win->event_mask;

@@ -149,7 +149,6 @@ char *mw_clipboard_from_utf8(const unsigned char *in, size_t inlen, size_t *outl
 }
 
 static void sync_x_owner(Display *d);
-static void clip_update_wake(Display *d);
 static void sync_x_owner_primary(Display *d);
 
 /* Non-text MIME types we advertise on behalf of an X selection owner, so a
@@ -554,7 +553,12 @@ static void source_finished(void *data, struct wl_data_source *src)
 {
     Display *d = data;
     MwWlSource *s = source_by_proxy(d, src);
-    if (s && s->selection == mw_xdnd_selection(d)) mw_xdnd_source_done(d);
+    if (s && s->selection == mw_xdnd_selection(d)) {
+        mw_xdnd_source_done(d);
+        /* The drag is over (no cancelled follows a finished drag): the
+         * source is done with, and leaked otherwise -- one per drag. */
+        source_free(d, s);
+    }
 }
 static void source_action(void *data, struct wl_data_source *src, uint32_t a)
 { (void)data; (void)src; (void)a; }
@@ -597,6 +601,13 @@ struct wl_data_source *mw_clipboard_make_source(Display *d, Atom selection)
     s->next = dp->wl_sources;
     dp->wl_sources = s;
     return src;
+}
+
+void mw_clipboard_free_source(Display *d, struct wl_data_source *src)
+{
+    MwWlSource *s = source_by_proxy(d, src);
+    if (s) source_free(d, s);
+    else if (src) wl_data_source_destroy(src);
 }
 
 /* ----------------------------------------------------------- data device */
@@ -833,7 +844,7 @@ static void dd_drop(void *data, struct wl_data_device *dd)
         f->requestor = None;
         f->time = CurrentTime;
         f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
-        clip_update_wake(d);
+        mw_io_update_wake(d);
         return;
     }
 
@@ -869,7 +880,7 @@ static void dd_drop(void *data, struct wl_data_device *dd)
     f->requestor = None;
     f->time = CurrentTime;
     f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
-    clip_update_wake(d);
+    mw_io_update_wake(d);
 }
 
 static const struct wl_data_device_listener device_listener = {
@@ -1001,15 +1012,47 @@ static void fetch_finish(Display *d)
 }
 
 /* Tell the wakeup thread what to watch for: the fetch's pipe, and the
- * earliest transfer deadline. */
-static void clip_update_wake(Display *d)
+ * earliest clipboard or broker deadline. */
+void mw_io_update_wake(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
     uint64_t t = 0;
     if (dp->clip_fetch.active) t = dp->clip_fetch.deadline_ms;
     if (dp->clip_serve.active && (!t || dp->clip_serve.deadline_ms < t))
         t = dp->clip_serve.deadline_ms;
-    mw_wakeup_watch(dp, mw_clipboard_poll_fd(d), t);
+    uint64_t bt = mw_broker_deadline(d);
+    if (bt && (!t || bt < t)) t = bt;
+    int out = (dp->clip_serve.active && dp->clip_serve.pend) ? dp->clip_serve.fd : -1;
+    mw_wakeup_watch(dp, mw_clipboard_poll_fd(d), out, t);
+}
+
+static void serve_end(XDisplayImpl *dp)
+{
+    MwClipServe *sv = &dp->clip_serve;
+    if (sv->fd >= 0) close(sv->fd);
+    sv->fd = -1;
+    free(sv->pend);
+    sv->pend = NULL;
+    sv->pend_len = sv->pend_off = 0;
+    sv->active = false;
+}
+
+/* Write what the peer's pipe will take now; the rest waits for the next
+ * pump (the wakeup thread watches the fd for POLLOUT). */
+static void serve_flush(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    MwClipServe *sv = &dp->clip_serve;
+    if (!sv->active || !sv->pend) return;
+    while (sv->pend_off < sv->pend_len) {
+        ssize_t n = mw_write_some(sv->fd, sv->pend + sv->pend_off,
+                                  sv->pend_len - sv->pend_off);
+        if (n < 0) { serve_end(dp); return; }        /* the peer went away */
+        if (n == 0) return;                           /* not ready: later */
+        sv->pend_off += (size_t)n;
+        sv->deadline_ms = now_ms() + CLIP_SERVE_TIMEOUT_MS;   /* progressing */
+    }
+    serve_end(dp);
 }
 
 void mw_clipboard_handle_ready(Display *d)
@@ -1032,7 +1075,7 @@ void mw_clipboard_handle_ready(Display *d)
             if (n == 0) { fetch_finish(d); break; }              /* EOF */
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                if (now_ms() > f->deadline_ms) fetch_finish(d);
+                if (now_ms() >= f->deadline_ms) fetch_finish(d);
                 break;
             }
             fetch_finish(d);                                      /* error */
@@ -1040,12 +1083,11 @@ void mw_clipboard_handle_ready(Display *d)
         }
     }
 
-    /* A stale serve (the X owner never answered) must not leak the pipe. */
-    if (dp->clip_serve.active && now_ms() > dp->clip_serve.deadline_ms) {
-        if (dp->clip_serve.fd >= 0) close(dp->clip_serve.fd);
-        dp->clip_serve.fd = -1;
-        dp->clip_serve.active = false;
-    }    clip_update_wake(d);
+    /* Keep writing a serve's queued bytes; a stale serve (the X owner never
+     * answered, or the peer stopped reading) must not leak the pipe. */
+    serve_flush(d);
+    if (dp->clip_serve.active && now_ms() >= dp->clip_serve.deadline_ms)
+        serve_end(dp);    mw_io_update_wake(d);
 }
 
 /* ----------------------------------------------------- Wayland -> X serve */
@@ -1083,7 +1125,7 @@ bool mw_clipboard_fetch_from_offer(Display *d, struct wl_data_offer *offer,
     f->requestor = requestor;
     f->time = time;
     f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
-    clip_update_wake(d);
+    mw_io_update_wake(d);
     return true;
 }
 
@@ -1137,7 +1179,7 @@ static bool prim_xconvert(Display *d, Atom target, Atom property,
     f->requestor = requestor;
     f->time = time;
     f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
-    clip_update_wake(d);
+    mw_io_update_wake(d);
     return true;
 }
 
@@ -1197,7 +1239,7 @@ bool mw_clipboard_xconvert(Display *d, Atom selection, Atom target,
     f->requestor = requestor;
     f->time = time;
     f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
-    clip_update_wake(d);
+    mw_io_update_wake(d);
     return true;
 }
 
@@ -1239,22 +1281,33 @@ bool mw_clipboard_serve_notify(Display *d, XSelectionEvent *se)
             }
         } else {
             blen = n * (format == 16 ? 2 : 1);
+            bytes = malloc(blen + 1);
+            if (bytes) memcpy(bytes, data, blen);
+            else blen = 0;
         }
-        const unsigned char *out = bytes ? bytes : data;
         if (sv->to_utf8 && format == 8 && blen) {
             size_t olen = 0;
-            char *enc = mw_clipboard_to_utf8(out, blen, &olen);
-            if (enc) mw_write_all(sv->fd, enc, olen, CLIP_SERVE_TIMEOUT_MS);
-            free(enc);
-        } else if (blen) {
-            mw_write_all(sv->fd, out, blen, CLIP_SERVE_TIMEOUT_MS);
+            char *enc = mw_clipboard_to_utf8(bytes, blen, &olen);
+            free(bytes);
+            bytes = (unsigned char *)enc;
+            blen = enc ? olen : 0;
         }
-        free(bytes);
+        if (bytes && blen) {
+            sv->pend = bytes;
+            sv->pend_len = blen;
+            sv->pend_off = 0;
+            sv->deadline_ms = now_ms() + CLIP_SERVE_TIMEOUT_MS;
+        } else {
+            free(bytes);
+        }
     }
     if (data) XFree(data);
-    if (sv->fd >= 0) close(sv->fd);
-    sv->fd = -1;
-    sv->active = false;
+    if (sv->pend) {
+        serve_flush(d);            /* as much as fits now, the rest later */
+        mw_io_update_wake(d);
+    } else {
+        serve_end(dp);
+    }
     return true;
 }
 

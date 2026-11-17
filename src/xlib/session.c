@@ -14,6 +14,7 @@
  */
 #define _GNU_SOURCE
 #include "internal.h"
+#include <poll.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -39,15 +40,19 @@ void mw_session_init(Display *d)
     dp->session_path[0] = 0;
     if (!session_enabled(d)) return;
 
-    const char *rt = getenv("XDG_RUNTIME_DIR");
-    if (!rt || !*rt) rt = "/tmp";
-    char dir[160];
-    snprintf(dir, sizeof dir, "%s/xlib-wayland", rt);
+    char base[200], dir[230];
+    if (!mw_runtime_dir(base, sizeof base)) return;       /* no safe dir */
+    snprintf(dir, sizeof dir, "%s/session", base);
     mkdir(dir, 0700);
-    snprintf(dir, sizeof dir, "%s/xlib-wayland/session", rt);
-    mkdir(dir, 0700);
-    snprintf(dp->session_path, sizeof dp->session_path, "%s/%ld", dir,
-             (long)getpid());
+    /* The socket path has to fit sockaddr_un (bind would use a truncated
+     * path that unlink then misses). */
+    struct sockaddr_un probe;
+    int w = snprintf(dp->session_path, sizeof dp->session_path, "%s/%ld", dir,
+                     (long)getpid());
+    if (w < 0 || (size_t)w >= sizeof probe.sun_path) {
+        dp->session_path[0] = 0;
+        return;
+    }
     unlink(dp->session_path);
 
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
@@ -134,8 +139,14 @@ void mw_session_handle_ready(Display *d)
     if (dp->session_fd < 0) return;
     int fd = accept4(dp->session_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
     if (fd < 0) return;
+    /* The connection is accepted as soon as it is made, possibly before
+     * mw-session has written its command: wait briefly for it rather than
+     * drop it. */
     char buf[64];
-    ssize_t n = read(fd, buf, sizeof buf - 1);
+    ssize_t n = -1;
+    struct pollfd pfd = { .fd = fd, .events = POLLIN };
+    if (poll(&pfd, 1, 200) == 1)
+        do n = read(fd, buf, sizeof buf - 1); while (n < 0 && errno == EINTR);
     close(fd);
     if (n <= 0) return;
     buf[n] = 0;

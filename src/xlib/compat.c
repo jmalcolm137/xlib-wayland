@@ -133,15 +133,18 @@ Status XTextPropertyToStringList(XTextProperty *tp, char ***list_rtrn,
     *count_rtrn = 0;
     if (!tp || tp->format != 8 || tp->encoding != XA_STRING || !tp->value)
         return 0;
-    int count = 0;
+    /* NUL-separated; the last string need not end in a NUL (libX11 counts
+     * NULs + 1, so "foo" from XStoreName is one string, not none). */
+    int count = 1;
     for (unsigned long i = 0; i < tp->nitems; i++)
         if (tp->value[i] == 0) count++;
     char **v = calloc((size_t)count + 1, sizeof(char *));
     if (!v) return 0;
     int n = 0;
     unsigned long start = 0;
-    for (unsigned long i = 0; i < tp->nitems; i++) {
-        if (tp->value[i] != 0) continue;
+    for (unsigned long i = 0; i <= tp->nitems; i++) {
+        if (i < tp->nitems && tp->value[i] != 0) continue;
+        if (i == tp->nitems && start == i && i != 0) break;   /* ended in NUL */
         size_t len = i - start;
         v[n] = malloc(len + 1);
         if (!v[n]) { XFreeStringList(v); return 0; }

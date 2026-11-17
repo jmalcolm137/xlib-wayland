@@ -134,11 +134,16 @@ void XSetStandardColormap(Display *d, Window w, XStandardColormap *cmap, Atom pr
 Status XGetStandardColormap(Display *d, Window w, XStandardColormap *cmap, Atom property)
 {
     Atom at; int af; unsigned long ni, ba; unsigned char *data = NULL;
-    if (XGetWindowProperty(d, w, property, 0, (long)(sizeof(XStandardColormap)/4),
+    const unsigned long full = sizeof(XStandardColormap) / sizeof(long);
+    if (XGetWindowProperty(d, w, property, 0, (long)full,
                            False, XA_RGB_COLOR_MAP, &at, &af, &ni, &ba, &data)
         != Success || !data)
         return 0;
-    memcpy(cmap, data, sizeof(XStandardColormap));
+    /* ICCCM allows the older 8- and 9-element forms (no visualid/killid):
+     * copy what is there and zero the rest, rather than read past it. */
+    if (af != 32 || ni < 8) { free(data); return 0; }
+    memset(cmap, 0, sizeof *cmap);
+    memcpy(cmap, data, (ni < full ? ni : full) * sizeof(long));
     free(data);
     return 1;
 }

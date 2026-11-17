@@ -83,6 +83,8 @@ static void origin_rel(MwWindow *w, int *ox, int *oy)
     *ox = x; *oy = y;
 }
 
+#define MW_NO_XI2 1
+
 static void pt_event(Display *d, MwWindow *w, XEvent *ev, int type,
                      int rx, int ry, unsigned int state, int detail,
                      int mode, int kind)
@@ -143,7 +145,9 @@ static void pt_event(Display *d, MwWindow *w, XEvent *ev, int type,
         case LeaveNotify:   xi = 8; cross = 1; break;
         default: break;
         }
-        if (xi) {
+        /* kind == MW_NO_XI2: the caller mirrors XI2 itself (or not at
+         * all, for a virtual crossing). */
+        if (xi && kind != MW_NO_XI2) {
             if (cross)
                 mw_xi2_crossing(d, w->id, xi, mode, detail, 2, 2, 0,
                                 ev->xbutton.x, ev->xbutton.y, ev->xbutton.time);
@@ -152,7 +156,7 @@ static void pt_event(Display *d, MwWindow *w, XEvent *ev, int type,
                              ev->xbutton.x, ev->xbutton.y, ev->xbutton.time);
         }
     }
-    (void)mode; (void)kind;
+    (void)mode;
 }
 
 static MwToplevel *win_toplevel(MwWindow *w);
@@ -300,7 +304,13 @@ static void deliver_key(Display *d, KeyCode kc, int type)
     ke.subwindow = None;
     ke.time = mw_now();
     ke.x = dp->ptr_x; ke.y = dp->ptr_y;
-    ke.x_root = dp->ptr_x; ke.y_root = dp->ptr_y;
+    /* Root coordinates add the origin of the toplevel under the pointer
+     * (ptr_x/y are relative to it), as XQueryPointer does. */
+    {
+        int tx = 0, ty = 0;
+        if (dp->ptr_toplevel) mw_window_origin(dp->ptr_toplevel, &tx, &ty);
+        ke.x_root = dp->ptr_x + tx; ke.y_root = dp->ptr_y + ty;
+    }
     ke.same_screen = True;
     ke.keycode = kc;
     ke.state = current_mods(d);
@@ -632,8 +642,11 @@ static void cross_one(Display *d, MwWindow *w, int type, int mode, int detail,
         fprintf(stderr, "MW: crossing %s -> 0x%lx at %d,%d mode=%d detail=%d\n",
                 type == EnterNotify ? "Enter" : "Leave", w->id, rx, ry, mode, detail);
     XEvent ev;
+    /* XI2 sees one Enter/Leave for the window itself, not the virtual ones
+     * for the windows in between. */
+    bool virt = detail == NotifyVirtual || detail == NotifyNonlinearVirtual;
     pt_event(d, w, &ev, type, rx, ry, current_mods(d) | MWD(d)->ptr_state,
-             detail, mode, 0);
+             detail, mode, virt ? MW_NO_XI2 : 0);
     ev.xcrossing.mode = mode;
     ev.xcrossing.detail = detail;
     ev.xcrossing.subwindow = subwindow;
@@ -928,25 +941,24 @@ static MwWindow *pointer_deliver(Display *d, MwWindow *deep, int type,
     } else if (deep) {
         t = mw_propagate(deep, mask, state, &sub);
     }
-    if (!t) {
-        /* No core selection -- but XI2 selections are independent, and
-         * pt_event mirrors the event for those. */
-        MwWindow *xi = dp->ptr_grab_active ? dp->ptr_grab_window
-                     : dp->implicit_grab ? dp->implicit_grab : deep;
-        if (xi) {
-            int ex = rx, ey = ry;
-            if (!deep || !same_toplevel(xi, deep)) ptr_in_win_space(d, xi, &ex, &ey);
-            XEvent ev;
-            pt_event(d, xi, &ev, type, ex, ey, state, detail, NotifyNormal, 0);
-        }
-        return NULL;
+    /* XI2 is mirrored from where the event happened (the grab window under
+     * a grab, else the window under the pointer) -- its selections and
+     * propagation are its own, independent of the core delivery below. */
+    MwWindow *xi = dp->ptr_grab_active ? dp->ptr_grab_window
+                 : dp->implicit_grab ? dp->implicit_grab : deep;
+    if (xi) {
+        int xx = rx, xy = ry;
+        if (!deep || !same_toplevel(xi, deep)) ptr_in_win_space(d, xi, &xx, &xy);
+        XEvent xev;
+        pt_event(d, xi, &xev, type, xx, xy, state, detail, NotifyNormal, 0);
     }
+    if (!t) return NULL;
     /* (rx,ry) is in the pointer's toplevel; a grab window elsewhere (a menu
      * bar while the pointer is over its popup) gets its own coordinates. */
     int ex = rx, ey = ry;
     if (!deep || !same_toplevel(t, deep)) ptr_in_win_space(d, t, &ex, &ey);
     XEvent ev;
-    pt_event(d, t, &ev, type, ex, ey, state, detail, NotifyNormal, 0);
+    pt_event(d, t, &ev, type, ex, ey, state, detail, NotifyNormal, MW_NO_XI2);
     ev.xbutton.subwindow = sub;
     ev.xany.window = t->id;
     mw_put_event(d, &ev);

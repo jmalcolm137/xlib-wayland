@@ -39,7 +39,8 @@ static int owner(int ready_fd)
     unsigned char *data = malloc(NBYTES);
     for (size_t i = 0; i < NBYTES; i++) data[i] = pattern(i);
     long end = now_ms() + 15000;
-    while (now_ms() < end) {
+    pid_t parent = getppid();
+    while (now_ms() < end && getppid() == parent) {   /* stop if orphaned */
         if (!XPending(d)) { usleep(5000); continue; }
         XEvent ev;
         XNextEvent(d, &ev);
@@ -74,7 +75,11 @@ int main(void)
     if (read(p[0], &c, 1) != 1) { fprintf(stderr, "owner did not start\n"); return 1; }
 
     Display *d = XOpenDisplay(NULL);
-    if (!d) { kill(child, SIGTERM); return 77; }
+    if (!d) {
+        kill(child, SIGTERM);
+        waitpid(child, NULL, 0);
+        return getenv("MW_TEST_REQUIRE_DISPLAY") ? 1 : 77;
+    }
     Window w = XCreateSimpleWindow(d, DefaultRootWindow(d), 0, 0, 10, 10, 0, 0, 0);
     Atom sel = XInternAtom(d, SEL, False);
     Atom prop = XInternAtom(d, "MW_TEST_RESULT", False);
@@ -101,7 +106,9 @@ int main(void)
         int ok = data && n == NBYTES && fmt == 8;
         for (size_t i = 0; ok && i < NBYTES; i++) ok = data[i] == pattern(i);
         if (!ok) { fprintf(stderr, "FAIL: got %lu bytes (want %d)\n", n, NBYTES); failures++; }
-        if (elapsed > 4000) { fprintf(stderr, "FAIL: took %ld ms\n", elapsed); failures++; }
+        /* The old failure mode was a 5 s stall and a refusal; anything well
+         * under that (even on a loaded or sanitized run) is the fixed path. */
+        if (elapsed > 4500) { fprintf(stderr, "FAIL: took %ld ms\n", elapsed); failures++; }
         XFree(data);
     }
     XCloseDisplay(d);

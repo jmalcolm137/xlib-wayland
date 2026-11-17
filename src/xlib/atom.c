@@ -365,10 +365,15 @@ int XChangeProperty(Display *d, Window w, Atom property, Atom type, int format,
     /* If this is the broker's proxy requestor window, remember what the
      * selection converter wrote; the broker forwards it to the remote client
      * (packed is still live here). */
-    mw_broker_capture_prop(d, w, property, type, format, data, (unsigned long)nelements);
+    /* With Append/Prepend the value is the merged property, not the piece
+     * just added (the other processes would otherwise see only that). */
+    MwProp *now = mw_get_prop(d, win, property);
+    const unsigned char *val = now ? now->data : data;
+    unsigned long nval = now ? now->nitems : (unsigned long)nelements;
+    mw_broker_capture_prop(d, w, property, type, format, val, nval);
     /* Republish session-manager properties so other shim processes can read
      * them (they have their own X servers). */
-    mw_smprop_publish(d, property, type, format, data, (unsigned long)nelements);
+    mw_smprop_publish(d, property, type, format, val, nval);
     /* A Motif drag initiator writes _MOTIF_DRAG_INITIATOR_INFO (with the icc
      * handle as the property name) when a drag starts; that is how the bridge
      * learns a local drag is in progress. */
@@ -396,8 +401,14 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
         property == mw_intern_atom(d, "_DT_WORKSPACE_CURRENT", False))
         mw_refresh_workspace_props(d, win);
     /* A shared session-manager property we do not hold locally (dtstyle reading
-     * the manager dtsession published) is served from the shared store. */
-    if (!mw_get_prop(d, win, property)) {
+     * the manager dtsession published) is served from the shared store -- on
+     * the root and on the stand-in for the manager's window only, and through
+     * the same offset/length/type logic as a local property (below). */
+    MwProp shared;
+    MwProp *p = mw_get_prop(d, win, property);
+    bool from_store = false;
+    if (!p && (!win->parent || (MWD(d)->sm_window != None &&
+                                win->id == MWD(d)->sm_window))) {
         Atom st = None; int sf = 0; unsigned long sn = 0; unsigned char *sd = NULL;
         if (mw_smprop_lookup(d, property, &st, &sf, &sn, &sd)) {
             if (property == mw_intern_atom(d, "_DT_SM_WINDOW_INFO", False) &&
@@ -406,38 +417,25 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
                 uint32_t v = (uint32_t)mw_smprop_proxy_window(d);
                 memcpy(sd + 4, &v, 4);          /* element 1 == smWindow */
             }
-            unsigned char *out = NULL;
-            if (sn > 0 && prop_return) {
-                if (sf == 32) {
-                    long *lout = malloc((size_t)sn * sizeof(long));
-                    for (unsigned long i = 0; i < sn; i++) {
-                        uint32_t v; memcpy(&v, sd + i * 4, 4);
-                        lout[i] = (long)v;
-                    }
-                    out = (unsigned char *)lout;
-                } else {
-                    size_t unit = sf == 16 ? 2 : 1;
-                    out = calloc(1, sn * unit + unit);
-                    if (out) memcpy(out, sd, sn * unit);
-                }
-            }
-            if (actual_type_return) *actual_type_return = st;
-            if (actual_format_return) *actual_format_return = sf;
-            if (nitems_return) *nitems_return = sn;
-            if (bytes_after_return) *bytes_after_return = 0;
-            if (prop_return) *prop_return = out;
-            free(sd);
-            return Success;
+            memset(&shared, 0, sizeof shared);
+            shared.atom = property;
+            shared.type = st;
+            shared.format = sf;
+            shared.nitems = sn;
+            shared.nbytes = sn * (size_t)(sf / 8);
+            shared.data = sd;
+            p = &shared;
+            from_store = true;
         }
     }
-    MwProp *p = mw_get_prop(d, win, property);
+    int rc;
     if (!p) {
         if (actual_type_return) *actual_type_return = None;
         if (actual_format_return) *actual_format_return = 0;
         if (nitems_return) *nitems_return = 0;
         if (bytes_after_return) *bytes_after_return = 0;
         if (prop_return) *prop_return = NULL;
-        return Success;
+        rc = Success; goto done;
     }
     if (req_type != AnyPropertyType && req_type != p->type) {
         if (actual_type_return) *actual_type_return = p->type;
@@ -445,11 +443,21 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
         if (nitems_return) *nitems_return = 0;
         if (bytes_after_return) *bytes_after_return = (unsigned long)p->nbytes;
         if (prop_return) *prop_return = NULL;
-        return Success;
+        rc = Success; goto done;
     }
     size_t unit = p->format == 8 ? 1 : p->format == 16 ? 2 : 4;
     /* long_offset and long_length are in 32-bit units per the X protocol. */
     long off_bytes = long_offset * 4;
+    /* An offset past the end is BadValue (and nothing is deleted); exactly
+     * at the end is a legal empty read. */
+    if (long_offset < 0 || off_bytes > (long)p->nbytes) {
+        if (actual_type_return) *actual_type_return = None;
+        if (actual_format_return) *actual_format_return = 0;
+        if (nitems_return) *nitems_return = 0;
+        if (bytes_after_return) *bytes_after_return = 0;
+        if (prop_return) *prop_return = NULL;
+        rc = BadValue; goto done;
+    }
     unsigned long start = off_bytes >= (long)p->nbytes ? p->nitems
                                                        : (unsigned long)(off_bytes / unit);
     unsigned long avail = p->nitems > start ? p->nitems - start : 0;
@@ -465,6 +473,7 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
             /* Format-32 data is handed back as a long array, one long per
              * 32-bit value, mirroring libX11 on a 64-bit server. */
             long *lout = malloc((size_t)nret * sizeof(long));
+            if (!lout) { rc = BadAlloc; goto done; }
             for (unsigned long i = 0; i < nret; i++) {
                 uint32_t v;
                 memcpy(&v, p->data + (start + i) * 4, 4);
@@ -479,6 +488,7 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
              * as a C string (Motif's _XmVirtKeysInitialize) cannot read past
              * the buffer. */
             out = calloc(1, nret * unit + unit);
+            if (!out) { rc = BadAlloc; goto done; }
             memcpy(out, p->data + start * unit, nret * unit);
         }
     }
@@ -489,9 +499,13 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
     if (prop_return) *prop_return = out;
     /* The protocol deletes only once everything has been read, and reports
      * it (ICCCM INCR transfers wait for that PropertyDelete). */
-    if (delete && nret == avail && mw_del_prop(d, win, property))
+    /* (a value served from the shared store is not ours to delete) */
+    if (delete && !from_store && nret == avail && mw_del_prop(d, win, property))
         prop_notify(d, win, property, PropertyDelete);
-    return Success;
+    rc = Success;
+done:
+    if (from_store) free(shared.data);
+    return rc;
 }
 
 int XDeleteProperty(Display *d, Window w, Atom property)

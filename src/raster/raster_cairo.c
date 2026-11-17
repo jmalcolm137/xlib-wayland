@@ -483,6 +483,43 @@ void mw_fill_pattern(MwCanvas *c, MwSurface *pat, int x_origin, int y_origin,
 {
     if (!c || !pat) return;
     int pw = pat->w, ph = pat->h, psc = pat->scale;
+    if (canvas_uses_rop(c) && pw > 0 && ph > 0) {
+        /* A raster op applies to stippled and tiled fills too (Motif draws
+         * stippled GXxor highlights): per covered pixel, the pattern gives
+         * the source -- the tile's pixel, or fg/bg by the stipple bit, with
+         * a FillStippled hole leaving the pixel alone. */
+        MwSurface *s = c->surface;
+        int x0, y0, x1, y1;
+        cairo_surface_t *m = path_coverage(c, false, &x0, &y0, &x1, &y1);
+        if (!m) return;
+        cairo_surface_flush(pat->cs);
+        const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(pat->cs);
+        int ss = cairo_image_surface_get_stride(pat->cs) / 4;
+        cairo_surface_flush(s->cs);
+        uint32_t *px = (uint32_t *)cairo_image_surface_get_data(s->cs);
+        int stride = cairo_image_surface_get_stride(s->cs) / 4;
+        const unsigned char *md = cairo_image_surface_get_data(m);
+        int ms = cairo_image_surface_get_stride(m);
+        int sc = s->scale;
+        for (int y = y0; y < y1; y++) {
+            int py = ((y / sc - y_origin) % ph + ph) % ph;
+            for (int x = x0; x < x1; x++) {
+                if (md[(size_t)(y - y0) * ms + (x - x0)] < 0x80) continue;
+                int qx = ((x / sc - x_origin) % pw + pw) % pw;
+                uint32_t v = sp[(size_t)(py * psc) * ss + (size_t)(qx * psc)];
+                uint32_t src;
+                if (fill_style == FillTiled) src = v;
+                else if (v & 1u)             src = fg;
+                else if (fill_style == FillOpaqueStippled) src = bg;
+                else continue;
+                uint32_t *p = &px[(size_t)y * stride + x];
+                *p = rop_apply_px(c, src & 0xffffff, *p);
+            }
+        }
+        cairo_surface_mark_dirty(s->cs);
+        cairo_surface_destroy(m);
+        return;
+    }
     cairo_surface_t *tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);
     uint32_t *td = (uint32_t *)cairo_image_surface_get_data(tmp);
     int ts = cairo_image_surface_get_stride(tmp) / 4;
@@ -774,6 +811,7 @@ struct MwFont {
     cairo_font_face_t  *face;
     cairo_scaled_font_t *scaled;
     FT_Face             ft;      /* owned by cairo (it resizes this face) */
+    bool                ft_owned_by_cairo; /* freed with `face` (user data) */
     FT_Face             ft_m;    /* private face for stable metrics */
     int                 pixel_size;
     int                 ascent, descent, max_width;
@@ -867,6 +905,14 @@ static MwFont *font_from_match(FcPattern *match, int px_hint, int antialias)
     if (f->ft) {
         FT_Set_Pixel_Sizes(f->ft, 0, f->pixel_size);
         f->face = cairo_ft_font_face_create_for_ft_face(f->ft, 0);
+        /* cairo can keep the font face (and use the FT_Face) after we drop
+         * our reference -- its font caches hold faces past the destroy -- so,
+         * as cairo documents, the FT_Face is freed when the face itself is,
+         * not by mw_font_destroy. */
+        static const cairo_user_data_key_t ft_key;
+        if (f->face && cairo_font_face_set_user_data(f->face, &ft_key, f->ft,
+                (cairo_destroy_func_t)FT_Done_Face) == CAIRO_STATUS_SUCCESS)
+            f->ft_owned_by_cairo = true;
     } else {
         f->face = cairo_toy_font_face_create("sans", CAIRO_FONT_SLANT_NORMAL,
                                              CAIRO_FONT_WEIGHT_NORMAL);
@@ -965,7 +1011,7 @@ void mw_font_destroy(MwFont *f)
     if (f->scaled) cairo_scaled_font_destroy(f->scaled);
     if (f->face)   cairo_font_face_destroy(f->face);
     if (f->ft_m && f->ft_m != f->ft) FT_Done_Face(f->ft_m);
-    if (f->ft)     FT_Done_Face(f->ft);
+    if (f->ft && !f->ft_owned_by_cairo) FT_Done_Face(f->ft);
     free(f);
 }
 

@@ -18,6 +18,7 @@ extern Cursor mw_cursor_load_named(Display *, const char *);
 extern Cursor mw_cursor_load_shape(Display *, unsigned int);
 extern Cursor mw_cursor_from_image(Display *, int, int, int, int, const uint32_t *);
 extern char  *mw_cursor_theme_get(Display *);
+extern const char *mw_cursor_theme_peek(Display *);
 extern int    mw_cursor_size_get(Display *);
 extern void   mw_cursor_theme_set(Display *, const char *);
 extern void   mw_cursor_size_set(Display *, int);
@@ -110,10 +111,9 @@ XcursorBool XcursorSetTheme(Display *dpy, const char *theme)
     return XcursorTrue;
 }
 
+/* As in libXcursor, the string belongs to the library (callers never free
+ * it -- a fresh copy per call leaked), and NULL means no theme is set. */
 char *XcursorGetTheme(Display *dpy)
 {
-    char *t = mw_cursor_theme_get(dpy);
-    if (t) return t;
-    t = strdup("");
-    return t;
+    return (char *)mw_cursor_theme_peek(dpy);
 }

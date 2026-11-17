@@ -1,5 +1,6 @@
 /* event.c — XEvent queue, event retrieval, error delivery, synthetic events. */
 #include "internal.h"
+#include <X11/extensions/XShm.h>
 
 #include <X11/extensions/Xfixes.h>
 #include <X11/extensions/Xdamage.h>
@@ -95,6 +96,7 @@ static size_t mw_event_size(int type)
      * full so its owner/selection/timestamp fields survive. */
     case MW_XFIXES_EVENT_BASE:                 return sizeof(XFixesSelectionNotifyEvent);
     case MW_XDAMAGE_EVENT_BASE:                return sizeof(XDamageNotifyEvent);
+    case MW_XSHM_EVENT_BASE:                   return sizeof(XShmCompletionEvent);
     default:                                   return sizeof(XAnyEvent);
     }
 }
@@ -129,7 +131,16 @@ static XEvent *queue_at(XDisplayImpl *dp, int i)
  * QLength() (dp->qlen, read directly by the macro) in step. */
 static void queue_take(XDisplayImpl *dp, int i, XEvent *out)
 {
+    /* As in libX11, a cookie's data is the client's only once claimed with
+     * XGetEventData; data left unclaimed is freed when the next event is
+     * taken (otherwise every XI2 event a client ignored leaked). */
+    if (dp->cookie_unclaimed) {
+        free(dp->cookie_unclaimed);
+        dp->cookie_unclaimed = NULL;
+    }
     *out = *queue_at(dp, i);
+    if (out->type == GenericEvent && out->xcookie.data)
+        dp->cookie_unclaimed = out->xcookie.data;
     for (int j = i; j > 0; j--)
         *queue_at(dp, j) = *queue_at(dp, j - 1);
     dp->qhead = (dp->qhead + 1) % dp->qcap;
@@ -226,6 +237,12 @@ void mw_put_event(Display *d, XEvent *ev)
     dp->queue[(dp->qhead + dp->qcount) % dp->qcap] = tmp;
     dp->qcount++;
     dp->qlen = dp->qcount;
+}
+
+/* For the extension libraries (libXext's ShmCompletion): queue an event. */
+void mw_queue_event(Display *d, XEvent *ev)
+{
+    mw_put_event(d, ev);
 }
 
 Time mw_now(void)
@@ -461,15 +478,21 @@ static int take_first(Display *d, Window w, long mask, int type, XEvent *out)
  * generic events it receives. */
 Bool XGetEventData(Display *d, XGenericEventCookie *cookie)
 {
-    (void)d;
-    if (!cookie || cookie->type != GenericEvent) return False;
-    return cookie->data != NULL;
+    if (!cookie || cookie->type != GenericEvent || !cookie->data) return False;
+    /* Claimed: the client frees it with XFreeEventData.  Only the most
+     * recently taken event's data can be claimed, as in libX11. */
+    XDisplayImpl *dp = MWD(d);
+    if (dp->cookie_unclaimed != cookie->data) return False;
+    dp->cookie_unclaimed = NULL;
+    return True;
 }
 
 void XFreeEventData(Display *d, XGenericEventCookie *cookie)
 {
     (void)d;
-    if (!cookie) return;
+    /* Only a cookie carries data; for any other event that word is some
+     * other field. */
+    if (!cookie || cookie->type != GenericEvent) return;
     free(cookie->data);
     cookie->data = NULL;
 }

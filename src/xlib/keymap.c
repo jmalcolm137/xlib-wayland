@@ -83,7 +83,9 @@ KeySym XStringToKeysym(_Xconst char *s)
     if (s[0] == 'U' && s[1]) {
         char *end;
         unsigned long cp = strtoul(s + 1, &end, 16);
-        if (*end == 0 && cp <= 0x10ffff && isxdigit((unsigned char)s[1])) {
+        /* As in libX11, control characters have no Unicode keysym. */
+        if (*end == 0 && cp <= 0x10ffff && isxdigit((unsigned char)s[1]) &&
+            !(cp < 0x20 || (cp >= 0x7f && cp < 0xa0))) {
             if (cp >= 0x20 && cp <= 0x7e) return cp;
             if (cp >= 0xa0 && cp <= 0xff) return cp;
             return 0x01000000 | cp;

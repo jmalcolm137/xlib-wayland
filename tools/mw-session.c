@@ -22,10 +22,11 @@ int main(int argc, char **argv)
         return 2;
     }
     const char *cmd = argv[1];
+    /* The same directory the shim uses (see mw_runtime_dir). */
     const char *rt = getenv("XDG_RUNTIME_DIR");
-    if (!rt || !*rt) rt = "/tmp";
     char dir[256];
-    snprintf(dir, sizeof dir, "%s/xlib-wayland/session", rt);
+    if (rt && *rt) snprintf(dir, sizeof dir, "%s/xlib-wayland/session", rt);
+    else snprintf(dir, sizeof dir, "/tmp/xlib-wayland-%u/session", (unsigned)getuid());
 
     DIR *dd = opendir(dir);
     if (!dd) {
@@ -45,8 +46,12 @@ int main(int argc, char **argv)
         int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (fd < 0) continue;
         if (connect(fd, (struct sockaddr *)&sa, sizeof sa) == 0) {
-            ssize_t n = write(fd, cmd, strlen(cmd));
-            if (n == (ssize_t)strlen(cmd)) { write(fd, "\n", 1); sent++; }
+            /* MSG_NOSIGNAL: a shim that went away must not kill us before
+             * the rest have been told. */
+            size_t cl = strlen(cmd);
+            if (send(fd, cmd, cl, MSG_NOSIGNAL) == (ssize_t)cl &&
+                send(fd, "\n", 1, MSG_NOSIGNAL) == 1)
+                sent++;
         }
         close(fd);
     }
