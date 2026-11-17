@@ -1,5 +1,9 @@
 # Code review (November 2026)
 
+Three rounds: a first review of `src/` (16 Nov), the larger changes it
+left open (16 Nov), and a second review of those changes plus the files
+the first pass covered least (17 Nov).
+
 A full review of `src/` and `tools/headless-compositor.c`, done by reading the
 code and by running the test suite under AddressSanitizer/UBSan
 (`meson setup -Db_sanitize=address,undefined`).
@@ -138,19 +142,80 @@ Behaviour:
 - **Cursors**: a theme reload re-resolves existing cursors (they pointed
   into the freed theme); `XFreeCursor` frees the cursor's surface.
 
-## Still open (smaller items)
+### Third round: second review
 
-- Fonts: per-character metrics (`rbearing`, `XTextExtents` lbearing,
-  `XTextExtents16`), the font-set API (`XFreeFontSet`, `XFontsOfFontSet`),
-  and the FreeType face lifetime under cairo's caches.
-- XImage: `XCreateImage(data=NULL)` allocates (libX11 does not), and
-  depth-1/XYPixmap images use the wrong bits per pixel.
-- `XAllocColorCells` claims success on TrueColor; colour-name parsing
-  scales `#rgb` differently from libX11.
-- Wayland: `wl_surface.damage_buffer`/`set_buffer_scale` and
-  `wl_data_source.set_actions` aren't guarded by version; the decoration
-  helper's processes are never reaped; the XDND data source leaks per drag;
-  a Motif drag payload near 4 KiB can exceed libwayland's message limit;
-  helper threads are stopped after closing fds they poll.
-- Core text drawn with a non-copy GX function still goes through cairo's
-  operators (not the bitwise path); Render glyphs ignore CPClipMask.
+A fresh review of the two rounds' 3,000 changed lines found regressions in
+them, which are fixed here, each with a test:
+
+- `map_state` reported nearly every mapped window as `IsUnviewable` (the
+  root is never mapped); destroying a window unmapped every inferior (extra
+  UnmapNotify, O(n^2) exposes) and scanned the object table per window.
+- XI2 got one Enter per virtual crossing, and button/motion were mirrored
+  from the core target instead of the source window; unclaimed cookie data
+  leaked (it is now freed with the next event, as in libX11).
+- Raster ops now apply to stippled/tiled fills; `XDrawImageString` always
+  uses GXcopy and paints exactly the text's cells; `XCopyGC` keeps an empty
+  clip; key events carry root coordinates; `XQueryFont` accepts a GContext.
+- Render: trapezoid edges are evaluated at top/bottom (they were taken from
+  the line endpoints), polygon masks cover only the bounding box, software
+  paths index HiDPI surfaces correctly, glyph runs honour the source origin
+  and CPClipMask, a clip mask replaces clip rectangles, and A1 pictures keep
+  the same bit-0 form core drawing uses.
+- I/O: the paste-timeout off-by-one between the threads, the broker's 5 s
+  spin on EOF (it now refuses at once, and the owner says `R`), broker
+  deadlines now driven by the wakeup thread, accepted connections watched,
+  and the clipboard serve is non-blocking (a same-process drag stalled and
+  truncated); `mw_write_all` leaves SIGPIPE pending if the caller blocks it.
+- The test compositor sends `dnd_finished` only after the target finishes,
+  as real compositors do (the shim now frees its source on it).
+
+And in the code the first pass covered least:
+
+- **Shared property store** (`smprops.c`): records are validated (a wrapped
+  size overflowed the reader); the files live in a validated per-user
+  runtime directory, opened `O_NOFOLLOW` (the `/tmp/xlib-wayland` fallback
+  could be pre-created or symlinked by another user); readers lock and read
+  the whole file; values are served on the root only, through the normal
+  offset/length/type logic; appends publish the merged value.
+- **Resources**: files are loaded as they are (a newline was added per line,
+  cutting every continued value, such as translation tables).
+- **Session**: a command is not lost when the connection is accepted before
+  it is written; `mw-session` cannot be killed by SIGPIPE.
+- **Text properties**: the last string is kept without a trailing NUL;
+  encodings follow the style and the encoding atom; 4-byte UTF-8.
+- **Extensions**: event numbers are unique and below 128 (XShm 129 equalled
+  XFIXES' cursor event, Sync's alarm the Damage event); `XShmPutImage` sends
+  ShmCompletion; `XcursorGetTheme` no longer leaks; RandR modes have names.
+- **Also**: font metrics (rbearing, bounds, run extents, 16-bit extents),
+  font sets (freed; accessors return owned storage), `XCreateImage` leaves
+  data to the caller as libX11 does, depth-1 and XYPixmap layouts, colour
+  parsing matches libX11 (`#` left-justified, `rgb:` scaled),
+  `XAllocColorCells` fails on TrueColor, the FT_Face is freed with cairo's
+  face, Wayland request version guards, no zombie helper processes, the
+  XDND source leak, the Motif payload size limit, `XGetStandardColormap`
+  bounds, `XMatchVisualInfo` class 0, keysym `U` control characters, the
+  overflow-retry compose double feed, and an offset past the end of a
+  property is BadValue.
+- **Tests**: the wrapper fails when the compositor does not start (a test
+  used to pass by skipping), cleans up after itself, and isolates the
+  environment (HOME, resource files, `XLIB_WAYLAND_*`).
+
+## Still open
+
+- **Keyboard**: `XLookupString` picks only Shift levels (CapsLock, NumLock
+  and AltGr are ignored); compose is fed on KeyRelease too;
+  `XGetKeyboardMapping` reports two keysyms per key; `XConvertCase` is ASCII
+  only; `XSetLocaleModifiers` treats NULL and "" the wrong way round.
+- **Clipboard**: large X-to-Wayland copies (INCR) paste empty; the broker
+  still serves with a blocking write (bounded at 5 s).
+- **Render**: glyph runs do not accumulate into a mask (overlapping glyphs
+  with non-Over operators); core text under a raster op uses cairo
+  operators; a raster-op line across a huge HiDPI window allocates a large
+  coverage mask.
+- **Core odds and ends**: `XSendEvent` to PointerWindow/InputFocus,
+  `XSync(discard)`, `XNextRequest`, `XReparentWindow` into a descendant,
+  `XClearArea` clipping, unmapping a grab window, the default error handler.
+- **Extensions**: XFIXES/DAMAGE registrations outlive their window, DAMAGE
+  report levels, `XDamageSubtract`, `XextAddDisplay` close hooks,
+  `XSyncValue` overflow flags.
+- **XIM**: `delete_surrounding_text` counts bytes as characters.
