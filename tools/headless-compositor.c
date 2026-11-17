@@ -781,6 +781,12 @@ static void surface_destroyed(struct wl_resource *resource)
 		surface->xdg_surface->surface = NULL;
 		surface->xdg_surface = NULL;
 	}
+	/* The viewport can outlive its surface (client teardown destroys
+	 * resources in any order); its destructor must not reach a freed one. */
+	if (surface->viewport) {
+		wl_resource_set_user_data(surface->viewport, NULL);
+		surface->viewport = NULL;
+	}
 	wl_list_for_each_safe(cb, tmp, &surface->frame_callbacks, link)
 		wl_resource_destroy(cb->resource);
 
@@ -1692,8 +1698,16 @@ static void text_input_manager_get_text_input(struct wl_client *client,
 				       ti, text_input_destroyed);
 }
 
+static void text_input_manager_destroy(struct wl_client *client,
+				       struct wl_resource *resource)
+{
+	(void)client;
+	wl_resource_destroy(resource);
+}
+
 static const struct zwp_text_input_manager_v3_interface
 text_input_manager_implementation = {
+	.destroy = text_input_manager_destroy,
 	.get_text_input = text_input_manager_get_text_input,
 };
 
@@ -1720,6 +1734,7 @@ struct hc_data_source {
 	struct mw_compositor  *comp;
 	struct wl_list         offers;     /* hc_data_offer referencing us */
 	int                    primary;    /* a zwp_primary_selection_source_v1 */
+	uint32_t               dnd_actions; /* from set_actions (0: copy, v<3) */
 };
 
 struct hc_data_device {
@@ -1733,6 +1748,11 @@ struct hc_data_offer {
 	struct hc_data_source *source;     /* NULL once the source is gone */
 	struct wl_list         link;
 	int                    primary;
+	/* Drag-and-drop negotiation, enforced as wlroots does: a drop is only
+	 * sent when the target accepted a type, and finish needs an accepted
+	 * type and a chosen action. */
+	int                    accepted;
+	uint32_t               action;
 };
 
 static void broadcast_selection(struct mw_compositor *comp);
@@ -1786,7 +1806,10 @@ static void data_source_set_actions(struct wl_client *client,
 				    struct wl_resource *resource,
 				    uint32_t actions)
 {
-	(void)client; (void)resource; (void)actions;
+	struct hc_data_source *src = wl_resource_get_user_data(resource);
+	(void)client;
+	if (src)
+		src->dnd_actions = actions;
 }
 
 static const struct wl_data_source_interface data_source_implementation = {
@@ -1799,7 +1822,10 @@ static void data_offer_accept(struct wl_client *client,
 			      struct wl_resource *resource,
 			      uint32_t serial, const char *mime_type)
 {
-	(void)client; (void)resource; (void)serial; (void)mime_type;
+	struct hc_data_offer *offer = wl_resource_get_user_data(resource);
+	(void)client; (void)serial;
+	if (offer)
+		offer->accepted = mime_type != NULL;
 }
 
 /* The receiver hands us the write end of a pipe; forward it to the source,
@@ -1835,14 +1861,36 @@ static void data_offer_destroy(struct wl_client *client,
 static void data_offer_finish(struct wl_client *client,
 			      struct wl_resource *resource)
 {
-	(void)client; (void)resource;
+	struct hc_data_offer *offer = wl_resource_get_user_data(resource);
+	(void)client;
+	if (offer && (!offer->accepted || !offer->action))
+		wl_resource_post_error(resource, WL_DATA_OFFER_ERROR_INVALID_FINISH,
+				       "finish without an accepted type and action");
 }
 
+/* Choose the action: the target's preferred one if the source allows it,
+ * else the first both allow. */
 static void data_offer_set_actions(struct wl_client *client,
 				   struct wl_resource *resource,
 				   uint32_t actions, uint32_t preferred)
 {
-	(void)client; (void)resource; (void)actions; (void)preferred;
+	struct hc_data_offer *offer = wl_resource_get_user_data(resource);
+	(void)client;
+	if (!offer || !offer->source)
+		return;
+	uint32_t src = offer->source->dnd_actions
+		       ? offer->source->dnd_actions
+		       : WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY;
+	uint32_t both = src & actions, act = 0;
+	if (both & preferred)
+		act = preferred;
+	else if (both)
+		act = both & -both;
+	offer->action = act;
+	wl_data_offer_send_action(resource, act);
+	if (offer->source->resource &&
+	    wl_resource_get_version(offer->source->resource) >= 3)
+		wl_data_source_send_action(offer->source->resource, act);
 }
 
 static const struct wl_data_offer_interface data_offer_implementation = {
@@ -2043,10 +2091,22 @@ static void drag_drop(struct mw_compositor *comp)
 	if (getenv("HC_TRACE"))
 		fprintf(stderr, "HC: drag_drop device=%p source=%p\n",
 			(void*)comp->drag_device, (void*)comp->drag_source);
-	if (comp->drag_device)
-		wl_data_device_send_drop(comp->drag_device);
-	if (comp->drag_source && comp->drag_source->resource)
-		wl_data_source_send_dnd_finished(comp->drag_source->resource);
+	struct hc_data_offer *offer = comp->drag_offer
+		? wl_resource_get_user_data(comp->drag_offer) : NULL;
+	if (offer && offer->accepted) {
+		if (comp->drag_device)
+			wl_data_device_send_drop(comp->drag_device);
+		if (comp->drag_source && comp->drag_source->resource)
+			wl_data_source_send_dnd_finished(comp->drag_source->resource);
+	} else {
+		/* No type accepted: like wlroots, the drag is cancelled. */
+		if (getenv("HC_TRACE"))
+			fprintf(stderr, "HC: drag_drop refused (nothing accepted)\n");
+		if (comp->drag_device)
+			wl_data_device_send_leave(comp->drag_device);
+		if (comp->drag_source && comp->drag_source->resource)
+			wl_data_source_send_cancelled(comp->drag_source->resource);
+	}
 	comp->drag_active = 0;
 	comp->drag_source = NULL;
 	comp->drag_device = NULL;
@@ -2218,10 +2278,18 @@ static void primary_manager_create_source(struct wl_client *client,
 				       data_source_destroyed);
 }
 
+static void primary_manager_destroy(struct wl_client *client,
+				    struct wl_resource *resource)
+{
+	(void)client;
+	wl_resource_destroy(resource);
+}
+
 static const struct zwp_primary_selection_device_manager_v1_interface
 primary_manager_implementation = {
 	.create_source = primary_manager_create_source,
 	.get_device = primary_manager_get_device,
+	.destroy = primary_manager_destroy,
 };
 
 static void bind_primary_manager(struct wl_client *client, void *data,
@@ -2555,6 +2623,8 @@ static void xdg_surface_destroyed(struct wl_resource *resource)
 		xdg->surface->xdg_surface = NULL;
 	if (xdg->toplevel)
 		xdg->toplevel->xdg_surface = NULL;
+	if (xdg->popup)
+		xdg->popup->xdg_surface = NULL;
 	free(xdg);
 }
 
