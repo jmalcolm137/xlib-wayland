@@ -112,6 +112,7 @@ struct MwColormap {
 struct MwCursor {
     XID                       id;
     struct wl_cursor         *wl;      /* from libwayland-cursor, may be NULL */
+    char                     *wl_name; /* theme name `wl` was looked up by */
     struct wl_surface        *surface; /* -fallback blank */
     unsigned int              shape;   /* cursor-shape-v1 enum, 0 = none */
     uint32_t                  fg, bg;
@@ -156,11 +157,17 @@ typedef struct MwXiSelect {
 } MwXiSelect;
 
 /* An Xlib font object: an XFontStruct plus the raster font used to draw. */
+/* As in the X server, a font outlives its ID: XUnloadFont/XFreeFont only
+ * release the client's handle (`released`); the font itself goes once no GC
+ * refers to it (`refs`, which also counts the display's hold on its default
+ * font). */
 struct MwXFont {
     XID            id;
     XFontStruct   *fs;
     MwFont        *rfont;      /* from raster.h */
     int            ascent, descent, max_width;
+    int            refs;
+    bool           released;
 };
 
 /* A GC.  struct _XGC is opaque in Xlib.h (no XLIB_ILLEGAL_ACCESS). */
@@ -238,6 +245,8 @@ typedef struct MwWlOffer {
     char                **mimes;     /* every MIME offered */
     int                   nmimes, mimecap;
     char                 *motif_drag; /* x-motif drag payload, or NULL */
+    bool                  accepted;  /* a drag type was accepted */
+    uint32_t              action;    /* the drag action the compositor chose */
     Display              *d;         /* owning display */
     struct MwWlOffer     *next;
 } MwWlOffer;
@@ -368,6 +377,7 @@ struct MwToplevel {
      * create new buffers (and the compositor does not re-import them) on every
      * step of an interactive resize. */
     int                    cap_w, cap_h;
+    int                    buf_scale;     /* output scale the buffers were made for */
     struct wp_viewport    *viewport;
     MwSurface             *frame;            /* current draw target */
     struct wl_callback    *frame_cb;         /* compositor frame pacing */
@@ -702,6 +712,9 @@ typedef struct _XDisplayImpl {
     bool                        wake_running;
     int                         wake_active;      /* __atomic: a repeat is pending */
     uint64_t                    wake_deadline;    /* __atomic: its deadline, ms */
+    int                         wake_armed;       /* __atomic: watch the source fds */
+    int                         wake_extra_fd;    /* __atomic: clipboard fetch fd, -1 */
+    uint64_t                    wake_timer;       /* __atomic: one-shot deadline, 0 */
 
     /* selections */
     MwSelection                 *selections;
@@ -709,12 +722,15 @@ typedef struct _XDisplayImpl {
     /* Xlib contexts (XSaveContext/XFindContext) */
     struct MwContext            *contexts;
 
+    /* the database XGetDefault looks things up in (built on first use) */
+    XrmDatabase                 defaults_db;
+
+    /* default GC font, shared by every GC created without GCFont */
+    struct MwXFont             *default_font;
+
     /* cut buffers */
     unsigned char              *cutbuf[8];
     size_t                      cutbuf_len[8];
-
-    /* Xrm database (also mirrored into ->db for Xlib macros) */
-    XrmDatabase                 rdb;
 
     /* Coalescing: when the last damage flush happened, so that a client which
      * repaints in many small steps cannot force a full composite and upload
@@ -776,6 +792,9 @@ XID   mw_alloc_id(Display *d);
 MwWindow   *mw_window(Display *d, Window w);
 MwPixmap   *mw_pixmap(Display *d, Pixmap p);
 MwXFont    *mw_font(Display *d, Font f);
+void        mw_font_unref(Display *d, MwXFont *xf);
+void        mw_gc_set_xfont(Display *d, GC gc, MwXFont *xf);
+MwXFont    *mw_default_font(Display *d);
 MwColormap *mw_colormap(Display *d, Colormap c);
 MwCursor   *mw_cursor(Display *d, Cursor c);
 int         mw_display_scale(Display *d);   /* HiDPI device scale, >= 1 */
@@ -789,6 +808,12 @@ MwWindow *mw_create_window(Display *d, Window parent, int x, int y, int w, int h
 void      mw_destroy_window(Display *d, MwWindow *win);
 void      mw_map_window(Display *d, MwWindow *win, bool raised);
 void      mw_unmap_window(Display *d, MwWindow *win);
+void      mw_set_focus(Display *d, MwWindow *win);
+int       mw_region_rectangles(Region r, XRectangle **out);
+int       mw_write_all(int fd, const void *buf, size_t len, int timeout_ms);
+int       mw_draw_utf8(Display *d, Drawable dr, GC gc, int x, int y,
+                       const char *s, int length, int fill_bg);
+void      mw_selection_owner_destroyed(Display *d, Window w);
 bool      mw_window_is_viewable(MwWindow *win);
 void      mw_window_move_resize(MwWindow *win, int x, int y, int w, int h);
 void      mw_window_wm_resize(MwWindow *win, int w, int h);
@@ -912,6 +937,7 @@ int  mw_wakeup_start(XDisplayImpl *dp);
 void mw_wakeup_stop(XDisplayImpl *dp);
 void mw_wakeup_set(XDisplayImpl *dp, int active, uint64_t deadline_ms);
 void mw_wakeup_drain(XDisplayImpl *dp);
+void mw_wakeup_watch(XDisplayImpl *dp, int fd, uint64_t timer_ms);
 /* Block until at least one more Wayland event has been read and dispatched,
  * even when events are already queued.  mw_process_events(d, true) only blocks
  * on an empty queue, which is not enough for the mask-based event selectors
@@ -920,6 +946,7 @@ void mw_block_for_events(Display *d);
 int  mw_events_queued(Display *d, int mode);
 Time mw_now(void);
 void mw_send_configure_notify(Display *d, MwWindow *win);
+void mw_send_configure_notify_to(Display *d, MwWindow *win, Window event);
 void mw_send_client_message(Display *d, MwWindow *win, Atom type,
                             long d0, long d1, long d2, long d3, long d4);
 
@@ -1225,6 +1252,12 @@ void      mw_queue_render(Display *d);
 
 /* window property change notification used by WM_* handling */
 void      mw_window_props_changed(Display *d, MwWindow *win, Atom a);
+unsigned int mw_wl_button_to_x(uint32_t code);
+bool mw_grab_mods_match(unsigned int grab_mods, unsigned int state);
+bool mw_motion_selected(long mask, unsigned int state);
+MwWindow *mw_propagate(MwWindow *from, long mask, unsigned int state,
+                       Window *subwindow);
+void mw_pointer_move_to(Display *d, MwWindow *w);
 
 /* fatal IO error path */
 int       mw_io_error(Display *d, const char *reason);

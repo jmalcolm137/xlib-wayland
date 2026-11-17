@@ -99,6 +99,44 @@ static size_t mw_event_size(int type)
     }
 }
 
+/* Make room for one more event.  False only when memory runs out. */
+static bool queue_reserve(XDisplayImpl *dp)
+{
+    if (!dp->queue) {
+        dp->queue = calloc(256, sizeof(XEvent));
+        if (!dp->queue) return false;
+        dp->qcap = 256;
+    }
+    if (dp->qcount < dp->qcap) return true;
+    int ncap = dp->qcap * 2;
+    XEvent *nq = calloc((size_t)ncap, sizeof(XEvent));
+    if (!nq) return false;
+    for (int i = 0; i < dp->qcount; i++)
+        nq[i] = dp->queue[(dp->qhead + i) % dp->qcap];
+    free(dp->queue);
+    dp->queue = nq;
+    dp->qcap = ncap;
+    dp->qhead = 0;
+    return true;
+}
+
+static XEvent *queue_at(XDisplayImpl *dp, int i)
+{
+    return &dp->queue[(dp->qhead + i) % dp->qcap];
+}
+
+/* Copy out and remove the i-th queued event, keeping the rest in order and
+ * QLength() (dp->qlen, read directly by the macro) in step. */
+static void queue_take(XDisplayImpl *dp, int i, XEvent *out)
+{
+    *out = *queue_at(dp, i);
+    for (int j = i; j > 0; j--)
+        *queue_at(dp, j) = *queue_at(dp, j - 1);
+    dp->qhead = (dp->qhead + 1) % dp->qcap;
+    dp->qcount--;
+    dp->qlen = dp->qcount;
+}
+
 void mw_put_event(Display *d, XEvent *ev)
 {
     XDisplayImpl *dp = MWD(d);
@@ -147,39 +185,44 @@ void mw_put_event(Display *d, XEvent *ev)
      * which is what kept the window busy for a second or two after the drag
      * ended.  Only the newest size matters, and one Expose covering the union
      * of the reported areas repaints the same thing. */
-    if (tmp.type == ConfigureNotify || tmp.type == Expose) {
+    if ((tmp.type == ConfigureNotify || tmp.type == Expose) &&
+        !tmp.xany.send_event) {
         for (int i = 0; i < dp->qcount; i++) {
             XEvent *q = &dp->queue[(dp->qhead + i) % dp->qcap];
-            if (q->type != tmp.type || q->xany.window != tmp.xany.window)
+            if (q->type != tmp.type || q->xany.send_event)
                 continue;
             if (tmp.type == ConfigureNotify) {
+                /* xany.window is the *event* window; a parent's
+                 * SubstructureNotify copy of the same change is separate. */
+                if (q->xconfigure.event != tmp.xconfigure.event ||
+                    q->xconfigure.window != tmp.xconfigure.window)
+                    continue;
                 /* Keep the serial the client may already have observed and
                  * take the latest geometry. */
                 unsigned long serial = q->xconfigure.serial;
                 *q = tmp;
                 q->xconfigure.serial = serial;
-            } else if (tmp.xexpose.width >= q->xexpose.width &&
-                       tmp.xexpose.height >= q->xexpose.height) {
-                q->xexpose = tmp.xexpose;
+            } else {
+                if (q->xexpose.window != tmp.xexpose.window) continue;
+                /* Grow to the bounding box of both areas, and make it the
+                 * last of its series so a client waiting for count == 0
+                 * repaints. */
+                int x1 = q->xexpose.x < tmp.xexpose.x ? q->xexpose.x : tmp.xexpose.x;
+                int y1 = q->xexpose.y < tmp.xexpose.y ? q->xexpose.y : tmp.xexpose.y;
+                int qx2 = q->xexpose.x + q->xexpose.width;
+                int qy2 = q->xexpose.y + q->xexpose.height;
+                int tx2 = tmp.xexpose.x + tmp.xexpose.width;
+                int ty2 = tmp.xexpose.y + tmp.xexpose.height;
+                q->xexpose.x = x1;
+                q->xexpose.y = y1;
+                q->xexpose.width = (qx2 > tx2 ? qx2 : tx2) - x1;
+                q->xexpose.height = (qy2 > ty2 ? qy2 : ty2) - y1;
+                q->xexpose.count = 0;
             }
-            dp->qlen = dp->qcount;
             return;
         }
     }
-    if (!dp->queue) {
-        dp->qcap = 256;
-        dp->queue = calloc(dp->qcap, sizeof(XEvent));
-    }
-    if (dp->qcount == dp->qcap) {
-        int ncap = dp->qcap * 2;
-        XEvent *nq = calloc(ncap, sizeof(XEvent));
-        for (int i = 0; i < dp->qcount; i++)
-            nq[i] = dp->queue[(dp->qhead + i) % dp->qcap];
-        free(dp->queue);
-        dp->queue = nq;
-        dp->qcap = ncap;
-        dp->qhead = 0;
-    }
+    if (!queue_reserve(dp)) return;
     dp->queue[(dp->qhead + dp->qcount) % dp->qcap] = tmp;
     dp->qcount++;
     dp->qlen = dp->qcount;
@@ -235,10 +278,7 @@ static bool pop_event(Display *d, XEvent *out)
 {
     XDisplayImpl *dp = MWD(d);
     if (dp->qcount <= 0) return false;
-    *out = dp->queue[dp->qhead];
-    dp->qhead = (dp->qhead + 1) % dp->qcap;
-    dp->qcount--;
-    dp->qlen = dp->qcount;
+    queue_take(dp, 0, out);
     return true;
 }
 
@@ -285,9 +325,10 @@ int XPeekEvent(Display *d, XEvent *event)
 
 int XPutBackEvent(Display *d, XEvent *event)
 {
+    /* Straight to the head: unlike mw_put_event, no coalescing or transfer
+     * hooks -- the client already received this event once. */
     XDisplayImpl *dp = MWD(d);
-    if (!dp->queue) { mw_put_event(d, event); return 1; }
-    if (dp->qcount == dp->qcap) mw_put_event(d, event);   /* grow then move */
+    if (!queue_reserve(dp)) return 0;
     int idx = (dp->qhead - 1 + dp->qcap) % dp->qcap;
     dp->queue[idx] = *event;
     dp->qhead = idx;
@@ -300,7 +341,7 @@ int XPutBackEvent(Display *d, XEvent *event)
 
 static bool matches_mask(XEvent *e, long mask)
 {
-    if (mask == 0) return true;
+    if (mask == 0) return false;          /* libX11: an empty mask matches nothing */
     /* Xlib answers mask-based requests through a type-to-mask table, because
      * the event type number is not the mask bit: a PropertyNotify is type 28
      * but is selected by PropertyChangeMask (bit 22).  Shifting the type only
@@ -367,12 +408,7 @@ int XMaskEvent(Display *d, long mask, XEvent *event)
         for (int i = 0; i < dp->qcount; i++) {
             XEvent *e = &dp->queue[(dp->qhead + i) % dp->qcap];
             if (matches_mask(e, mask)) {
-                *event = *e;
-                for (int j = i; j > 0; j--)
-                    dp->queue[(dp->qhead + j) % dp->qcap] =
-                        dp->queue[(dp->qhead + j - 1) % dp->qcap];
-                dp->qhead = (dp->qhead + 1) % dp->qcap;
-                dp->qcount--;
+                queue_take(MWD(d), i, event);
                 return 1;
             }
         }
@@ -390,12 +426,7 @@ int XCheckMaskEvent(Display *d, long mask, XEvent *event)
     for (int i = 0; i < dp->qcount; i++) {
         XEvent *e = &dp->queue[(dp->qhead + i) % dp->qcap];
         if (matches_mask(e, mask)) {
-            *event = *e;
-            for (int j = i; j > 0; j--)
-                dp->queue[(dp->qhead + j) % dp->qcap] =
-                    dp->queue[(dp->qhead + j - 1) % dp->qcap];
-            dp->qhead = (dp->qhead + 1) % dp->qcap;
-            dp->qcount--;
+            queue_take(MWD(d), i, event);
             return 1;
         }
     }
@@ -416,12 +447,7 @@ static int take_first(Display *d, Window w, long mask, int type, XEvent *out)
     for (int i = 0; i < dp->qcount; i++) {
         XEvent *e = &dp->queue[(dp->qhead + i) % dp->qcap];
         if (ev_is(e, w, mask, type)) {
-            *out = *e;
-            for (int j = i; j > 0; j--)
-                dp->queue[(dp->qhead + j) % dp->qcap] =
-                    dp->queue[(dp->qhead + j - 1) % dp->qcap];
-            dp->qhead = (dp->qhead + 1) % dp->qcap;
-            dp->qcount--;
+            queue_take(dp, i, out);
             return 1;
         }
     }
@@ -489,12 +515,7 @@ Bool XIfEvent(Display *d, XEvent *event, Bool (*pred)(), XPointer arg)
         for (int i = 0; i < MWD(d)->qcount; i++) {
             XEvent *e = &MWD(d)->queue[(MWD(d)->qhead + i) % MWD(d)->qcap];
             if (pred(d, e, arg)) {
-                *event = *e;
-                for (int j = i; j > 0; j--)
-                    MWD(d)->queue[(MWD(d)->qhead + j) % MWD(d)->qcap] =
-                        MWD(d)->queue[(MWD(d)->qhead + j - 1) % MWD(d)->qcap];
-                MWD(d)->qhead = (MWD(d)->qhead + 1) % MWD(d)->qcap;
-                MWD(d)->qcount--;
+                queue_take(MWD(d), i, event);
                 return True;
             }
         }
@@ -510,12 +531,7 @@ Bool XCheckIfEvent(Display *d, XEvent *event, Bool (*pred)(), XPointer arg)
     for (int i = 0; i < MWD(d)->qcount; i++) {
         XEvent *e = &MWD(d)->queue[(MWD(d)->qhead + i) % MWD(d)->qcap];
         if (pred(d, e, arg)) {
-            *event = *e;
-            for (int j = i; j > 0; j--)
-                MWD(d)->queue[(MWD(d)->qhead + j) % MWD(d)->qcap] =
-                    MWD(d)->queue[(MWD(d)->qhead + j - 1) % MWD(d)->qcap];
-            MWD(d)->qhead = (MWD(d)->qhead + 1) % MWD(d)->qcap;
-            MWD(d)->qcount--;
+            queue_take(MWD(d), i, event);
             return True;
         }
     }
@@ -591,15 +607,15 @@ int XAllowEvents(Display *d, int mode, Time time)
 
 /* ------------------------------------------------------- synthetic events */
 
-void mw_send_configure_notify(Display *d, MwWindow *win)
+/* `event` is the window the notification is reported to: the window itself
+ * (StructureNotify) or its parent (SubstructureNotify). */
+void mw_send_configure_notify_to(Display *d, MwWindow *win, Window event)
 {
-    int ox = 0, oy = 0;
-    mw_window_origin(win, &ox, &oy);
     XConfigureEvent ce;
     memset(&ce, 0, sizeof ce);
     ce.type = ConfigureNotify;
     ce.display = d;
-    ce.event = win->id;
+    ce.event = event;
     ce.window = win->id;
     ce.x = win->x;
     ce.y = win->y;
@@ -610,6 +626,11 @@ void mw_send_configure_notify(Display *d, MwWindow *win)
     ce.override_redirect = win->override_redirect;
     ce.serial = MWD(d)->serial++;
     mw_put_event(d, (XEvent *)&ce);
+}
+
+void mw_send_configure_notify(Display *d, MwWindow *win)
+{
+    mw_send_configure_notify_to(d, win, win->id);
 }
 
 void mw_send_client_message(Display *d, MwWindow *win, Atom type,

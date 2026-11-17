@@ -1,6 +1,7 @@
 /* drawing.c — graphics contexts and the Xlib drawing primitives. */
 #include "internal.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -17,8 +18,15 @@ MwCanvas *mw_canvas_for_drawable(Display *d, Drawable dr, struct _XGC *gc,
     if (w) *w = sw;
     if (h) *h = sh;
     if (!surf) return NULL;
-    MwCanvas *c = mw_canvas_begin(surf, gc && gc->has_clip_rects ? gc->clip_rects : NULL,
-                                  gc && gc->has_clip_rects ? gc->nclip : 0,
+    /* An empty clip-rectangle list disables output altogether. */
+    static const XRectangle nothing = { 0, 0, 0, 0 };
+    const XRectangle *clip = NULL;
+    int nclip = 0;
+    if (gc && gc->has_clip_rects) {
+        clip = gc->nclip > 0 ? gc->clip_rects : &nothing;
+        nclip = gc->nclip > 0 ? gc->nclip : 1;
+    }
+    MwCanvas *c = mw_canvas_begin(surf, clip, nclip,
                                   gc ? gc->clip_x_origin : 0,
                                   gc ? gc->clip_y_origin : 0);
     if (gc) mw_apply_gc(c, d, gc);
@@ -33,16 +41,9 @@ void mw_apply_gc(MwCanvas *c, Display *d, struct _XGC *gc)
     mw_set_line(c, gc->line_width, gc->line_style, gc->cap_style, gc->join_style,
                 gc->dash_offset, &gc->dashes, 1);
     mw_set_fill(c, gc->fill_style, gc->fill_rule, gc->arc_mode);
+    mw_set_plane_mask(c, gc->plane_mask);
     if (gc->xfont && gc->xfont->rfont)
         mw_set_font(c, gc->xfont->rfont);
-    if ((gc->fill_style == FillStippled || gc->fill_style == FillOpaqueStippled)
-        && gc->stipple) {
-        MwPixmap *pm = mw_pixmap(d, gc->stipple);
-        if (pm) mw_set_stipple(c, pm->surface, gc->ts_x_origin, gc->ts_y_origin);
-    } else if (gc->fill_style == FillTiled && gc->tile) {
-        MwPixmap *pm = mw_pixmap(d, gc->tile);
-        if (pm) mw_set_stipple(c, pm->surface, gc->ts_x_origin, gc->ts_y_origin);
-    }
     /* A depth-1 clip mask (XSetClipMask) clips all drawing to its set bits. */
     if (gc->clip_mask != None) {
         MwPixmap *pm = mw_pixmap(d, gc->clip_mask);
@@ -53,21 +54,28 @@ void mw_apply_gc(MwCanvas *c, Display *d, struct _XGC *gc)
 /* Fill the current path with the right fill style. */
 static void fill_path(MwCanvas *c, struct _XGC *gc, Display *d)
 {
-    if ((gc->fill_style == FillStippled || gc->fill_style == FillOpaqueStippled)
-        && gc->stipple) {
-        MwPixmap *pm = mw_pixmap(d, gc->stipple);
-        if (pm) {
-            mw_fill_with_stipple(c, pm->surface, gc->ts_x_origin, gc->ts_y_origin);
-            return;
-        }
-    } else if (gc->fill_style == FillTiled && gc->tile) {
-        MwPixmap *pm = mw_pixmap(d, gc->tile);
-        if (pm) {
-            mw_fill_with_stipple(c, pm->surface, gc->ts_x_origin, gc->ts_y_origin);
-            return;
-        }
+    Pixmap src = None;
+    if (gc->fill_style == FillStippled || gc->fill_style == FillOpaqueStippled)
+        src = gc->stipple;
+    else if (gc->fill_style == FillTiled)
+        src = gc->tile;
+    MwPixmap *pm = src ? mw_pixmap(d, src) : NULL;
+    if (pm) {
+        mw_fill_pattern(c, pm->surface, gc->ts_x_origin, gc->ts_y_origin,
+                        gc->fill_style, (uint32_t)gc->foreground,
+                        (uint32_t)gc->background);
+        return;
     }
     mw_fill_path(c);
+}
+
+/* GCClipMask replaces any clip-rectangle list (and vice versa). */
+static void drop_clip_rects(struct _XGC *gc)
+{
+    free(gc->clip_rects);
+    gc->clip_rects = NULL;
+    gc->nclip = 0;
+    gc->has_clip_rects = false;
 }
 
 /* ---------------------------------------------------------------- GCs */
@@ -113,7 +121,6 @@ struct _XGC *mw_create_gc_internal(Display *d, Drawable dr, unsigned long mask,
         if (mask & GCStipple)           gc->stipple = v->stipple;
         if (mask & GCTileStipXOrigin)   gc->ts_x_origin = v->ts_x_origin;
         if (mask & GCTileStipYOrigin)   gc->ts_y_origin = v->ts_y_origin;
-        if (mask & GCFont)              gc->font = v->font;
         if (mask & GCSubwindowMode)     gc->subwindow_mode = v->subwindow_mode;
         if (mask & GCGraphicsExposures) gc->graphics_exposures = v->graphics_exposures;
         if (mask & GCClipXOrigin)       gc->clip_x_origin = v->clip_x_origin;
@@ -122,12 +129,8 @@ struct _XGC *mw_create_gc_internal(Display *d, Drawable dr, unsigned long mask,
         if (mask & GCDashOffset)        gc->dash_offset = v->dash_offset;
         if (mask & GCDashList)          gc->dashes = v->dashes;
     }
-    if (gc->font == None) {
-        /* default font */
-        Font def = XLoadFont(d, "fixed");
-        if (def != None) gc->font = def;
-    }
-    gc->xfont = gc->font ? mw_font(d, gc->font) : NULL;
+    MwXFont *xf = (v && (mask & GCFont)) ? mw_font(d, v->font) : NULL;
+    mw_gc_set_xfont(d, gc, xf ? xf : mw_default_font(d));
     mw_register(d, gc->gid, MW_OBJ_GC, gc);
     return gc;
 }
@@ -155,19 +158,18 @@ int XChangeGC(Display *d, GC gc, unsigned long mask, XGCValues *v)
     if (mask & GCStipple)           gc->stipple = v->stipple;
     if (mask & GCTileStipXOrigin)   gc->ts_x_origin = v->ts_x_origin;
     if (mask & GCTileStipYOrigin)   gc->ts_y_origin = v->ts_y_origin;
-    if (mask & GCFont) { gc->font = v->font; gc->xfont = mw_font(d, v->font); }
+    if (mask & GCFont)              mw_gc_set_xfont(d, gc, mw_font(d, v->font));
     if (mask & GCSubwindowMode)     gc->subwindow_mode = v->subwindow_mode;
     if (mask & GCGraphicsExposures) gc->graphics_exposures = v->graphics_exposures;
     if (mask & GCClipXOrigin)       gc->clip_x_origin = v->clip_x_origin;
     if (mask & GCClipYOrigin)       gc->clip_y_origin = v->clip_y_origin;
-    if (mask & GCClipMask)          gc->clip_mask = v->clip_mask;
+    if (mask & GCClipMask)          { gc->clip_mask = v->clip_mask; drop_clip_rects(gc); }
     if (mask & GCDashOffset)        gc->dash_offset = v->dash_offset;
     if (mask & GCDashList)          gc->dashes = v->dashes;
     return 1;
 }
 
-/* Copy the GC components named by `mask` from `src` to `dest`.  X11 explicitly
- * does not copy the font (GCFont in the mask is ignored), and the clip mask /
+/* Copy the GC components named by `mask` from `src` to `dest`.  The clip mask /
  * resolved clip rectangles must be duplicated rather than aliased, because the
  * destination owns them and frees them in XFreeGC.  Motif's own mwm client
  * calls this, so without it the rest of the Open Motif tree fails to link. */
@@ -188,6 +190,7 @@ int XCopyGC(Display *d, GC src, unsigned long mask, GC dest)
     CP(clip_x_origin, GCClipXOrigin); CP(clip_y_origin, GCClipYOrigin);
     CP(dash_offset, GCDashOffset); CP(dashes, GCDashList);
 #undef CP
+    if (mask & GCFont) mw_gc_set_xfont(d, dest, src->xfont);
 
     if (mask & GCClipMask) {
         dest->clip_mask = src->clip_mask;
@@ -209,7 +212,6 @@ int XCopyGC(Display *d, GC src, unsigned long mask, GC dest)
             }
         }
     }
-    (void)d;
     return 1;
 }
 
@@ -243,6 +245,7 @@ int XFreeGC(Display *d, GC gc)
     if (!gc) return 0;
     free(gc->clip_rects);
     if (gc->clip_region) XDestroyRegion(gc->clip_region);
+    mw_gc_set_xfont(d, gc, NULL);
     mw_unregister(d, gc->gid);
     free(gc);
     return 1;
@@ -274,18 +277,10 @@ int XSetClipMask(Display *d, GC gc, Pixmap p)
     gc->clip_mask = p;
     /* A clip mask (or None, which cairo uses to clear the clip before a
      * drawing op) replaces any rectangle clip set with XSetClipRectangles.
-     * We do not implement mask clips, so drop the rectangle clip: keeping it
-     * would clip later drawing to a stale box and silently discard pixels.
-     * This was the cause of the GIMP ruler's "missing ticks" trail: cairo
-     * clips the first tile into a scratch pixmap, clears the clip with
-     * XSetClipMask (None), then copies the next tile -- which this stale clip
-     * threw away, so the scratch (later blitted over the ruler) had garbage. */
-    if (gc->has_clip_rects) {
-        free(gc->clip_rects);
-        gc->clip_rects = NULL;
-        gc->nclip = 0;
-        gc->has_clip_rects = false;
-    }
+     * Keeping a stale rectangle clip discarded pixels: cairo clips the first
+     * tile into a scratch pixmap, clears the clip with XSetClipMask(None),
+     * then copies the next tile (GIMP's ruler lost its ticks this way). */
+    drop_clip_rects(gc);
     return 1;
 }
 
@@ -293,29 +288,33 @@ int XSetClipRectangles(Display *d, GC gc, int clip_x, int clip_y,
                        XRectangle *rects, int n, int ordering)
 {
     (void)d; (void)ordering;
+    if (n < 0) n = 0;
+    XRectangle *copy = n ? malloc(sizeof(XRectangle) * (size_t)n) : NULL;
+    if (n && !copy) return 0;
+    if (n && rects) memcpy(copy, rects, sizeof(XRectangle) * (size_t)n);
     free(gc->clip_rects);
-    gc->clip_rects = n ? malloc(sizeof(XRectangle) * n) : NULL;
-    if (rects) memcpy(gc->clip_rects, rects, sizeof(XRectangle) * n);
+    gc->clip_rects = copy;
     gc->nclip = n;
-    gc->has_clip_rects = n > 0;
+    /* An empty list is a clip too: it disables output. */
+    gc->has_clip_rects = true;
+    gc->clip_mask = None;
     gc->clip_x_origin = clip_x;
     gc->clip_y_origin = clip_y;
     return 1;
 }
 
+/* As in libX11: the region's rectangles become the clip, with the clip
+ * origin reset to (0,0). */
 int XSetRegion(Display *d, GC gc, Region r)
 {
-    (void)d;
     if (gc->clip_region) XDestroyRegion(gc->clip_region);
     gc->clip_region = XCreateRegion();
     XUnionRegion(gc->clip_region, r, gc->clip_region);
-    XRectangle box;
-    XClipBox(r, &box);
-    free(gc->clip_rects);
-    gc->clip_rects = malloc(sizeof(XRectangle));
-    gc->clip_rects[0] = box;
-    gc->nclip = 1;
-    gc->has_clip_rects = true;
+    XRectangle *rects = NULL;
+    int n = mw_region_rectangles(r, &rects);
+    if (n < 0) return 0;
+    XSetClipRectangles(d, gc, 0, 0, rects, n, YXBanded);
+    free(rects);
     return 1;
 }
 
@@ -461,7 +460,8 @@ int XDrawArc(Display *d, Drawable dr, GC gc, int x, int y,
     MwCanvas *c = mw_canvas_for_drawable(d, dr, gc, &dw, &dh);
     if (!c) return 0;
     mw_set_snap(c, (gc->line_width <= 0 || (gc->line_width & 1)) ? 1 : 0);
-    mw_arc(c, x, y, w, h, a1, a2, gc->arc_mode);
+    /* arc_mode only applies to fills; an outline is just the arc. */
+    mw_arc(c, x, y, w, h, a1, a2, -1);
     mw_stroke_path(c);
     mw_canvas_end(c);
     after_draw(d, dr);
@@ -476,7 +476,7 @@ int XDrawArcs(Display *d, Drawable dr, GC gc, XArc *arcs, int n)
     mw_set_snap(c, (gc->line_width <= 0 || (gc->line_width & 1)) ? 1 : 0);
     for (int i = 0; i < n; i++)
         mw_arc(c, arcs[i].x, arcs[i].y, arcs[i].width, arcs[i].height,
-               arcs[i].angle1, arcs[i].angle2, gc->arc_mode);
+               arcs[i].angle1, arcs[i].angle2, -1);
     mw_stroke_path(c);
     mw_canvas_end(c);
     after_draw(d, dr);
@@ -547,6 +547,19 @@ static void send_copy_exposures(Display *d, Drawable dst, GC gc, int major)
     mw_put_event(d, (XEvent *)&ev);
 }
 
+/* Clip a copy's source rectangle to the source drawable, moving the
+ * destination with it: X leaves destination pixels whose source lies
+ * outside the drawable untouched.  False when nothing is left. */
+static bool clip_to_source(int sw, int sh, int *sx, int *sy, int *w, int *h,
+                           int *dx, int *dy)
+{
+    if (*sx < 0) { *dx -= *sx; *w += *sx; *sx = 0; }
+    if (*sy < 0) { *dy -= *sy; *h += *sy; *sy = 0; }
+    if (*sx + *w > sw) *w = sw - *sx;
+    if (*sy + *h > sh) *h = sh - *sy;
+    return *w > 0 && *h > 0;
+}
+
 int XCopyArea(Display *d, Drawable src, Drawable dst, GC gc,
               int sx, int sy, unsigned int w, unsigned int h, int dx, int dy)
 {
@@ -555,11 +568,17 @@ int XCopyArea(Display *d, Drawable src, Drawable dst, GC gc,
         fprintf(stderr, "MW: XCopyArea src=0x%lx dst=0x%lx (%d,%d)->(%d,%d) %ux%u%s\n",
                 src, dst, sx, sy, dx, dy, w, h, src == dst ? " SELF" : "");
     int sw, sh, dh2;
+    mw_render_drain(d);
     MwSurface *ss = mw_drawable_surface(d, src, &sw, &sh, &dh2);
+    int cw = (int)w, ch = (int)h;
+    if (!ss || !clip_to_source(sw, sh, &sx, &sy, &cw, &ch, &dx, &dy)) {
+        send_copy_exposures(d, dst, gc, MW_X_CopyArea);
+        return ss != NULL;
+    }
     int dw, dhh;
     MwCanvas *c = mw_canvas_for_drawable(d, dst, gc, &dw, &dhh);
-    if (!c || !ss) { if (c) mw_canvas_end(c); return 0; }
-    mw_canvas_copy(c, ss, sx, sy, dx, dy, (int)w, (int)h);
+    if (!c) return 0;
+    mw_canvas_copy(c, ss, sx, sy, dx, dy, cw, ch);
     mw_canvas_end(c);
     after_draw(d, dst);
     send_copy_exposures(d, dst, gc, MW_X_CopyArea);
@@ -571,13 +590,20 @@ int XCopyPlane(Display *d, Drawable src, Drawable dst, GC gc,
                int dx, int dy, unsigned long plane)
 {
     int sw, sh, dep;
+    mw_render_drain(d);
     MwSurface *ss = mw_drawable_surface(d, src, &sw, &sh, &dep);
+    /* plane has exactly one bit set; its index selects the bit. */
+    int bit = plane ? __builtin_ctzl(plane) : 0;
+    int cw = (int)w, ch = (int)h;
+    if (!ss || !clip_to_source(sw, sh, &sx, &sy, &cw, &ch, &dx, &dy)) {
+        send_copy_exposures(d, dst, gc, MW_X_CopyPlane);
+        return ss != NULL;
+    }
     int dw, dhh;
     MwCanvas *c = mw_canvas_for_drawable(d, dst, gc, &dw, &dhh);
-    if (!c || !ss) { if (c) mw_canvas_end(c); return 0; }
-    mw_set_source_argb(c, 0xff000000u | (uint32_t)(gc->foreground & 0xffffff));
-    mw_canvas_copy_plane(c, ss, sx, sy, dx, dy, (int)w, (int)h,
-                         plane == 1 ? 0 : 0);
+    if (!c) return 0;
+    mw_canvas_copy_plane(c, ss, sx, sy, dx, dy, cw, ch, bit,
+                         (uint32_t)gc->foreground, (uint32_t)gc->background);
     mw_canvas_end(c);
     after_draw(d, dst);
     send_copy_exposures(d, dst, gc, MW_X_CopyPlane);

@@ -287,8 +287,7 @@ for _ in $(seq 1 100); do
 done
 XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XFSOCK" \
     LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
-    "$BUILD/xfixes_x" >"$WORK/xfixes.out" 2>&1
-XF=$?
+    "$BUILD/xfixes_x" >"$WORK/xfixes.out" 2>&1 && XF=0 || XF=$?
 kill "$XFHC" 2>/dev/null || true
 wait "$XFHC" 2>/dev/null || true
 if [ "$XF" = 0 ] && grep -q 'XFIXES:GOT' "$WORK/xfixes.out" \
@@ -314,8 +313,7 @@ for _ in $(seq 1 100); do
 done
 LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
     XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XE_SOCK" \
-    "$BUILD/xext_x" >"$WORK/xext.out" 2>&1
-XE=$?
+    "$BUILD/xext_x" >"$WORK/xext.out" 2>&1 && XE=0 || XE=$?
 kill "$XEHC" 2>/dev/null || true
 wait "$XEHC" 2>/dev/null || true
 if [ "$XE" = 0 ] && grep -Eq \
@@ -343,8 +341,7 @@ for _ in $(seq 1 100); do
 done
 LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
     XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$CP_SOCK" \
-    "$BUILD/composite_x" >"$WORK/composite.out" 2>&1
-CP=$?
+    "$BUILD/composite_x" >"$WORK/composite.out" 2>&1 && CP=0 || CP=$?
 kill "$CPHC" 2>/dev/null || true
 wait "$CPHC" 2>/dev/null || true
 if [ "$CP" = 0 ] && grep -Eq \
@@ -373,8 +370,7 @@ for _ in $(seq 1 100); do
 done
 LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
     XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XI_SOCK" \
-    "$BUILD/xi2_touch_x" >"$WORK/xi2.out" 2>&1
-XIRC=$?
+    "$BUILD/xi2_touch_x" >"$WORK/xi2.out" 2>&1 && XIRC=0 || XIRC=$?
 kill "$XIHC" 2>/dev/null || true
 wait "$XIHC" 2>/dev/null || true
 if [ "$XIRC" = 0 ] \
@@ -439,8 +435,7 @@ for _ in $(seq 1 100); do
 done
 LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
     XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XE_SOCK" \
-    "$BUILD/xembed_x" >"$WORK/xembed.out" 2>&1
-XERC=$?
+    "$BUILD/xembed_x" >"$WORK/xembed.out" 2>&1 && XERC=0 || XERC=$?
 kill "$XEHC" 2>/dev/null || true
 wait "$XEHC" 2>/dev/null || true
 if [ "$XERC" = 0 ] \
@@ -463,8 +458,7 @@ for _ in $(seq 1 100); do
 done
 LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
     XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XFR_SOCK" \
-    timeout 8 "$BUILD/xftrender_x" >"$WORK/xftrender.out" 2>&1
-XFRC=$?
+    timeout 8 "$BUILD/xftrender_x" >"$WORK/xftrender.out" 2>&1 && XFRC=0 || XFRC=$?
 kill "$XFRHC" 2>/dev/null || true
 wait "$XFRHC" 2>/dev/null || true
 if [ "$XFRC" = 0 ] && grep -q 'XFT:glyph=[1-9][0-9]* red=1' "$WORK/xftrender.out"; then
@@ -486,8 +480,7 @@ for _ in $(seq 1 100); do
 done
 LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
     XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XIN_SOCK" \
-    timeout 8 "$BUILD/xinerama_x" >"$WORK/xinerama.out" 2>&1
-XINC=$?
+    timeout 8 "$BUILD/xinerama_x" >"$WORK/xinerama.out" 2>&1 && XINC=0 || XINC=$?
 kill "$XINHC" 2>/dev/null || true
 wait "$XINHC" 2>/dev/null || true
 if [ "$XINC" = 0 ] && grep -q 'XINERAMA:ext=1 ver=1.1 active=1 n=1 screen0=200x200+0+0 root=200x200' \
@@ -513,8 +506,7 @@ for _ in $(seq 1 100); do
 done
 LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
     XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$XI2E_SOCK" \
-    timeout 8 "$BUILD/xi2_event_x" >"$WORK/xi2e.out" 2>&1
-XI2EC=$?
+    timeout 8 "$BUILD/xi2_event_x" >"$WORK/xi2e.out" 2>&1 && XI2EC=0 || XI2EC=$?
 kill "$XI2EHC" 2>/dev/null || true
 wait "$XI2EHC" 2>/dev/null || true
 if [ "$XI2EC" = 0 ] && grep -q 'XI2EV:RESULT motion=1 button=1 release=1 key=1' \
@@ -537,8 +529,7 @@ for _ in $(seq 1 100); do
 done
 LD_LIBRARY_PATH="$PREFIX/lib:${LD_LIBRARY_PATH:-}" \
     XDG_RUNTIME_DIR="$RUNTIME" WAYLAND_DISPLAY="$RX_SOCK" \
-    timeout 8 "$BUILD/render_extra_x" >"$WORK/rx.out" 2>&1
-RXC=$?
+    timeout 8 "$BUILD/render_extra_x" >"$WORK/rx.out" 2>&1 && RXC=0 || RXC=$?
 kill "$RXHC" 2>/dev/null || true
 wait "$RXHC" 2>/dev/null || true
 if [ "$RXC" = 0 ] && \

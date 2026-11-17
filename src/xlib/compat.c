@@ -262,21 +262,34 @@ int XDeleteContext(Display *d, XID rid, XContext context)
 
 /* ----------------------------------------------------------- Xrm default */
 
+/* As in libX11: an Xrm lookup of "program.name" / "Program.Name" in the
+ * display's resource database, so loose bindings (*name) and wildcards
+ * match, and the result stays valid (it is owned by the database).  The
+ * program name is used without its directory.  The database is the shim's
+ * own, built from RESOURCE_MANAGER, not dpy->db, which Xt installs and frees
+ * itself. */
 char *XGetDefault(Display *d, _Xconst char *prog, _Xconst char *name)
 {
-    char *res = MWD(d)->xdefaults;
-    static char buf[512];
-    if (!res || !prog || !name) return NULL;
-    snprintf(buf, sizeof buf, "%s.%s:", prog, name);
-    char *p = strstr(res, buf);
-    if (!p) return NULL;
-    p += strlen(buf);
-    while (*p == ' ' || *p == '\t') p++;
-    static char val[512];
-    int i = 0;
-    while (*p && *p != '\n' && i < 511) val[i++] = *p++;
-    val[i] = 0;
-    return val;
+    XDisplayImpl *dp = MWD(d);
+    if (!prog || !name) return NULL;
+    if (!dp->defaults_db) {
+        dp->defaults_db = XrmGetStringDatabase(dp->xdefaults ? dp->xdefaults : "");
+        if (!dp->defaults_db) return NULL;
+    }
+    const char *base = strrchr(prog, '/');
+    base = base ? base + 1 : prog;
+    XrmQuark names[3], classes[3];
+    names[0] = XrmStringToQuark(base);
+    names[1] = XrmStringToQuark(name);
+    names[2] = NULLQUARK;
+    classes[0] = XrmStringToQuark("Program");
+    classes[1] = XrmStringToQuark("Name");
+    classes[2] = NULLQUARK;
+    XrmRepresentation type;
+    XrmValue v;
+    if (XrmQGetResource(dp->defaults_db, names, classes, &type, &v) && v.addr)
+        return (char *)v.addr;
+    return NULL;
 }
 
 /* --------------------------------------------------------- extensions */

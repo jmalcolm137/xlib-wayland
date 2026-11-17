@@ -287,18 +287,9 @@ typedef struct RmEntry {
     char           *value;
 } RmEntry;
 
-struct SearchCtx {
-    struct SearchCtx *next;
-    XrmDatabase       db;
-    int               n;
-    XrmQuark         *names;    /* [n] + terminator */
-    XrmQuark         *classes;  /* [n] + terminator */
-};
-
 struct _XrmHashBucketRec {
     RmEntry          *entries;
     RmEntry          *tail;
-    struct SearchCtx *searches;
 };
 
 static XrmDatabase
@@ -323,7 +314,6 @@ static void
 destroy_database(XrmDatabase db)
 {
     RmEntry *e;
-    struct SearchCtx *s;
 
     if (!db)
         return;
@@ -332,14 +322,6 @@ destroy_database(XrmDatabase db)
         RmEntry *next = e->next;
         free_entry(e);
         e = next;
-    }
-    s = db->searches;
-    while (s) {
-        struct SearchCtx *next = s->next;
-        free(s->names);
-        free(s->classes);
-        free(s);
-        s = next;
     }
     free(db);
 }
@@ -797,8 +779,53 @@ parse_one_line(XrmDatabase db, char *line)
     free(quarks);
 }
 
+static char *read_in_file(const char *filename);
+
+/* `#include "file"`: a relative name is taken from the including file's
+ * directory (the current directory for a string database), as in libX11. */
+static void parse_database_in(XrmDatabase db, const char *data, Bool doall,
+                              const char *dir, int depth);
+
+static void include_file(XrmDatabase db, const char *line, const char *dir,
+                         int depth)
+{
+    const char *q = strchr(line, '"');
+    const char *e = q ? strchr(q + 1, '"') : NULL;
+    if (!q || !e || e == q + 1 || depth >= 100)
+        return;
+    size_t nlen = (size_t)(e - q - 1);
+    size_t dlen = (q[1] != '/' && dir) ? strlen(dir) : 0;
+    char *path = malloc(dlen + 1 + nlen + 1);
+    if (!path)
+        return;
+    if (dlen) {
+        memcpy(path, dir, dlen);
+        path[dlen] = '/';
+        memcpy(path + dlen + 1, q + 1, nlen);
+        path[dlen + 1 + nlen] = 0;
+    } else {
+        memcpy(path, q + 1, nlen);
+        path[nlen] = 0;
+    }
+    char *text = read_in_file(path);
+    if (text) {
+        char *slash = strrchr(path, '/');
+        if (slash) *slash = 0;
+        parse_database_in(db, text, True, slash ? path : NULL, depth + 1);
+        free(text);
+    }
+    free(path);
+}
+
 static void
 parse_database(XrmDatabase db, const char *data, Bool doall)
+{
+    parse_database_in(db, data, doall, NULL, 0);
+}
+
+static void
+parse_database_in(XrmDatabase db, const char *data, Bool doall,
+                  const char *dir, int depth)
 {
     const char *p = data;
 
@@ -815,9 +842,22 @@ parse_database(XrmDatabase db, const char *data, Bool doall)
                 p++;
             continue;
         }
-        if (*p == '#') {          /* directive (#include etc.): ignored */
+        if (*p == '#') {          /* directive: only #include is known */
+            const char *start = p;
             while (*p && *p != '\n')
                 p++;
+            const char *k = start + 1;
+            while (*k == ' ' || *k == '\t') k++;
+            if (strncmp(k, "include", 7) == 0) {
+                size_t l = (size_t)(p - start);
+                char *line = malloc(l + 1);
+                if (line) {
+                    memcpy(line, start, l);
+                    line[l] = 0;
+                    include_file(db, line, dir, depth);
+                    free(line);
+                }
+            }
             continue;
         }
         {
@@ -895,7 +935,13 @@ XrmGetFileDatabase(const char *filename)
         free(str);
         return NULL;
     }
-    parse_database(db, str, True);
+    {
+        char *dir = strdup(filename);
+        char *slash = dir ? strrchr(dir, '/') : NULL;
+        if (slash) *slash = 0;
+        parse_database_in(db, str, True, slash ? dir : NULL, 0);
+        free(dir);
+    }
     free(str);
     return db;
 }
@@ -1001,7 +1047,13 @@ XrmCombineFileDatabase(const char *filename, XrmDatabase *target, Bool override)
         free(str);
         return 0;
     }
-    parse_database(db, str, True);
+    {
+        char *dir = strdup(filename);
+        char *slash = dir ? strrchr(dir, '/') : NULL;
+        if (slash) *slash = 0;
+        parse_database_in(db, str, True, slash ? dir : NULL, 0);
+        free(dir);
+    }
     free(str);
 
     if (!override)
@@ -1088,52 +1140,35 @@ XrmGetResource(XrmDatabase db, const char *name_str, const char *class_str,
     return result;
 }
 
+/* The search list is the query itself, kept in the caller's array:
+ *   [0] a marker, [1] the database, [2] n, then n names and n classes.
+ * As in libX11, False means the array is too short, and Xt grows it and
+ * asks again -- so nothing is allocated (one allocation per call used to
+ * accumulate on the database for its lifetime). */
+static char search_marker;
+
 Bool
 XrmQGetSearchList(XrmDatabase db, XrmNameList names, XrmClassList classes,
                   XrmSearchList list_return, int list_length)
 {
-    struct SearchCtx *ctx;
-    int n;
-    int i;
+    int n = quark_list_len(names);
 
-    if (!list_return || list_length < 2)
+    if (!list_return || list_length < 1)
         return False;
     if (!db) {
         list_return[0] = (XrmHashTable)NULL;
-        list_return[1] = (XrmHashTable)NULL;
         return True;
     }
-
-    ctx = (struct SearchCtx *)calloc(1, sizeof(*ctx));
-    if (!ctx) {
-        list_return[0] = (XrmHashTable)NULL;
-        list_return[1] = (XrmHashTable)NULL;
-        return True;
+    if (list_length < 3 + 2 * n)
+        return False;
+    list_return[0] = (XrmHashTable)(void *)&search_marker;
+    list_return[1] = (XrmHashTable)(void *)db;
+    list_return[2] = (XrmHashTable)(intptr_t)n;
+    for (int i = 0; i < n; i++) {
+        list_return[3 + i] = (XrmHashTable)(intptr_t)names[i];
+        list_return[3 + n + i] =
+            (XrmHashTable)(intptr_t)(classes ? classes[i] : NULLQUARK);
     }
-    n = quark_list_len(names);
-    ctx->db = db;
-    ctx->n = n;
-    ctx->names = (XrmQuark *)malloc((size_t)(n + 1) * sizeof(XrmQuark));
-    ctx->classes = (XrmQuark *)malloc((size_t)(n + 1) * sizeof(XrmQuark));
-    if (!ctx->names || !ctx->classes) {
-        free(ctx->names);
-        free(ctx->classes);
-        free(ctx);
-        list_return[0] = (XrmHashTable)NULL;
-        list_return[1] = (XrmHashTable)NULL;
-        return True;
-    }
-    for (i = 0; i < n; i++) {
-        ctx->names[i] = names[i];
-        ctx->classes[i] = classes ? classes[i] : NULLQUARK;
-    }
-    ctx->names[n] = NULLQUARK;
-    ctx->classes[n] = NULLQUARK;
-    ctx->next = db->searches;
-    db->searches = ctx;
-
-    list_return[0] = (XrmHashTable)(void *)ctx;
-    list_return[1] = (XrmHashTable)NULL;
     return True;
 }
 
@@ -1141,16 +1176,7 @@ Bool
 XrmQGetSearchResource(XrmSearchList searchList, XrmName name, XrmClass class,
                       XrmRepresentation *pType, XrmValue *pValue)
 {
-    struct SearchCtx *ctx = NULL;
-    XrmQuark *names;
-    XrmQuark *classes;
-    int n;
-    int i;
-    Bool result;
-
-    if (searchList)
-        ctx = (struct SearchCtx *)(void *)searchList[0];
-    if (!ctx || !ctx->db) {
+    if (!searchList || searchList[0] != (XrmHashTable)(void *)&search_marker) {
         if (pType)
             *pType = NULLQUARK;
         if (pValue) {
@@ -1159,34 +1185,28 @@ XrmQGetSearchResource(XrmSearchList searchList, XrmName name, XrmClass class,
         }
         return False;
     }
-
-    n = ctx->n;
-    names = (XrmQuark *)malloc((size_t)(n + 2) * sizeof(XrmQuark));
-    classes = (XrmQuark *)malloc((size_t)(n + 2) * sizeof(XrmQuark));
-    if (!names || !classes) {
-        free(names);
-        free(classes);
-        if (pType)
-            *pType = NULLQUARK;
-        if (pValue) {
-            pValue->addr = (XPointer)NULL;
-            pValue->size = 0;
+    XrmDatabase db = (XrmDatabase)(void *)searchList[1];
+    int n = (int)(intptr_t)searchList[2];
+    XrmQuark nstack[32], cstack[32];
+    XrmQuark *qn = nstack, *qc = cstack;
+    if (n + 2 > 32) {
+        qn = malloc((size_t)(n + 2) * sizeof *qn);
+        qc = malloc((size_t)(n + 2) * sizeof *qc);
+        if (!qn || !qc) {
+            free(qn); free(qc);
+            if (pType) *pType = NULLQUARK;
+            if (pValue) { pValue->addr = NULL; pValue->size = 0; }
+            return False;
         }
-        return False;
     }
-    for (i = 0; i < n; i++) {
-        names[i] = ctx->names[i];
-        classes[i] = ctx->classes[i];
+    for (int i = 0; i < n; i++) {
+        qn[i] = (XrmQuark)(intptr_t)searchList[3 + i];
+        qc[i] = (XrmQuark)(intptr_t)searchList[3 + n + i];
     }
-    names[n] = name;
-    classes[n] = class;
-    names[n + 1] = NULLQUARK;
-    classes[n + 1] = NULLQUARK;
-
-    result = XrmQGetResource(ctx->db, names, classes, pType, pValue);
-
-    free(names);
-    free(classes);
+    qn[n] = name;  qc[n] = class;
+    qn[n + 1] = NULLQUARK; qc[n + 1] = NULLQUARK;
+    Bool result = XrmQGetResource(db, qn, qc, pType, pValue);
+    if (qn != nstack) { free(qn); free(qc); }
     return result;
 }
 

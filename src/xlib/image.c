@@ -122,16 +122,23 @@ static XImage *img_create_image(struct _XDisplay *d, Visual *v, unsigned int dep
 static XImage *img_sub_image(XImage *img, int x, int y, unsigned int w,
                              unsigned int h)
 {
+    /* As in libX11, the result owns a copy of the pixels (callers hand it to
+     * XDestroyImage), and the part of the rectangle outside the source is
+     * left zero. */
     if (!img) return NULL;
-    int bpp = img->bits_per_pixel;
-    if (bpp < 8) return NULL;   /* bit offsets unsupported */
-    int bytes = bpp / 8;
-    char *base = img->data + (long)y * img->bytes_per_line + (long)x * bytes;
     XImage *sub = XCreateImage(NULL, NULL, img->depth, img->format, 0, NULL,
-                               w, h, img->bitmap_pad, img->bytes_per_line);
-    free(sub->data);
-    sub->data = base;             /* borrowed; caller must not destroy naively */
-    sub->obdata = NULL;
+                               w, h, img->bitmap_pad, 0);
+    if (!sub || !sub->data) { if (sub) img_destroy(sub); return NULL; }
+    sub->red_mask = img->red_mask;
+    sub->green_mask = img->green_mask;
+    sub->blue_mask = img->blue_mask;
+    if (x < 0 || y < 0) return sub;
+    int cw = (int)w, ch = (int)h;
+    if (x + cw > img->width)  cw = img->width - x;
+    if (y + ch > img->height) ch = img->height - y;
+    for (int r = 0; r < ch; r++)
+        for (int c = 0; c < cw; c++)
+            img_put_pixel(sub, c, r, img_get_pixel(img, x + c, y + r));
     return sub;
 }
 
@@ -204,6 +211,16 @@ int XPutImage(Display *d, Drawable dr, GC gc, XImage *img,
               unsigned int width, unsigned int height)
 {
     if (!img) return 0;
+    /* As in libX11, the source rectangle is clipped to the image; a negative
+     * source offset moves the destination with it. */
+    int w = (int)width, h = (int)height;
+    if (src_x < 0) { dest_x -= src_x; w += src_x; src_x = 0; }
+    if (src_y < 0) { dest_y -= src_y; h += src_y; src_y = 0; }
+    if (src_x + w > img->width)  w = img->width - src_x;
+    if (src_y + h > img->height) h = img->height - src_y;
+    if (w <= 0 || h <= 0) return 1;
+    width = (unsigned int)w;
+    height = (unsigned int)h;
     /* A 1-bit image (XYBitmap, or a depth-1 XImage) carries bit values, not
      * pixels: the X server draws set bits in the GC foreground and clear bits
      * in the GC background.  Treating the 0/1 values as pixels made every
@@ -220,7 +237,8 @@ int XPutImage(Display *d, Drawable dr, GC gc, XImage *img,
     mw_drawable_surface(d, dr, NULL, NULL, &ddepth);
     int keep_alpha = (ddepth >= 32);
     MwSurface *tmp = mw_surface_create((int)width, (int)height);
-    uint32_t *td = (uint32_t *)mw_surface_data(tmp);
+    uint32_t *td = tmp ? (uint32_t *)mw_surface_data(tmp) : NULL;
+    if (!td) { mw_surface_destroy(tmp); return 0; }
     int tstride = mw_surface_stride(tmp) / 4;
     for (unsigned int j = 0; j < height; j++)
         for (unsigned int i = 0; i < width; i++) {

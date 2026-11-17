@@ -127,8 +127,10 @@ XRectangle *XShapeGetRectangles(Display *d, Window w, int kind, int *count,
     if (count) *count = 0;
     if (ordering) *ordering = 0;
     if (!win) return NULL;
+    /* A copy, not a struct assignment: the fini below would otherwise free
+     * the window's live shape. */
     pixman_region32_t reg;
-    if (win->has_shape) reg = win->shape;
+    if (win->has_shape) { pixman_region32_init(&reg); pixman_region32_copy(&reg, &win->shape); }
     else pixman_region32_init_rect(&reg, 0, 0, (unsigned)win->w, (unsigned)win->h);
     int n = 0;
     pixman_box32_t *boxes = pixman_region32_rectangles(&reg, &n);

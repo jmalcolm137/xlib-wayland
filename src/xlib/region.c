@@ -1035,3 +1035,23 @@ Region XPolygonRegion(XPoint *points, int n, int fill_rule)
     mw_free_sll(sll.next);
     return region;
 }
+
+/* The region's rectangles as XRectangles (for XSetRegion).  Returns the
+ * count, with *out malloc'd (NULL when empty), or -1 on allocation failure. */
+int mw_region_rectangles(Region r, XRectangle **out)
+{
+    *out = NULL;
+    int n = 0;
+    pixman_box32_t *b = pixman_region32_rectangles(&r->pix, &n);
+    if (n <= 0) return 0;
+    XRectangle *v = malloc(sizeof *v * (size_t)n);
+    if (!v) return -1;
+    for (int i = 0; i < n; i++) {
+        v[i].x = (short)b[i].x1;
+        v[i].y = (short)b[i].y1;
+        v[i].width = (unsigned short)(b[i].x2 - b[i].x1);
+        v[i].height = (unsigned short)(b[i].y2 - b[i].y1);
+    }
+    *out = v;
+    return n;
+}

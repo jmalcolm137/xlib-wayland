@@ -232,7 +232,7 @@ static int buffer_create(MwToplevel *tl, int w, int h)
         tl->viewport = wp_viewporter_get_viewport(dp->viewporter, tl->surface);
     bool crop = tl->viewport != NULL;
 
-    bool keep = crop && tl->bufs[0].buffer &&
+    bool keep = crop && tl->bufs[0].buffer && tl->buf_scale == sc &&
                 tl->cap_w >= pw && tl->cap_h >= ph;
     if (!keep) {
         int cw = pw, ch = ph;
@@ -245,6 +245,7 @@ static int buffer_create(MwToplevel *tl, int w, int h)
         if (buf_alloc(&tl->bufs[1], tl, 1, cw, ch, sc) != 0) return -1;
         tl->cap_w = cw;
         tl->cap_h = ch;
+        tl->buf_scale = sc;
     }
     tl->width = w;
     tl->height = h;
@@ -895,7 +896,7 @@ void mw_toplevel_map(MwToplevel *tl)
         XDisplayImpl *dp = MWD(tl->win->d);
         uint32_t serial = dp->last_press_serial ? dp->last_press_serial
                                                 : dp->last_input_serial;
-        if (tl->xdg_popup && dp->wl_seat && serial && proxy_version(tl->xdg_popup) >= 3) {
+        if (tl->xdg_popup && dp->wl_seat && serial) {   /* grab: since v1 */
             xdg_popup_grab(tl->xdg_popup, dp->wl_seat, serial);
             if (getenv("MW_TRACE"))
                 fprintf(stderr, "MW: xdg_popup_grab 0x%lx serial=%u\n", tl->win->id, serial);
@@ -1044,13 +1045,16 @@ static void draw_titlebar(MwToplevel *tl)
     mw_rect(c, w - 11, 8, 1, 8); mw_fill_path(c);
     /* title text */
     Display *d = tl->win->d;
-    char *title = NULL;
+    const char *title = "Motif";
+    int title_len = 5;
     Atom wmname = d ? mw_intern_atom(d, "WM_NAME", True) : None;
     MwProp *p = (d && wmname) ? mw_get_prop(d, tl->win, wmname) : NULL;
-    if (p && p->data && p->format == 8) title = (char *)p->data;
-    if (!title) title = (char *)"Motif";
+    if (p && p->data && p->format == 8) {
+        title = (const char *)p->data;
+        title_len = (int)strnlen(title, p->nbytes);
+    }
     mw_set_source_argb(c, 0xffe8e8e8);
-    mw_show_utf8(c, font, title, (int)strlen(title), 8, tl->tb_h - 7);
+    mw_show_utf8(c, font, title, title_len, 8, tl->tb_h - 7);
     mw_canvas_end(c);
 }
 
@@ -1079,6 +1083,11 @@ void mw_toplevel_render(MwToplevel *tl)
     if (!tl || !tl->mapped) return;
     if (!tl->configured) { tl->dirty = true; return; }
 
+    /* The output scale can change at runtime (the window moved to another
+     * monitor, or the compositor's scale changed): buffers made for the old
+     * scale are too small to wrap at the new one. */
+    if (tl->bufs[0].buffer && tl->buf_scale != mw_display_scale(tl->win->d))
+        buffer_create(tl, tl->width, tl->height);
     int w = tl->width, h = tl->height;
     int tb = tl->tb_h;
 

@@ -290,12 +290,16 @@ static Status xkb_build_map(Display *dpy, XkbDescPtr xkb, unsigned int deviceSpe
     XDisplayImpl *dp = MWD(dpy);
     struct xkb_keymap *km = dp ? dp->xkb_keymap : NULL;
 
-    KeyCode min = 8, max = 255;
+    /* int, not KeyCode: with max == 255 a KeyCode loop counter wraps and
+     * never ends, and casting xkbcommon's keycodes (evdev goes up to 708)
+     * before clamping truncated the range. */
+    int min = 8, max = 255;
     if (km) {
-        KeyCode kmin = (KeyCode)xkb_keymap_min_keycode(km);
-        KeyCode kmax = (KeyCode)xkb_keymap_max_keycode(km);
-        if (kmin >= 8) min = kmin;
-        if (kmax <= 255 && kmax >= min) max = kmax;
+        xkb_keycode_t kmin = xkb_keymap_min_keycode(km);
+        xkb_keycode_t kmax = xkb_keymap_max_keycode(km);
+        if (kmin >= 8 && kmin <= 255) min = (int)kmin;
+        max = kmax > 255 ? 255 : (int)kmax;
+        if (max < min) max = min;
     }
 
     xkb->dpy = dpy;
@@ -345,7 +349,7 @@ static Status xkb_build_map(Display *dpy, XkbDescPtr xkb, unsigned int deviceSpe
     map->types[1].map[1].mods.mask = ShiftMask;
 
     size_t nsyms = 0;
-    for (KeyCode k = min; k <= max; k++) {
+    for (int k = min; k <= max; k++) {
         int ng = 1, width = 1;
         if (km) {
             ng = xkb_keymap_num_layouts_for_key(km, k);
@@ -366,7 +370,7 @@ static Status xkb_build_map(Display *dpy, XkbDescPtr xkb, unsigned int deviceSpe
     map->size_syms = map->num_syms = (unsigned short)nsyms;
 
     size_t off = 0;
-    for (KeyCode k = min; k <= max; k++) {
+    for (int k = min; k <= max; k++) {
         int ng = 1, width = 1;
         if (km) {
             ng = xkb_keymap_num_layouts_for_key(km, k);
@@ -584,6 +588,11 @@ void XkbFreeKeyboard(XkbDescPtr xkb, unsigned int which, Bool freeDesc)
     (void)which;
     if (!xkb) return;
     if (xkb->map) {
+        if (xkb->map->types)
+            for (int i = 0; i < xkb->map->num_types; i++) {
+                free(xkb->map->types[i].map);
+                free(xkb->map->types[i].preserve);
+            }
         free(xkb->map->types);
         free(xkb->map->syms);
         free(xkb->map->key_sym_map);

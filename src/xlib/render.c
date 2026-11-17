@@ -103,6 +103,7 @@ typedef struct {
     MwGlyph  *tab;                   /* open-addressing hash table */
     int       cap;                   /* power of two, 0 = empty */
     int       used;
+    int       refs;                  /* IDs naming this set (ReferenceGlyphSet) */
 } MwGlyphSet;
 
 int mw_render_opcode(void) { return 138; }
@@ -607,6 +608,52 @@ static uint32_t manual_op(int op, int component, int dsta_opaque, int dstfmt,
  * the Disjoint/Conjoint operators, and component-alpha masks (where the mask's
  * R/G/B/A channels weight the source's R/G/B/A independently).  Mirrors
  * rendercheck's reference (ops.c do_composite) for every operator. */
+/* CPClipMask as an ARGB image covering destination [xd,xd+w) x [yd,yd+h):
+ * alpha 255 where drawing is allowed.  The protocol names a Pixmap (a depth-1
+ * bitmap: bit 0 decides; deeper pixmaps use their alpha); a Picture ID is
+ * accepted too, as some clients pass one.  The mask's origin is the clip
+ * origin, and outside it nothing is drawn. */
+static cairo_surface_t *clip_mask_image(Display *d, MwRenderPicture *dst,
+                                        int xd, int yd, int w, int h)
+{
+    if (!dst->has_clip_mask || w <= 0 || h <= 0) return NULL;
+    MwSurface *ms = NULL;
+    bool bit = false;
+    MwRenderPicture *cmp = pic(d, dst->clip_mask);
+    if (cmp) {
+        ms = pic_surface(d, cmp);
+    } else {
+        int mw0, mh0, depth = 0;
+        ms = mw_drawable_surface(d, dst->clip_mask, &mw0, &mh0, &depth);
+        bit = depth == 1;
+    }
+    cairo_surface_t *out = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    uint32_t *op = (uint32_t *)cairo_image_surface_get_data(out);
+    int ost = cairo_image_surface_get_stride(out) / 4;
+    memset(op, 0, (size_t)ost * 4 * (size_t)h);
+    if (ms) {
+        cairo_surface_t *cs = mw_surface_native(ms);
+        cairo_surface_flush(cs);
+        const uint32_t *mp = (const uint32_t *)cairo_image_surface_get_data(cs);
+        int mst = cairo_image_surface_get_stride(cs) / 4;
+        int sc = mw_surface_scale(ms);
+        int mw = mw_surface_width(ms), mh = mw_surface_height(ms);
+        for (int j = 0; j < h; j++) {
+            int my = yd + j - dst->cm_y;
+            if (my < 0 || my >= mh) continue;
+            for (int i = 0; i < w; i++) {
+                int mx = xd + i - dst->cm_x;
+                if (mx < 0 || mx >= mw) continue;
+                uint32_t v = mp[(size_t)(my * sc) * mst + (size_t)(mx * sc)];
+                uint32_t a = bit ? ((v & 1u) ? 0xff : 0) : (v >> 24);
+                op[(size_t)j * ost + i] = a * 0x01010101u;
+            }
+        }
+    }
+    cairo_surface_mark_dirty(out);
+    return out;
+}
+
 static void composite_manual(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
                              MwRenderPicture *mask, int op,
                              int xs, int ys, int xm, int ym,
@@ -627,30 +674,15 @@ static void composite_manual(Display *d, MwRenderPicture *dst, MwRenderPicture *
 
     cairo_surface_t *mtmp = NULL;
     if (mask) {
-        MwSurface *ms = pic_surface(d, mask);
-        cairo_surface_t *mcs = ms ? mw_surface_native(ms) : NULL;
-        if (mcs) {
-            mtmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-            cairo_t *mc = cairo_create(mtmp);
-            cairo_set_operator(mc, CAIRO_OPERATOR_SOURCE);
-            cairo_pattern_t *mp = cairo_pattern_create_for_surface(mcs);
-            cairo_matrix_t mm;
-            cairo_matrix_init_translate(&mm, xm, ym);
-            if (mask->have_transform) {
-                cairo_matrix_t t, r;
-                xf_matrix(&t, &mask->xf);
-                cairo_matrix_multiply(&r, &mm, &t);
-                mm = r;
-            }
-            cairo_pattern_set_matrix(mp, &mm);
-            cairo_pattern_set_extend(mp, cairo_extend(mask->repeat));
-            cairo_pattern_set_filter(mp, picture_filter(mask));
-            cairo_set_source(mc, mp);
-            cairo_paint(mc);
-            cairo_pattern_destroy(mp);
-            cairo_destroy(mc);
-            cairo_surface_flush(mtmp);
-        }
+        /* Any picture can be a mask -- solid fills and gradients included,
+         * not just drawables. */
+        mtmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+        cairo_t *mc = cairo_create(mtmp);
+        cairo_set_operator(mc, CAIRO_OPERATOR_SOURCE);
+        set_source(d, mc, mask, 0, 0, xm, ym);
+        cairo_paint(mc);
+        cairo_destroy(mc);
+        cairo_surface_flush(mtmp);
     }
 
     const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(stmp);
@@ -664,28 +696,7 @@ static void composite_manual(Display *d, MwRenderPicture *dst, MwRenderPicture *
 
     /* CPClipMask: an alpha clip mask on the destination picture, applied as a
      * multiplier on the source. */
-    cairo_surface_t *ctmp = NULL;
-    if (dst->has_clip_mask) {
-        MwRenderPicture *cmp = pic(d, dst->clip_mask);
-        MwSurface *cms = cmp ? pic_surface(d, cmp) : NULL;
-        cairo_surface_t *ccs = cms ? mw_surface_native(cms) : NULL;
-        if (ccs) {
-            ctmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-            cairo_t *cc = cairo_create(ctmp);
-            cairo_set_operator(cc, CAIRO_OPERATOR_SOURCE);
-            cairo_pattern_t *cp = cairo_pattern_create_for_surface(ccs);
-            cairo_matrix_t cm;
-            cairo_matrix_init_translate(&cm, dst->cm_x, dst->cm_y);
-            cairo_pattern_set_matrix(cp, &cm);
-            cairo_pattern_set_extend(cp, cairo_extend(cmp->repeat));
-            cairo_pattern_set_filter(cp, picture_filter(cmp));
-            cairo_set_source(cc, cp);
-            cairo_paint(cc);
-            cairo_pattern_destroy(cp);
-            cairo_destroy(cc);
-            cairo_surface_flush(ctmp);
-        }
-    }
+    cairo_surface_t *ctmp = clip_mask_image(d, dst, xd, yd, w, h);
     const uint32_t *cp_px = ctmp ? (const uint32_t *)cairo_image_surface_get_data(ctmp) : NULL;
     int cstride = ctmp ? cairo_image_surface_get_stride(ctmp) / 4 : 0;
 
@@ -768,56 +779,20 @@ static void composite_manual_xform(Display *d, MwRenderPicture *dst,
 
     cairo_surface_t *mtmp = NULL;
     if (mask) {
-        MwSurface *ms = pic_surface(d, mask);
-        cairo_surface_t *mcs = ms ? mw_surface_native(ms) : NULL;
-        if (mcs) {
-            mtmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-            cairo_t *mc = cairo_create(mtmp);
-            cairo_set_operator(mc, CAIRO_OPERATOR_SOURCE);
-            cairo_pattern_t *mp = cairo_pattern_create_for_surface(mcs);
-            cairo_matrix_t mm;
-            cairo_matrix_init_translate(&mm, xm, ym);
-            if (mask->have_transform) {
-                cairo_matrix_t mt, r;
-                xf_matrix(&mt, &mask->xf);
-                cairo_matrix_multiply(&r, &mm, &mt);
-                mm = r;
-            }
-            cairo_pattern_set_matrix(mp, &mm);
-            cairo_pattern_set_extend(mp, cairo_extend(mask->repeat));
-            cairo_pattern_set_filter(mp, picture_filter(mask));
-            cairo_set_source(mc, mp);
-            cairo_paint(mc);
-            cairo_pattern_destroy(mp);
-            cairo_destroy(mc);
-            cairo_surface_flush(mtmp);
-            if (fmt_legacy(mask->format))
-                fmt_to_argb((uint32_t *)cairo_image_surface_get_data(mtmp), (size_t)w * h, mask->format);
-        }
+        /* Any picture can be a mask -- solid fills and gradients included,
+         * not just drawables. */
+        mtmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+        cairo_t *mc = cairo_create(mtmp);
+        cairo_set_operator(mc, CAIRO_OPERATOR_SOURCE);
+        set_source(d, mc, mask, 0, 0, xm, ym);
+        cairo_paint(mc);
+        cairo_destroy(mc);
+        cairo_surface_flush(mtmp);
+        if (fmt_legacy(mask->format))
+            fmt_to_argb((uint32_t *)cairo_image_surface_get_data(mtmp), (size_t)w * h, mask->format);
     }
 
-    cairo_surface_t *ctmp = NULL;
-    if (dst->has_clip_mask) {
-        MwRenderPicture *cmp = pic(d, dst->clip_mask);
-        MwSurface *cms = cmp ? pic_surface(d, cmp) : NULL;
-        cairo_surface_t *ccs = cms ? mw_surface_native(cms) : NULL;
-        if (ccs) {
-            ctmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
-            cairo_t *cc = cairo_create(ctmp);
-            cairo_set_operator(cc, CAIRO_OPERATOR_SOURCE);
-            cairo_pattern_t *cp = cairo_pattern_create_for_surface(ccs);
-            cairo_matrix_t cm;
-            cairo_matrix_init_translate(&cm, dst->cm_x, dst->cm_y);
-            cairo_pattern_set_matrix(cp, &cm);
-            cairo_pattern_set_extend(cp, cairo_extend(cmp->repeat));
-            cairo_pattern_set_filter(cp, picture_filter(cmp));
-            cairo_set_source(cc, cp);
-            cairo_paint(cc);
-            cairo_pattern_destroy(cp);
-            cairo_destroy(cc);
-            cairo_surface_flush(ctmp);
-        }
-    }
+    cairo_surface_t *ctmp = clip_mask_image(d, dst, xd, yd, w, h);
 
     /* The destination, sampled into picture space through the inverse map.
      * ptmp(i,j) must hold dcs(T(xd+i, yd+j)), so the source is offset by
@@ -1102,45 +1077,58 @@ static void glyph_remove(MwGlyphSet *gs, CARD32 gid)
     glyph_rehash(gs, gs->cap);   /* keep the probe chains valid */
 }
 
-/* Build an ARGB32 surface from an A8 or A1 glyph image (premultiplied white). */
+/* Bytes per row of a glyph image, as the server lays it out: A1 rows are
+ * padded to the 32-bit bitmap scanline pad, A8 rows to 4 bytes, and ARGB32
+ * is four bytes a pixel. */
+static size_t glyph_stride(int format, int w)
+{
+    if (format == FMT_A1) return (size_t)((w + 31) / 32) * 4;
+    if (format == FMT_A8) return (size_t)((w + 3) & ~3);
+    return (size_t)w * 4;
+}
+
+/* Build an ARGB32 mask surface from a glyph image: A1/A8 become
+ * premultiplied white of that coverage, ARGB32 is taken as it is. */
 static MwSurface *glyph_surface(const unsigned char *data, size_t avail,
-                                int w, int h, int depth1)
+                                int w, int h, int format)
 {
     if (w <= 0 || h <= 0) return NULL;
-    int stride = (w + 3) & ~3;
-    size_t need = depth1 ? ((w + 7) / 8) * h : (size_t)stride * h;
-    if (avail < need) return NULL;
+    size_t stride = glyph_stride(format, w);
+    if (avail < stride * (size_t)h) return NULL;
     MwSurface *s = mw_surface_create(w, h);
     if (!s) return NULL;
     uint32_t *px = mw_surface_data(s);
     int ds = mw_surface_stride(s) / 4;
     for (int y = 0; y < h; y++) {
+        const unsigned char *row = data + (size_t)y * stride;
         for (int x = 0; x < w; x++) {
-            unsigned a;
-            if (depth1) a = (data[y * ((w + 7) / 8) + (x >> 3)] >> (x & 7)) & 1 ? 255 : 0;
-            else        a = data[(size_t)y * stride + x];
-            px[(size_t)y * ds + x] = ((uint32_t)a << 24) | ((uint32_t)a << 16) |
-                                     ((uint32_t)a << 8) | a;
+            uint32_t v;
+            if (format == FMT_A1) {
+                unsigned a = (row[x >> 3] >> (x & 7)) & 1 ? 255 : 0;
+                v = a * 0x01010101u;
+            } else if (format == FMT_A8) {
+                v = row[x] * 0x01010101u;
+            } else {
+                memcpy(&v, row + (size_t)x * 4, 4);
+            }
+            px[(size_t)y * ds + x] = v;
         }
     }
     mw_surface_mark_dirty(s);
-    if (getenv("MW_DUMP_GLYPHS")) {
-        static int n = 0;
-        char path[128];
-        snprintf(path, sizeof path, "/tmp/opencode/glyphs/g-%dx%d-%03d.png", w, h, n++);
-        mw_surface_write_png(s, path);
-    }
     return s;
 }
 
-static void free_glyphset(Display *d, MwGlyphSet *gs)
+/* Drop one ID's reference; the glyphs go with the last one. */
+static void release_glyphset(Display *d, XID id)
 {
+    MwGlyphSet *gs = glyphset(d, id);
     if (!gs) return;
+    mw_unregister(d, id);
+    if (--gs->refs > 0) return;
     for (int i = 0; i < gs->cap; i++)
         if (gs->tab[i].used && gs->tab[i].surface)
             mw_surface_destroy(gs->tab[i].surface);
     free(gs->tab);
-    mw_unregister(d, gs->id);
     free(gs);
 }
 
@@ -1204,8 +1192,12 @@ static void req_clip_rectangles(Display *d, const unsigned char *b, size_t len)
         fprintf(stderr, "\n");
     }
     if (p->has_clip) { pixman_region32_fini(&p->clip); p->has_clip = 0; }
-    if (n == 0) return;
+    p->has_clip_mask = 0;               /* the rectangles replace a mask */
+    p->clip_mask = None;
+    /* An empty list is still a clip: it allows nothing. */
     pixman_region32_init(&p->clip);
+    p->has_clip = 1;
+    if (n == 0) return;
     const short *rp = (const short *)(b + sz_xRenderSetPictureClipRectanglesReq);
     for (size_t i = 0; i < n; i++) {
         int x = rp[i*4+0] + r->xOrigin;
@@ -1214,7 +1206,6 @@ static void req_clip_rectangles(Display *d, const unsigned char *b, size_t len)
         int h = (unsigned short)rp[i*4+3];
         pixman_region32_union_rect(&p->clip, &p->clip, x, y, (unsigned)w, (unsigned)h);
     }
-    p->has_clip = 1;
 }
 
 static void req_composite(Display *d, const unsigned char *b, size_t len)
@@ -1319,28 +1310,23 @@ static void req_create_glyphset(Display *d, const unsigned char *b)
     if (!gs) return;
     gs->id = r->gsid;
     gs->format = (int)r->format;
+    gs->refs = 1;
     mw_register(d, gs->id, MW_OBJ_GLYPHSET, gs);
 }
 
+/* Another ID for the same glyph set: the glyphs are shared. */
 static void req_reference_glyphset(Display *d, const unsigned char *b)
 {
     const xRenderReferenceGlyphSetReq *r = (const void *)b;
-    MwGlyphSet *src = glyphset(d, r->existing);
-    MwGlyphSet *gs = calloc(1, sizeof *gs);
+    MwGlyphSet *gs = glyphset(d, r->existing);
     if (!gs) return;
-    gs->id = r->gsid;
-    gs->format = src ? src->format : FMT_A8;
-    if (src) {
-        /* Share the glyph surfaces: reference the same pointers (do not free
-         * twice by marking them shared).  Simpler: allocate an empty set. */
-        (void)src;
-    }
-    mw_register(d, gs->id, MW_OBJ_GLYPHSET, gs);
+    gs->refs++;
+    mw_register(d, r->gsid, MW_OBJ_GLYPHSET, gs);
 }
 
 static void req_free_glyphset(Display *d, const unsigned char *b)
 {
-    free_glyphset(d, glyphset(d, ((const xRenderFreeGlyphSetReq *)b)->glyphset));
+    release_glyphset(d, ((const xRenderFreeGlyphSetReq *)b)->glyphset);
 }
 
 static void req_free_glyphs(Display *d, const unsigned char *b, size_t len)
@@ -1354,38 +1340,38 @@ static void req_free_glyphs(Display *d, const unsigned char *b, size_t len)
         glyph_remove(gs, ids[i]);
 }
 
+/* AddGlyphs carries all glyph ids, then all xGlyphInfos, then all the
+ * images (each a whole number of 4-byte units), as libXrender sends them. */
 static void req_add_glyphs(Display *d, const unsigned char *b, size_t len)
 {
     const xRenderAddGlyphsReq *r = (const void *)b;
+    if (len < sz_xRenderAddGlyphsReq) return;
     MwGlyphSet *gs = glyphset(d, r->glyphset);
     if (!gs) return;
-    const unsigned char *p = b + sz_xRenderAddGlyphsReq;
+    size_t n = r->nglyphs;
+    const unsigned char *base = b + sz_xRenderAddGlyphsReq;
     const unsigned char *end = b + len;
-    int depth1 = (gs->format == FMT_A1);
-    for (CARD32 i = 0; i < r->nglyphs && p + 16 <= end; i++) {
+    if (n == 0 || (size_t)(end - base) / 16 < n) return;
+    const unsigned char *ids = base, *infos = base + 4 * n;
+    const unsigned char *img = base + 16 * n;
+    for (size_t i = 0; i < n; i++) {
         CARD32 gid;
         xGlyphInfo info;
-        memcpy(&gid, p, 4);
-        memcpy(&info, p + 4, 12);
-        p += 16;
-        int stride = (info.width + 3) & ~3;
-        size_t need = depth1 ? ((info.width + 7) / 8) * info.height
-                             : (size_t)stride * info.height;
-        if (p + need > end) break;
+        memcpy(&gid, ids + 4 * i, 4);
+        memcpy(&info, infos + 12 * i, 12);
+        size_t need = glyph_stride(gs->format, info.width) * info.height;
+        need = (need + 3) & ~(size_t)3;
+        if (need > (size_t)(end - img)) break;
         MwGlyph *g = glyph_slot(gs, gid, 1);
-        if (getenv("MW_TRACE_RENDER") && i == 0)
-            fprintf(stderr, "MW: addglyph gid=%u w=%u h=%u x=%d y=%d xOff=%d yOff=%d d0=%d\n",
-                    (unsigned)gid, info.width, info.height,
-                    (int)info.x, (int)info.y,
-                    (int)info.xOff, (int)info.yOff, p[0]);
         if (g) {
             if (g->surface) mw_surface_destroy(g->surface);
-            g->surface = glyph_surface(p, need, info.width, info.height, depth1);
+            g->surface = glyph_surface(img, need, info.width, info.height,
+                                       gs->format);
             g->w = info.width; g->h = info.height;
             g->gx = info.xOff; g->gy = info.yOff;   /* advance */
             g->gox = info.x; g->goy = info.y;       /* bearing */
         }
-        p += need;
+        img += need;
     }
 }
 
@@ -1512,62 +1498,59 @@ static cairo_surface_t *poly_mask_new(MwSurface *ds, cairo_t **out)
     return mask;
 }
 
+/* Composite `src` through a polygon coverage mask.  As in the X server, only
+ * the polygons' bounding box is touched (with PictOpSrc, the rest of the
+ * destination is not cleared), and a source pixel is taken at
+ * src + (dst - first vertex). */
 static void apply_poly_mask(Display *d, MwRenderPicture *dst, MwRenderPicture *src,
-                            int op, cairo_surface_t *mask, int xs, int ys)
+                            int op, cairo_surface_t *mask, cairo_t *mc,
+                            int xs, int ys, int xfirst, int yfirst)
 {
+    double ex1, ey1, ex2, ey2;
+    cairo_fill_extents(mc, &ex1, &ey1, &ex2, &ey2);
+    cairo_fill(mc);
+    cairo_destroy(mc);
+    cairo_surface_flush(mask);
     MwSurface *ds = pic_surface(d, dst);
     cairo_surface_t *dcs = ds ? mw_surface_native(ds) : NULL;
     if (!dcs || !mask) return;
     int mw = mw_surface_width(ds), mh = mw_surface_height(ds);
-    cairo_surface_t *tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, mw, mh);
+    int x0 = (int)floor(ex1), y0 = (int)floor(ey1);
+    int x1 = (int)ceil(ex2),  y1 = (int)ceil(ey2);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > mw) x1 = mw;
+    if (y1 > mh) y1 = mh;
+    int w = x1 - x0, h = y1 - y0;
+    if (w <= 0 || h <= 0) return;
+    cairo_surface_t *tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
     cairo_t *tc = cairo_create(tmp);
     cairo_set_operator(tc, CAIRO_OPERATOR_SOURCE);
-    set_source(d, tc, src, 0, 0, xs, ys);
-    cairo_mask_surface(tc, mask, 0, 0);
+    set_source(d, tc, src, xfirst - x0, yfirst - y0, xs, ys);
+    cairo_mask_surface(tc, mask, -x0, -y0);
     cairo_destroy(tc);
     cairo_surface_flush(tmp);
+    uint32_t *tp = (uint32_t *)cairo_image_surface_get_data(tmp);
+    int tst = cairo_image_surface_get_stride(tmp) / 4;
     /* The destination picture's clip mask scales the masked source. */
-    if (dst->has_clip_mask) {
-        MwRenderPicture *cmp = pic(d, dst->clip_mask);
-        MwSurface *cms = cmp ? pic_surface(d, cmp) : NULL;
-        cairo_surface_t *ccs = cms ? mw_surface_native(cms) : NULL;
-        if (ccs) {
-            cairo_surface_t *ctmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, mw, mh);
-            cairo_t *cc = cairo_create(ctmp);
-            cairo_set_operator(cc, CAIRO_OPERATOR_SOURCE);
-            cairo_pattern_t *cp = cairo_pattern_create_for_surface(ccs);
-            cairo_matrix_t cm;
-            cairo_matrix_init_translate(&cm, dst->cm_x, dst->cm_y);
-            cairo_pattern_set_matrix(cp, &cm);
-            cairo_pattern_set_extend(cp, cairo_extend(cmp->repeat));
-            cairo_pattern_set_filter(cp, picture_filter(cmp));
-            cairo_set_source(cc, cp);
-            cairo_paint(cc);
-            cairo_pattern_destroy(cp);
-            cairo_destroy(cc);
-            cairo_surface_flush(ctmp);
-            uint32_t *tp = (uint32_t *)cairo_image_surface_get_data(tmp);
-            const uint32_t *cpp = (const uint32_t *)cairo_image_surface_get_data(ctmp);
-            int cst = cairo_image_surface_get_stride(ctmp) / 4;
-            int tst = cairo_image_surface_get_stride(tmp) / 4;
-            for (int y = 0; y < mh; y++)
-                for (int x = 0; x < mw; x++) {
-                    unsigned ca = (cpp[(size_t)y * cst + x] >> 24) & 0xff;
-                    if (ca == 255) continue;
-                    uint32_t v = tp[(size_t)y * tst + x];
-                    uint32_t a = (((v >> 24) & 0xff) * ca) / 255;
-                    uint32_t r = (((v >> 16) & 0xff) * ca) / 255;
-                    uint32_t g = (((v >>  8) & 0xff) * ca) / 255;
-                    uint32_t b = (((v      ) & 0xff) * ca) / 255;
-                    tp[(size_t)y * tst + x] = (a << 24) | (r << 16) | (g << 8) | b;
-                }
-            cairo_surface_destroy(ctmp);
-        }
+    cairo_surface_t *ctmp = clip_mask_image(d, dst, x0, y0, w, h);
+    if (ctmp) {
+        const uint32_t *cpp = (const uint32_t *)cairo_image_surface_get_data(ctmp);
+        int cst = cairo_image_surface_get_stride(ctmp) / 4;
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) {
+                unsigned ca = (cpp[(size_t)y * cst + x] >> 24) & 0xff;
+                if (ca == 255) continue;
+                uint32_t v = tp[(size_t)y * tst + x];
+                uint32_t a = (((v >> 24) & 0xff) * ca) / 255;
+                uint32_t r = (((v >> 16) & 0xff) * ca) / 255;
+                uint32_t g = (((v >>  8) & 0xff) * ca) / 255;
+                uint32_t bb = (((v      ) & 0xff) * ca) / 255;
+                tp[(size_t)y * tst + x] = (a << 24) | (r << 16) | (g << 8) | bb;
+            }
+        cairo_surface_destroy(ctmp);
     }
-    const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(tmp);
-    int sstride = cairo_image_surface_get_stride(tmp) / 4;
-
-    apply_disjoint(d, dst, op, sp, sstride, 0, 0, mw, mh);
+    apply_disjoint(d, dst, op, tp, tst, x0, y0, w, h);
     cairo_surface_destroy(tmp);
     mw_surface_mark_dirty(ds);
     MwWindow *win = pic_window(d, dst);
@@ -1602,9 +1585,10 @@ static void req_trapezoids(Display *d, const unsigned char *b, size_t len)
         cairo_line_to(mc, frac(t.left.p2.x),  t.bottom / 65536.0);
         cairo_close_path(mc);
     }
-    cairo_fill(mc);
-    cairo_destroy(mc);
-    apply_poly_mask(d, dst, src, r->op, mask, r->xSrc, r->ySrc);
+    xTrapezoid t0 = { 0 };
+    if (n) memcpy(&t0, p, sz_xTrapezoid);
+    apply_poly_mask(d, dst, src, r->op, mask, mc, r->xSrc, r->ySrc,
+                    t0.left.p1.x >> 16, t0.left.p1.y >> 16);
     cairo_surface_destroy(mask);
 }
 
@@ -1633,9 +1617,10 @@ static void req_triangles(Display *d, const unsigned char *b, size_t len)
         cairo_line_to(mc, frac(t.p3.x), frac(t.p3.y));
         cairo_close_path(mc);
     }
-    cairo_fill(mc);
-    cairo_destroy(mc);
-    apply_poly_mask(d, dst, src, r->op, mask, r->xSrc, r->ySrc);
+    xTriangle t0 = { 0 };
+    if (n) memcpy(&t0, p, sz_xTriangle);
+    apply_poly_mask(d, dst, src, r->op, mask, mc, r->xSrc, r->ySrc,
+                    t0.p1.x >> 16, t0.p1.y >> 16);
     cairo_surface_destroy(mask);
 }
 
@@ -1665,9 +1650,8 @@ static void req_tri_fan(Display *d, const unsigned char *b, size_t len)
         cairo_line_to(mc, frac(c.x), frac(c.y));
         cairo_close_path(mc);
     }
-    cairo_fill(mc);
-    cairo_destroy(mc);
-    apply_poly_mask(d, dst, src, r->op, mask, r->xSrc, r->ySrc);
+    apply_poly_mask(d, dst, src, r->op, mask, mc, r->xSrc, r->ySrc,
+                    a.x >> 16, a.y >> 16);
     cairo_surface_destroy(mask);
 }
 
@@ -1692,9 +1676,10 @@ static void req_tri_strip(Display *d, const unsigned char *b, size_t len)
         cairo_line_to(mc, frac(p2.x), frac(p2.y));
         cairo_close_path(mc);
     }
-    cairo_fill(mc);
-    cairo_destroy(mc);
-    apply_poly_mask(d, dst, src, r->op, mask, r->xSrc, r->ySrc);
+    xPointFixed f0 = { 0, 0 };
+    if (n) memcpy(&f0, p, 8);
+    apply_poly_mask(d, dst, src, r->op, mask, mc, r->xSrc, r->ySrc,
+                    f0.x >> 16, f0.y >> 16);
     cairo_surface_destroy(mask);
 }
 

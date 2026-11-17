@@ -136,7 +136,4 @@ void mw_load_resources(Display *d)
         mw_set_prop(d, mw_window(d, root), ra, XA_STRING, 8,
                     (const unsigned char *)buf, (unsigned long)len);
     }
-
-    if (len > 0)
-        dp->rdb = XrmGetStringDatabase(buf);
 }

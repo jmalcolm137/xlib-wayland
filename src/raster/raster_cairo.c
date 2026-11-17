@@ -138,9 +138,174 @@ struct MwCanvas {
     int        gx;
     int        lw;              /* line width */
     double     snap;            /* 0 or 0.5 pixel-grid nudge for strokes */
-    MwSurface *stipple;
-    cairo_pattern_t *pattern;
+    uint32_t   plane_mask;      /* X plane mask (RGB bits) */
 };
+
+/* ----------------------------------------------------- bitwise raster ops
+ *
+ * cairo only composites, but X GCs combine source and destination bits
+ * (GXxor rubber banding, GXinvert highlights) under a plane mask.  GXcopy
+ * with every plane enabled goes through cairo; everything else is applied
+ * exactly, pixel by pixel: the shape's coverage is rendered into an A8 mask
+ * with the same clip and line attributes, then the operation is applied to
+ * the covered pixels.  The pixel's alpha byte is left as it was. */
+static uint32_t rop_px(int gx, uint32_t s, uint32_t d)
+{
+    switch (gx) {
+    case GXclear:        return 0;
+    case GXand:          return s & d;
+    case GXandReverse:   return s & ~d;
+    case GXcopy:         return s;
+    case GXandInverted:  return ~s & d;
+    case GXnoop:         return d;
+    case GXxor:          return s ^ d;
+    case GXor:           return s | d;
+    case GXnor:          return ~(s | d);
+    case GXequiv:        return ~(s ^ d);
+    case GXinvert:       return ~d;
+    case GXorReverse:    return s | ~d;
+    case GXcopyInverted: return ~s;
+    case GXorInverted:   return ~s | d;
+    case GXnand:         return ~(s & d);
+    case GXset:          return 0xffffffffu;
+    default:             return s;
+    }
+}
+
+static bool canvas_uses_rop(const MwCanvas *c)
+{
+    return c->gx != GXcopy || (c->plane_mask & 0xffffff) != 0xffffff;
+}
+
+static inline uint32_t rop_apply_px(const MwCanvas *c, uint32_t s, uint32_t d)
+{
+    uint32_t m = c->plane_mask & 0xffffff;
+    uint32_t r = rop_px(c->gx, s, d);
+    return (d & ~m) | (r & m);
+}
+
+/* Physical-pixel bounds of the canvas clip intersected with [x1,x2)x[y1,y2)
+ * (user space).  False when empty. */
+static bool clip_bounds(MwCanvas *c, double x1, double y1, double x2, double y2,
+                        int *px0, int *py0, int *px1, int *py1)
+{
+    double cx1, cy1, cx2, cy2;
+    cairo_clip_extents(c->cr, &cx1, &cy1, &cx2, &cy2);
+    int sc = c->surface->scale;
+    double l = fmax(x1, cx1), t = fmax(y1, cy1);
+    double r = fmin(x2, cx2), b = fmin(y2, cy2);
+    int ix0 = (int)floor(l * sc), iy0 = (int)floor(t * sc);
+    int ix1 = (int)ceil(r * sc),  iy1 = (int)ceil(b * sc);
+    if (ix0 < 0) ix0 = 0;
+    if (iy0 < 0) iy0 = 0;
+    if (ix1 > c->surface->w * sc) ix1 = c->surface->w * sc;
+    if (iy1 > c->surface->h * sc) iy1 = c->surface->h * sc;
+    *px0 = ix0; *py0 = iy0; *px1 = ix1; *py1 = iy1;
+    return ix1 > ix0 && iy1 > iy0;
+}
+
+/* Install the canvas clip on another cairo_t (rectangles are all the shim
+ * ever clips with; anything else falls back to the clip extents). */
+static void copy_clip(MwCanvas *c, cairo_t *to)
+{
+    cairo_rectangle_list_t *rl = cairo_copy_clip_rectangle_list(c->cr);
+    if (rl->status == CAIRO_STATUS_SUCCESS) {
+        for (int i = 0; i < rl->num_rectangles; i++)
+            cairo_rectangle(to, rl->rectangles[i].x, rl->rectangles[i].y,
+                            rl->rectangles[i].width, rl->rectangles[i].height);
+    } else {
+        double x1, y1, x2, y2;
+        cairo_clip_extents(c->cr, &x1, &y1, &x2, &y2);
+        cairo_rectangle(to, x1, y1, x2 - x1, y2 - y1);
+    }
+    cairo_rectangle_list_destroy(rl);
+    cairo_clip(to);
+}
+
+/* Rasterise the current path (filled or stroked) as an A8 coverage mask over
+ * the physical box [*px0,*px1) x [*py0,*py1).  Consumes the path. */
+static cairo_surface_t *path_coverage(MwCanvas *c, bool stroke,
+                                      int *px0, int *py0, int *px1, int *py1)
+{
+    double x1, y1, x2, y2;
+    if (stroke) cairo_stroke_extents(c->cr, &x1, &y1, &x2, &y2);
+    else        cairo_fill_extents(c->cr, &x1, &y1, &x2, &y2);
+    if (!clip_bounds(c, x1, y1, x2, y2, px0, py0, px1, py1)) {
+        cairo_new_path(c->cr);
+        return NULL;
+    }
+    int sc = c->surface->scale;
+    cairo_surface_t *m = cairo_image_surface_create(CAIRO_FORMAT_A8,
+                                                    *px1 - *px0, *py1 - *py0);
+    cairo_surface_set_device_scale(m, sc, sc);
+    cairo_surface_set_device_offset(m, -*px0, -*py0);
+    cairo_t *mc = cairo_create(m);
+    cairo_set_antialias(mc, CAIRO_ANTIALIAS_NONE);
+    copy_clip(c, mc);
+    cairo_path_t *path = cairo_copy_path(c->cr);
+    cairo_append_path(mc, path);
+    cairo_path_destroy(path);
+    cairo_new_path(c->cr);
+    cairo_set_operator(mc, CAIRO_OPERATOR_SOURCE);
+    cairo_set_source_rgba(mc, 0, 0, 0, 1);
+    if (stroke) {
+        cairo_set_line_width(mc, cairo_get_line_width(c->cr));
+        cairo_set_line_cap(mc, cairo_get_line_cap(c->cr));
+        cairo_set_line_join(mc, cairo_get_line_join(c->cr));
+        cairo_set_miter_limit(mc, cairo_get_miter_limit(c->cr));
+        int nd = cairo_get_dash_count(c->cr);
+        if (nd > 0) {
+            double *dd = calloc((size_t)nd, sizeof *dd), off = 0;
+            if (dd) {
+                cairo_get_dash(c->cr, dd, &off);
+                cairo_set_dash(mc, dd, nd, off);
+                free(dd);
+            }
+        }
+        cairo_stroke(mc);
+    } else {
+        cairo_set_fill_rule(mc, cairo_get_fill_rule(c->cr));
+        cairo_fill(mc);
+    }
+    cairo_destroy(mc);
+    cairo_surface_flush(m);
+    return m;
+}
+
+/* Apply the GC's raster op with a solid source over the covered pixels. */
+static void rop_solid(MwCanvas *c, bool stroke)
+{
+    MwSurface *s = c->surface;
+    if (!s->data && !cairo_image_surface_get_data(s->cs)) {
+        cairo_new_path(c->cr);
+        return;
+    }
+    int x0, y0, x1, y1;
+    cairo_surface_t *m = path_coverage(c, stroke, &x0, &y0, &x1, &y1);
+    if (!m) return;
+    double r, g, b, a;
+    cairo_pattern_get_rgba(cairo_get_source(c->cr), &r, &g, &b, &a);
+    uint32_t src = ((uint32_t)lround(r * 255) << 16) |
+                   ((uint32_t)lround(g * 255) << 8) | (uint32_t)lround(b * 255);
+    cairo_surface_flush(s->cs);
+    uint32_t *px = (uint32_t *)cairo_image_surface_get_data(s->cs);
+    int stride = cairo_image_surface_get_stride(s->cs) / 4;
+    const unsigned char *md = cairo_image_surface_get_data(m);
+    int ms = cairo_image_surface_get_stride(m);
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
+            if (md[(size_t)(y - y0) * ms + (x - x0)] < 0x80) continue;
+            uint32_t *p = &px[(size_t)y * stride + x];
+            *p = rop_apply_px(c, src, *p);
+        }
+    cairo_surface_mark_dirty(s->cs);
+    cairo_surface_destroy(m);
+}
+
+void mw_set_plane_mask(MwCanvas *c, unsigned long plane_mask)
+{
+    c->plane_mask = (uint32_t)plane_mask;
+}
 
 static cairo_operator_t gx_to_operator(int gx)
 {
@@ -173,6 +338,8 @@ MwCanvas *mw_canvas_begin(MwSurface *s, const XRectangle *clip, int nclip,
     c->cr = cairo_create(s->cs);
     c->clip_x_origin = clip_x_origin;
     c->clip_y_origin = clip_y_origin;
+    c->gx = GXcopy;
+    c->plane_mask = 0xffffffffu;
     cairo_set_antialias(c->cr, CAIRO_ANTIALIAS_NONE);
     if (clip && nclip > 0)
         mw_clip_rects(c, clip, nclip, clip_x_origin, clip_y_origin);
@@ -182,7 +349,6 @@ MwCanvas *mw_canvas_begin(MwSurface *s, const XRectangle *clip, int nclip,
 void mw_canvas_end(MwCanvas *c)
 {
     if (!c) return;
-    if (c->pattern) cairo_pattern_destroy(c->pattern);
     cairo_destroy(c->cr);
     if (c->surface) cairo_surface_mark_dirty(c->surface->cs);
     free(c);
@@ -220,9 +386,9 @@ void mw_set_line(MwCanvas *c, int width, int line_style, int cap, int join,
 
     cairo_line_join_t lj = CAIRO_LINE_JOIN_MITER;
     switch (join) {
-    case 1: lj = CAIRO_LINE_JOIN_MITER; break;
-    case 2: lj = CAIRO_LINE_JOIN_ROUND; break;
-    case 3: lj = CAIRO_LINE_JOIN_BEVEL; break;
+    case JoinMiter: lj = CAIRO_LINE_JOIN_MITER; break;
+    case JoinRound: lj = CAIRO_LINE_JOIN_ROUND; break;
+    case JoinBevel: lj = CAIRO_LINE_JOIN_BEVEL; break;
     default: lj = CAIRO_LINE_JOIN_MITER; break;
     }
     cairo_set_line_join(c->cr, lj);
@@ -245,19 +411,6 @@ void mw_set_fill(MwCanvas *c, int fill_style, int fill_rule, int arc_mode)
     cairo_set_fill_rule(c->cr, fill_rule == EvenOddRule /*1*/
                         ? CAIRO_FILL_RULE_EVEN_ODD : CAIRO_FILL_RULE_WINDING);
     (void)arc_mode;
-}
-
-void mw_set_stipple(MwCanvas *c, MwSurface *stipple, int x_origin, int y_origin)
-{
-    if (c->pattern) { cairo_pattern_destroy(c->pattern); c->pattern = NULL; }
-    c->stipple = stipple;
-    if (!stipple) return;
-    cairo_pattern_t *p = cairo_pattern_create_for_surface(stipple->cs);
-    cairo_pattern_set_extend(p, CAIRO_EXTEND_REPEAT);
-    cairo_matrix_t m;
-    cairo_matrix_init_translate(&m, x_origin, y_origin);
-    cairo_pattern_set_matrix(p, &m);
-    c->pattern = p;
 }
 
 void mw_clip_rects(MwCanvas *c, const XRectangle *r, int n, int x_org, int y_org)
@@ -309,64 +462,61 @@ void mw_paint(MwCanvas *c)
 
 void mw_fill_path(MwCanvas *c)
 {
-    /* GXinvert is a raw bitwise NOT of the destination; cairo has no operator
-     * for it (we used to approximate it with SOURCE, which painted the
-     * foreground instead -- LibreOffice's xRGB invert test caught that).  Apply
-     * it directly over the path's bounding box intersected with the clip. */
-    if (c->gx == 0xa && c->surface && c->surface->data) {
-        double x1, y1, x2, y2, cx1, cy1, cx2, cy2;
-        cairo_path_extents(c->cr, &x1, &y1, &x2, &y2);
-        cairo_clip_extents(c->cr, &cx1, &cy1, &cx2, &cy2);
-        {
-            MwSurface *s = c->surface;
-            int ix0 = (int)floor(fmax(x1, cx1));
-            int iy0 = (int)floor(fmax(y1, cy1));
-            int ix1 = (int)ceil(fmin(x2, cx2));
-            int iy1 = (int)ceil(fmin(y2, cy2));
-            int stride = s->stride / 4;
-            if (ix0 < 0) ix0 = 0;
-            if (iy0 < 0) iy0 = 0;
-            if (ix1 > s->w) ix1 = s->w;
-            if (iy1 > s->h) iy1 = s->h;
-            if (ix1 > ix0 && iy1 > iy0) {
-                cairo_surface_flush(s->cs);
-                uint32_t *px = s->data;
-                for (int y = iy0; y < iy1; y++)
-                    for (int x = ix0; x < ix1; x++)
-                        px[(size_t)y * stride + x] ^= 0xffffffffu;
-                cairo_surface_mark_dirty(s->cs);
-            }
-        }
-        return;
-    }
+    if (canvas_uses_rop(c)) { rop_solid(c, false); return; }
     cairo_fill(c->cr);
 }
 
 void mw_stroke_path(MwCanvas *c)
 {
+    if (canvas_uses_rop(c)) { rop_solid(c, true); return; }
     cairo_stroke(c->cr);
 }
 
-void mw_fill_with_stipple(MwCanvas *c, MwSurface *pattern, int x_origin, int y_origin)
+/* Fill the current path with a stipple or tile.  A stipple is a depth-1
+ * pixmap whose logical value is bit 0 of each pixel (as for clip masks):
+ * FillStippled paints the foreground through the set bits and leaves the
+ * rest alone, FillOpaqueStippled paints clear bits in the background.  A
+ * tile paints its own pixels.  The pattern is anchored at the tile/stipple
+ * origin. */
+void mw_fill_pattern(MwCanvas *c, MwSurface *pat, int x_origin, int y_origin,
+                     int fill_style, uint32_t fg, uint32_t bg)
 {
-    if (!c || !pattern) return;
-    cairo_pattern_t *p = cairo_pattern_create_for_surface(pattern->cs);
+    if (!c || !pat) return;
+    int pw = pat->w, ph = pat->h, psc = pat->scale;
+    cairo_surface_t *tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);
+    uint32_t *td = (uint32_t *)cairo_image_surface_get_data(tmp);
+    int ts = cairo_image_surface_get_stride(tmp) / 4;
+    cairo_surface_flush(pat->cs);
+    const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(pat->cs);
+    int ss = cairo_image_surface_get_stride(pat->cs) / 4;
+    for (int y = 0; y < ph; y++)
+        for (int x = 0; x < pw; x++) {
+            uint32_t v = sp[(size_t)(y * psc) * ss + (size_t)(x * psc)];
+            uint32_t out;
+            if (fill_style == FillTiled)
+                out = 0xff000000u | (v & 0xffffff);
+            else if (v & 1u)
+                out = 0xff000000u | (fg & 0xffffff);
+            else
+                out = fill_style == FillOpaqueStippled
+                      ? 0xff000000u | (bg & 0xffffff) : 0;
+            td[(size_t)y * ts + x] = out;
+        }
+    cairo_surface_mark_dirty(tmp);
+    cairo_pattern_t *p = cairo_pattern_create_for_surface(tmp);
     cairo_pattern_set_extend(p, CAIRO_EXTEND_REPEAT);
+    cairo_pattern_set_filter(p, CAIRO_FILTER_NEAREST);
     cairo_matrix_t m;
-    cairo_matrix_init_translate(&m, x_origin, y_origin);
+    cairo_matrix_init_translate(&m, -x_origin, -y_origin);
     cairo_pattern_set_matrix(p, &m);
     cairo_save(c->cr);
-    /* cairo_mask() paints the *whole clip region*, masked by the pattern; it
-     * does not honour the current path.  X fill-stippled and fill-tiled
-     * rectangles only affect the rectangle being filled, so clip to the path
-     * first.  Without this, every stippled fill covered the entire window with
-     * the GC's foreground colour -- and Motif draws the text cursor as a
-     * stippled fill, so every cursor blink turned a whole text field black,
-     * flickering as it blinked. */
-    cairo_clip(c->cr);
-    cairo_mask(c->cr, p);   /* current source tinted by the pattern's alpha */
+    cairo_set_source(c->cr, p);
+    cairo_set_operator(c->cr, fill_style == FillStippled
+                              ? CAIRO_OPERATOR_OVER : CAIRO_OPERATOR_SOURCE);
+    cairo_fill(c->cr);
     cairo_restore(c->cr);
     cairo_pattern_destroy(p);
+    cairo_surface_destroy(tmp);
 }
 
 /* ------------------------------------------------------------- paths */
@@ -389,13 +539,20 @@ static void arc_path(cairo_t *cr, double x, double y, double w, double h,
     /* X angles: 1/64 degree, CCW from +x, y grows down -> negate. */
     double s = -(a1) * M_PI / (64.0 * 180.0);
     double e = -(a1 + a2) * M_PI / (64.0 * 180.0);
+    /* Each arc is its own sub-path: XDrawArcs/XFillArcs must not join one
+     * arc to the previous with a line. */
+    cairo_new_sub_path(cr);
     cairo_save(cr);
     cairo_translate(cr, cx, cy);
     cairo_scale(cr, rx, ry);
+    /* X measures angles counter-clockwise; with y pointing down that is
+     * decreasing cairo angles, so a positive extent runs "negative" in cairo
+     * (cairo_arc would draw the complementary arc, and nothing at all for a
+     * full circle). */
     if (a2 >= 0)
-        cairo_arc(cr, 0, 0, 1.0, s, e);
-    else
         cairo_arc_negative(cr, 0, 0, 1.0, s, e);
+    else
+        cairo_arc(cr, 0, 0, 1.0, s, e);
     cairo_restore(cr);
     if (mode == ArcChord /*1*/) {
         /* close the chord */
@@ -407,6 +564,9 @@ static void arc_path(cairo_t *cr, double x, double y, double w, double h,
 void mw_arc(MwCanvas *c, double x, double y, double w, double h,
             double a1, double a2, int mode)
 {
+    /* A zero-size arc would make cairo_scale() singular, which puts the
+     * cairo_t into an error state and drops everything else in the batch. */
+    if (w <= 0 || h <= 0) return;
     if (mode == ArcPieSlice) {
         double cx = x + w / 2.0, cy = y + h / 2.0;
         cairo_move_to(c->cr, cx, cy);
@@ -415,8 +575,8 @@ void mw_arc(MwCanvas *c, double x, double y, double w, double h,
         cairo_save(c->cr);
         cairo_translate(c->cr, cx, cy);
         cairo_scale(c->cr, w / 2.0, h / 2.0);
-        if (a2 >= 0) cairo_arc(c->cr, 0, 0, 1.0, s, e);
-        else         cairo_arc_negative(c->cr, 0, 0, 1.0, s, e);
+        if (a2 >= 0) cairo_arc_negative(c->cr, 0, 0, 1.0, s, e);
+        else         cairo_arc(c->cr, 0, 0, 1.0, s, e);
         cairo_restore(c->cr);
         cairo_close_path(c->cr);
     } else {
@@ -455,10 +615,63 @@ void mw_rects(MwCanvas *c, const XRectangle *r, int n, int filled)
 
 /* ------------------------------------------------------------- pixels */
 
+/* XCopyArea with a raster op: dst = op(src, dst) per physical pixel, inside
+ * the clip.  The source is read (snapshotted) before anything is written,
+ * so overlapping self-copies work. */
+static void copy_rop(MwCanvas *dst, MwSurface *src, int sx, int sy,
+                     int dx, int dy, int w, int h)
+{
+    MwSurface *ds = dst->surface;
+    int x0, y0, x1, y1;
+    if (!clip_bounds(dst, dx, dy, dx + w, dy + h, &x0, &y0, &x1, &y1)) return;
+    int dsc = ds->scale, ssc = src->scale;
+    int bw = x1 - x0, bh = y1 - y0;
+    uint32_t *snap = malloc((size_t)bw * bh * 4);
+    if (!snap) return;
+    cairo_surface_flush(src->cs);
+    const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(src->cs);
+    int sstr = cairo_image_surface_get_stride(src->cs) / 4;
+    int spw = src->w * ssc, sph = src->h * ssc;
+    for (int y = 0; y < bh; y++)
+        for (int x = 0; x < bw; x++) {
+            /* destination physical -> source physical */
+            int lx = (x0 + x) - dx * dsc, ly = (y0 + y) - dy * dsc;
+            int qx = sx * ssc + lx * ssc / dsc, qy = sy * ssc + ly * ssc / dsc;
+            snap[(size_t)y * bw + x] =
+                (qx >= 0 && qy >= 0 && qx < spw && qy < sph)
+                ? sp[(size_t)qy * sstr + qx] : 0;
+        }
+    /* Coverage of the clip over the box. */
+    cairo_surface_t *m = cairo_image_surface_create(CAIRO_FORMAT_A8, bw, bh);
+    cairo_surface_set_device_scale(m, dsc, dsc);
+    cairo_surface_set_device_offset(m, -x0, -y0);
+    cairo_t *mc = cairo_create(m);
+    copy_clip(dst, mc);
+    cairo_set_source_rgba(mc, 0, 0, 0, 1);
+    cairo_paint(mc);
+    cairo_destroy(mc);
+    cairo_surface_flush(m);
+    const unsigned char *md = cairo_image_surface_get_data(m);
+    int ms = cairo_image_surface_get_stride(m);
+    cairo_surface_flush(ds->cs);
+    uint32_t *dp = (uint32_t *)cairo_image_surface_get_data(ds->cs);
+    int dstr = cairo_image_surface_get_stride(ds->cs) / 4;
+    for (int y = 0; y < bh; y++)
+        for (int x = 0; x < bw; x++) {
+            if (md[(size_t)y * ms + x] < 0x80) continue;
+            uint32_t *p = &dp[(size_t)(y0 + y) * dstr + (x0 + x)];
+            *p = rop_apply_px(dst, snap[(size_t)y * bw + x], *p);
+        }
+    cairo_surface_mark_dirty(ds->cs);
+    cairo_surface_destroy(m);
+    free(snap);
+}
+
 void mw_canvas_copy(MwCanvas *dst, MwSurface *src, int sx, int sy,
                     int dx, int dy, int w, int h)
 {
     if (!dst || !src || w <= 0 || h <= 0) return;
+    if (canvas_uses_rop(dst)) { copy_rop(dst, src, sx, sy, dx, dy, w, h); return; }
 
     /* Copying a surface onto itself (XCopyArea used for scrolling, which the
      * Motif text widget does constantly) is undefined in cairo.  Snapshot the
@@ -504,36 +717,32 @@ void mw_canvas_put_image(MwCanvas *c, MwSurface *img, int dx, int dy,
     mw_canvas_copy(c, img, sx, sy, dx, dy, w, h);
 }
 
+/* XCopyPlane: bit `bit` of each source pixel selects the foreground (set) or
+ * the background (clear); the result is copied like XCopyArea, so the GC's
+ * raster op and clip apply. */
 void mw_canvas_copy_plane(MwCanvas *c, MwSurface *src, int sx, int sy,
-                          int dx, int dy, int w, int h, int bit)
+                          int dx, int dy, int w, int h, int bit,
+                          uint32_t fg, uint32_t bg)
 {
-    /* Render the plane as an alpha mask and mask the current source over it. */
-    if (!src || w <= 0 || h <= 0) return;
-    cairo_surface_t *a8 = cairo_image_surface_create(CAIRO_FORMAT_A8, w, h);
-    unsigned char *ad = cairo_image_surface_get_data(a8);
-    int as = cairo_image_surface_get_stride(a8);
+    if (!c || !src || w <= 0 || h <= 0 || bit < 0 || bit > 31) return;
+    MwSurface *tmp = mw_surface_create(w, h);
+    if (!tmp) return;
+    uint32_t *td = (uint32_t *)cairo_image_surface_get_data(tmp->cs);
+    int ts = cairo_image_surface_get_stride(tmp->cs) / 4;
     cairo_surface_flush(src->cs);
-    const uint32_t *sp = (const uint32_t *)src->data;
-    int sstride = src->stride / 4;
+    const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(src->cs);
+    int sstride = cairo_image_surface_get_stride(src->cs) / 4;
     int ssc = src->scale > 0 ? src->scale : 1;
-    int spw = src->w * ssc, sph = src->h * ssc;
-    for (int y = 0; y < h; y++) {
+    for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
-            int sxs = (sx + x) * ssc, sys = (sy + y) * ssc;
-            uint32_t px = 0;
-            if (sxs >= 0 && sys >= 0 && sxs < spw && sys < sph)
-                px = sp[(size_t)sys * sstride + sxs];
-            ad[(size_t)y * as + x] = (px >> bit) & 1 ? 0xff : 0x00;
+            uint32_t px = sp[(size_t)((sy + y) * ssc) * sstride +
+                             (size_t)((sx + x) * ssc)];
+            td[(size_t)y * ts + x] = 0xff000000u |
+                (((px >> bit) & 1u) ? (fg & 0xffffff) : (bg & 0xffffff));
         }
-    }
-    cairo_surface_mark_dirty(a8);
-    cairo_save(c->cr);
-    cairo_rectangle(c->cr, dx, dy, w, h);
-    cairo_clip(c->cr);
-    cairo_set_source_surface(c->cr, a8, dx, dy);
-    cairo_mask_surface(c->cr, a8, dx, dy);
-    cairo_restore(c->cr);
-    cairo_surface_destroy(a8);
+    cairo_surface_mark_dirty(tmp->cs);
+    mw_canvas_copy(c, tmp, 0, 0, dx, dy, w, h);
+    mw_surface_destroy(tmp);
 }
 
 void mw_surface_get(MwSurface *s, int x, int y, int w, int h,

@@ -67,6 +67,8 @@ typedef struct MwBroker {
     int      cmd_fd;         /* eventfd: an fd in the set changed */
     pthread_t thread;
     bool     running;
+    int      armed;          /* __atomic: watch the transfer fd */
+    int      armed_listen;   /* __atomic: watch the listen fd */
     char     dir[192];
     char     sock_path[224];
     char     reg_path[224];
@@ -100,8 +102,8 @@ typedef struct MwBroker {
         Window   requestor;
         Time     time;
         uint64_t deadline_ms;
-        char     buf[16384];
-        size_t   len;
+        char    *buf;        /* grows with the reply (hex doubles the data) */
+        size_t   len, cap;
     } xfer;
 
     /* outbound: we own the selection and are servicing a remote request */
@@ -274,14 +276,21 @@ static void *broker_thread(void *arg)
     free(a);
 
     for (;;) {
-        int conn = b->xfer_fd;
+        /* Once signalled, the (level-triggered) listen/transfer fds stay
+         * ready until the main thread services them -- and a serve in
+         * progress defers accepting for up to its deadline -- so they are not
+         * watched again until the main thread re-arms the thread; watching
+         * them regardless spun at full CPU. */
+        int armed = __atomic_load_n(&b->armed, __ATOMIC_SEQ_CST);
+        int armed_listen = __atomic_load_n(&b->armed_listen, __ATOMIC_SEQ_CST);
+        int conn = armed ? b->xfer_fd : -1;
         struct pollfd pfd[4] = {
-            { b->listen_fd, POLLIN, 0 },
+            { armed_listen ? b->listen_fd : -1, POLLIN, 0 },
             { b->cmd_fd,    POLLIN, 0 },
             { b->stop_fd,   POLLIN, 0 },
             { conn,         POLLIN, 0 },
         };
-        int r = poll(pfd, conn >= 0 ? 4 : 3, -1);
+        int r = poll(pfd, 4, -1);
         if (r < 0) {
             if (errno == EINTR) continue;
             break;
@@ -290,8 +299,11 @@ static void *broker_thread(void *arg)
         if (pfd[1].revents) {                            /* fd set changed */
             uint64_t v; ssize_t n = read(b->cmd_fd, &v, sizeof v); (void)n;
         }
-        if (pfd[0].revents || (conn >= 0 && pfd[3].revents))
+        if (pfd[0].revents || (conn >= 0 && pfd[3].revents)) {
+            if (pfd[0].revents) __atomic_store_n(&b->armed_listen, 0, __ATOMIC_SEQ_CST);
+            if (conn >= 0 && pfd[3].revents) __atomic_store_n(&b->armed, 0, __ATOMIC_SEQ_CST);
             broker_wake(dp);
+        }
     }
     return NULL;
 }
@@ -310,12 +322,15 @@ void mw_broker_init(Display *d)
     b->accept_fd = -1;
     b->enabled = true;
     b->mypid = (int)getpid();
+    b->armed = 1;
+    b->armed_listen = 1;
     b->xfer.fd = -1;
     b->serve.fd = -1;
 
     /* parse the comma-separated prefix list */
     char *list = strdup(env);
-    for (char *tok = strtok(list, ","); tok; tok = strtok(NULL, ",")) {
+    char *save_tok = NULL;
+    for (char *tok = strtok_r(list, ",", &save_tok); tok; tok = strtok_r(NULL, ",", &save_tok)) {
         while (*tok == ' ') tok++;
         if (!*tok) continue;
         b->sets = realloc(b->sets, sizeof(char *) * (size_t)(b->nsets + 1));
@@ -375,6 +390,7 @@ void mw_broker_fini(Display *d)
     if (b->stop_fd >= 0)   close(b->stop_fd);
     if (b->cmd_fd >= 0)    close(b->cmd_fd);
     free(b->serve.pdata);
+    free(b->xfer.buf);
     while (b->xfer_queue) {
         MwXferReq *r = b->xfer_queue;
         b->xfer_queue = r->next;
@@ -533,6 +549,30 @@ bool mw_broker_convert(Display *d, Atom selection, Atom target, Atom property,
 
 /* -------------------------------------------------------------- server */
 
+/* Let the thread watch the fds again once the main thread has serviced
+ * them -- the listen fd only once a connection can actually be accepted
+ * (while a serve is running it stays readable, and re-arming it would bounce
+ * wakeups between the two threads until the serve ends). */
+static void broker_rearm(MwBroker *b)
+{
+    if (!b->running) return;
+    bool poke = false;
+    if (!__atomic_load_n(&b->armed, __ATOMIC_SEQ_CST)) {
+        __atomic_store_n(&b->armed, 1, __ATOMIC_SEQ_CST);
+        poke = true;
+    }
+    if (!b->serve.active && b->accept_fd < 0 &&
+        !__atomic_load_n(&b->armed_listen, __ATOMIC_SEQ_CST)) {
+        __atomic_store_n(&b->armed_listen, 1, __ATOMIC_SEQ_CST);
+        poke = true;
+    }
+    if (poke) {
+        uint64_t one = 1;
+        ssize_t n = write(b->cmd_fd, &one, sizeof one);
+        (void)n;
+    }
+}
+
 static void serve_finish(Display *d, bool refuse)
 {
     XDisplayImpl *dp = MWD(d);
@@ -573,7 +613,7 @@ static void serve_finish(Display *d, bool refuse)
             if (pn) XFree((char *)pn);
             int l = snprintf(msg, sizeof msg, "R %u %s %s %s\n", b->serve.id,
                              hs, ht, hp);
-            ssize_t n = send(b->serve.fd, msg, (size_t)l, MSG_NOSIGNAL); (void)n;
+            mw_write_all(b->serve.fd, msg, (size_t)l, 5000);
         } else {
             const char *sn = XGetAtomName(d, b->serve.selection);
             const char *tn = XGetAtomName(d, b->serve.target);
@@ -592,7 +632,9 @@ static void serve_finish(Display *d, bool refuse)
             int hl = snprintf(head, sizeof head, "D %u %s %s %s %s %d %lu %zu\n",
                               b->serve.id, hs, ht, hp, hy, b->serve.pformat,
                               b->serve.pnitems, b->serve.pnbytes);
-            ssize_t n1 = send(b->serve.fd, head, (size_t)hl, MSG_NOSIGNAL);
+            /* The socket is non-blocking: write it all, waiting for the
+             * peer as needed (a bare send() dropped what did not fit). */
+            int n1 = mw_write_all(b->serve.fd, head, (size_t)hl, 5000);
             char *hex = malloc(b->serve.pnbytes * 2 + 2);
             if (hex) {
                 static const char *hx = "0123456789abcdef";
@@ -601,11 +643,10 @@ static void serve_finish(Display *d, bool refuse)
                     hex[i * 2 + 1] = hx[b->serve.pdata[i] & 0xf];
                 }
                 hex[b->serve.pnbytes * 2] = '\n';
-                ssize_t n2 = send(b->serve.fd, hex, b->serve.pnbytes * 2 + 1, MSG_NOSIGNAL);
-                (void)n2;
+                if (n1 == 0)
+                    mw_write_all(b->serve.fd, hex, b->serve.pnbytes * 2 + 1, 5000);
                 free(hex);
             }
-            (void)n1;
         }
         close(b->serve.fd);
     }
@@ -616,6 +657,7 @@ static void serve_finish(Display *d, bool refuse)
     b->serve.pdata = NULL;
     b->serve.pnbytes = b->serve.pnitems = 0;
     if (motif) mw_dnd_serve_done(d);
+    broker_rearm(b);
 }
 
 static void serve_read(Display *d);
@@ -771,11 +813,21 @@ static void xfer_read(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
     MwBroker *b = dp->broker;
-    char *buf = b->xfer.buf;
     size_t *len = &b->xfer.len;
     TR("xfer_read fd=%d len=%zu\n", b->xfer.fd, *len);
     for (;;) {
-        ssize_t n = read(b->xfer.fd, buf + *len, sizeof b->xfer.buf - 1 - *len);
+        /* The buffer grows with the reply (a fixed 16 KiB one stalled every
+         * transfer over ~8 KiB of data until the deadline refused it). */
+        if (b->xfer.cap - *len < 4096) {
+            size_t ncap = b->xfer.cap ? b->xfer.cap * 2 : 16384;
+            if (ncap > ((size_t)256 << 20)) break;      /* sanity limit */
+            char *nb = realloc(b->xfer.buf, ncap);
+            if (!nb) break;
+            b->xfer.buf = nb;
+            b->xfer.cap = ncap;
+        }
+        char *buf = b->xfer.buf;
+        ssize_t n = read(b->xfer.fd, buf + *len, b->xfer.cap - 1 - *len);
         if (n > 0) {
             *len += (size_t)n;
             buf[*len] = 0;
@@ -784,12 +836,13 @@ static void xfer_read(Display *d)
              * so wait for the second newline before parsing. */
             if (h && (buf[0] == 'R' || strchr(h + 1, '\n')))
                 break;
-            if (*len >= sizeof b->xfer.buf - 1) break;
             continue;
         }
         if (n < 0 && errno == EINTR) continue;
         break;              /* EAGAIN/EOF: wait for the next pump */
     }
+    if (!b->xfer.buf) return;
+    char *buf = b->xfer.buf;
 
     char *nl = strchr(buf, '\n');
     bool complete = nl && (buf[0] == 'R' || strchr(nl + 1, '\n'));
@@ -848,8 +901,13 @@ static void xfer_read(Display *d)
             TR("xfer D target=%s type=%s fmt=%d nitems=%lu nbytes=%zu hexlen=%zu\n",
                tgname, tname, fmt, nit, nbytes, strlen(hex));
 
+            /* nitems and format come from the peer: they must describe no
+             * more than the bytes that actually arrived. */
+            size_t unit = fmt == 32 ? 4 : fmt == 16 ? 2 : 1;
+            if (data && (fmt != 8 && fmt != 16 && fmt != 32)) { free(data); data = NULL; }
             if (data) {
                 size_t got = hexdec(hex, data, nbytes);
+                if (nit > got / unit) nit = got / unit;
                 TR("xfer data target=%s type=%s fmt=%d nitems=%lu nbytes=%zu got=%zu\n",
                    tgname, tname, fmt, nit, nbytes, got);
                 Atom type = XInternAtom(d, tname[0] ? tname : "STRING", False);
@@ -919,4 +977,5 @@ void mw_broker_handle_ready(Display *d)
     if (b->serve.active && now_ms() > b->serve.deadline_ms)
         serve_finish(d, true);
     if (b->listen_fd >= 0) serve_accept(d);
+    broker_rearm(b);
 }

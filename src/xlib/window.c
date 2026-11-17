@@ -228,7 +228,8 @@ static void mw_set_workspace_props(Display *d, MwWindow *wm)
     char *names = strdup(names_buf);
     Atom ws[64];
     int nws = 0;
-    for (char *tok = strtok(names, ","); tok && nws < 64; tok = strtok(NULL, ",")) {
+    char *save_tok = NULL;
+    for (char *tok = strtok_r(names, ",", &save_tok); tok && nws < 64; tok = strtok_r(NULL, ",", &save_tok)) {
         while (*tok == ' ' || *tok == '\t') tok++;
         if (*tok) ws[nws++] = mw_intern_atom(d, tok, False);
     }
@@ -462,8 +463,34 @@ void mw_destroy_window(Display *d, MwWindow *win)
     /* destroy children */
     while (win->last_child) mw_destroy_window(d, win->last_child);
 
-    bool was_mapped = win->mapped;
+    /* As in X, a mapped window is unmapped before it is destroyed. */
+    if (win->mapped) mw_unmap_window(d, win);
+
+    /* Popups (menus, tooltips) anchored to this window are root children, so
+     * they survive it -- but their xdg_popup's parent is going away and they
+     * would keep a pointer to freed memory.  Dismiss them the way the
+     * compositor's popup_done does; mapping one again builds a new popup on
+     * a live anchor. */
+    {
+        XDisplayImpl *dp = MWD(d);
+        for (size_t i = 0; i < dp->table_cap; i++) {
+            if (!dp->table[i].id || dp->table[i].kind != MW_OBJ_WINDOW)
+                continue;
+            MwWindow *o = dp->table[i].obj;
+            if (!o || o == win) continue;
+            bool anchored = o->popup_parent == win ||
+                            (o->tl && o->tl->parent_tl == win);
+            if (!anchored) continue;
+            if (o->mapped) mw_unmap_window(d, o);
+            mw_pointer_drop_grab(d, o);
+            if (o->tl) { mw_toplevel_destroy(o->tl); o->tl = NULL; }
+            o->popup_parent = NULL;
+        }
+    }
     if (win->tl) { mw_toplevel_destroy(win->tl); win->tl = NULL; }
+
+    /* Destroying the owner gives a selection up (without SelectionClear). */
+    mw_selection_owner_destroyed(d, win->id);
 
     /* Forget this window in every piece of display state that refers to it.
      * The children have already been destroyed above, so each of them has
@@ -512,6 +539,8 @@ void mw_destroy_window(Display *d, MwWindow *win)
         }
         if (dp->implicit_grab  == win) dp->implicit_grab  = NULL;
         if (dp->kbd_grab_window == win) dp->kbd_grab_window = NULL;
+        if (dp->ptr_defer_top  == win) dp->ptr_defer_top  = NULL;
+        if (dp->ptr_defer_deep == win) dp->ptr_defer_deep = NULL;
     }
 
     MwWindow *par = win->parent;
@@ -537,7 +566,31 @@ void mw_destroy_window(Display *d, MwWindow *win)
     if (win->has_shape) pixman_region32_fini(&win->shape);
     mw_unregister(d, win->id);
     free(win);
-    (void)was_mapped;
+}
+
+/* Move the keyboard focus, reporting it with FocusOut / FocusIn as the X
+ * server does. */
+static void focus_event(Display *d, MwWindow *w, int type)
+{
+    if (!w || !(w->event_mask & FocusChangeMask)) return;
+    XFocusChangeEvent fe;
+    memset(&fe, 0, sizeof fe);
+    fe.type = type; fe.display = d; fe.window = w->id;
+    fe.mode = NotifyNormal; fe.detail = NotifyNonlinear;
+    mw_put_event(d, (XEvent *)&fe);
+}
+
+void mw_set_focus(Display *d, MwWindow *win)
+{
+    MwWindow *old = MWD(d)->kbd_focus;
+    if (old == win) return;
+    focus_event(d, old, FocusOut);
+    MWD(d)->kbd_focus = win;
+    if (getenv("MW_TRACE") && win)
+        fprintf(stderr, "MW: FocusIn win=0x%lx mask=0x%lx focusselmask=%d\n",
+                (unsigned long)win->id, win->event_mask,
+                (win->event_mask & FocusChangeMask) != 0);
+    focus_event(d, win, FocusIn);
 }
 
 void mw_map_window(Display *d, MwWindow *win, bool raised)
@@ -665,30 +718,7 @@ void mw_map_window(Display *d, MwWindow *win, bool raised)
      * so the client sees the focus before its event loop returns -- otherwise
      * the compositor's later wl_keyboard.enter lands after the client has
      * already checked gtk_widget_has_focus(). */
-    if (focus_toplevel) {
-        MwWindow *mc = MWD(d)->kbd_focus;
-        if (mc != win) {
-            if (mc && (mc->event_mask & FocusChangeMask)) {
-                XFocusChangeEvent fo;
-                memset(&fo, 0, sizeof fo);
-                fo.type = FocusOut; fo.display = d; fo.window = mc->id;
-                fo.mode = NotifyNormal; fo.detail = NotifyNonlinear;
-                mw_put_event(d, (XEvent *)&fo);
-            }
-            MWD(d)->kbd_focus = win;
-            if (getenv("MW_TRACE"))
-                fprintf(stderr, "MW: map-FocusIn win=0x%lx mask=0x%lx focusselmask=%d\n",
-                        (unsigned long)win->id, win->event_mask,
-                        (win->event_mask & FocusChangeMask) != 0);
-            if (win->event_mask & FocusChangeMask) {
-                XFocusChangeEvent fe;
-                memset(&fe, 0, sizeof fe);
-                fe.type = FocusIn; fe.display = d; fe.window = win->id;
-                fe.mode = NotifyNormal; fe.detail = NotifyNonlinear;
-                mw_put_event(d, (XEvent *)&fe);
-            }
-        }
-    }
+    if (focus_toplevel) mw_set_focus(d, win);
     (void)raised;
 }
 
@@ -925,7 +955,7 @@ int XDestroyWindow(Display *d, Window w)
 {
     mw_render_drain(d);
     MwWindow *win = mw_window(d, w);
-    if (win) mw_destroy_window(d, win);
+    if (win && !is_root(d, win)) mw_destroy_window(d, win);   /* root: no-op */
     return 1;
 }
 
@@ -988,7 +1018,7 @@ static void dispatch_configure_notify(Display *d, MwWindow *win)
     if (win->tl || (win->event_mask & StructureNotifyMask))
         mw_send_configure_notify(d, win);
     if (win->parent && (win->parent->event_mask & SubstructureNotifyMask))
-        mw_send_configure_notify(d, win);
+        mw_send_configure_notify_to(d, win, win->parent->id);
 }
 
 int XReconfigureWMWindow(Display *d, Window w, int screen, unsigned int value_mask,
@@ -1235,7 +1265,8 @@ Status XGetWindowAttributes(Display *d, Window w, XWindowAttributes *attr)
     attr->save_under = win->save_under;
     attr->colormap = win->colormap;
     attr->map_installed = True;
-    attr->map_state = win->mapped ? IsViewable : IsUnmapped;
+    attr->map_state = !win->mapped ? IsUnmapped
+                    : mw_window_is_viewable(win) ? IsViewable : IsUnviewable;
     attr->all_event_masks = win->all_event_masks;
     attr->your_event_mask = win->event_mask;
     attr->do_not_propagate_mask = win->do_not_propagate_mask;
@@ -1297,7 +1328,12 @@ Bool XTranslateCoordinates(Display *d, Window src, Window dest,
     int rx = src_x + sx, ry = src_y + sy;
     if (dest_x) *dest_x = rx - tx;
     if (dest_y) *dest_y = ry - ty;
-    if (child_return) *child_return = None;
+    if (child_return) {
+        /* The mapped child of dest containing the point (how clients find
+         * the window under the pointer). */
+        MwWindow *c = mw_child_at(t, rx - tx, ry - ty);
+        *child_return = c ? c->id : None;
+    }
     return True;
 }
 
@@ -1348,7 +1384,8 @@ int XSetInputFocus(Display *d, Window w, int revert_to, Time time)
     (void)revert_to; (void)time;
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: XSetInputFocus -> 0x%lx\n", w);
-    MWD(d)->kbd_focus = mw_window(d, w);
+    /* None and PointerRoot (0 and 1) are not windows. */
+    mw_set_focus(d, w > PointerRoot ? mw_window(d, w) : NULL);
     MWD(d)->focus_explicit = true;
     return 1;
 }

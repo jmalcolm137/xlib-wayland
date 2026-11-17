@@ -273,8 +273,11 @@ int mw_set_prop(Display *d, MwWindow *win, Atom a, Atom type, int format,
     size_t unit = format == 8 ? 1 : format == 16 ? 2 : 4;
     p->nbytes = nitems * unit;
     if (data && p->nbytes) {
-        p->data = malloc(p->nbytes);
+        /* One extra NUL, so internal readers of string properties (the CSD
+         * titlebar reads WM_NAME) never run off the end. */
+        p->data = malloc(p->nbytes + 1);
         memcpy(p->data, data, p->nbytes);
+        p->data[p->nbytes] = 0;
     }
     return 1;
 }
@@ -312,6 +315,14 @@ int XChangeProperty(Display *d, Window w, Atom property, Atom type, int format,
 {
     MwWindow *win = mw_window(d, w);
     if (!win) return 0;
+
+    /* Appending or prepending with another type or format is BadMatch: the
+     * server leaves the property alone (and the old data has a different
+     * unit size, so merging would read past it). */
+    if (mode == PropModePrepend || mode == PropModeAppend) {
+        MwProp *old = mw_get_prop(d, win, property);
+        if (old && (old->type != type || old->format != format)) return 1;
+    }
 
     /* On a 64-bit server, format-32 property data is an array of longs: the
      * protocol carries only the low 32 bits of each one.  libX11's _XData32()
@@ -442,9 +453,11 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
     unsigned long start = off_bytes >= (long)p->nbytes ? p->nitems
                                                        : (unsigned long)(off_bytes / unit);
     unsigned long avail = p->nitems > start ? p->nitems - start : 0;
+    /* A zero length returns no data, only the size in bytes_after (the
+     * usual way to probe a property's size). */
     unsigned long max_items = (long_length > 0)
         ? (unsigned long)long_length * 4 / unit
-        : avail;
+        : 0;
     unsigned long nret = avail < max_items ? avail : max_items;
     unsigned char *out = NULL;
     if (nret > 0 && prop_return) {
@@ -474,7 +487,10 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
     if (nitems_return) *nitems_return = nret;
     if (bytes_after_return) *bytes_after_return = (unsigned long)((avail - nret) * unit);
     if (prop_return) *prop_return = out;
-    if (delete) mw_del_prop(d, win, property);
+    /* The protocol deletes only once everything has been read, and reports
+     * it (ICCCM INCR transfers wait for that PropertyDelete). */
+    if (delete && nret == avail && mw_del_prop(d, win, property))
+        prop_notify(d, win, property, PropertyDelete);
     return Success;
 }
 
@@ -576,8 +592,21 @@ Status XGetIconName(Display *d, Window w, char **icon_name)
 
 int XSetCommand(Display *d, Window w, char **argv, int argc)
 {
+    /* WM_COMMAND is the strings themselves, each NUL-terminated. */
+    size_t n = 0;
+    for (int i = 0; i < argc; i++) n += strlen(argv[i] ? argv[i] : "") + 1;
+    unsigned char *buf = malloc(n ? n : 1);
+    if (!buf) return 0;
+    size_t off = 0;
+    for (int i = 0; i < argc; i++) {
+        const char *a = argv[i] ? argv[i] : "";
+        size_t l = strlen(a) + 1;
+        memcpy(buf + off, a, l);
+        off += l;
+    }
     XChangeProperty(d, w, XA_WM_COMMAND, XA_STRING, 8, PropModeReplace,
-                    (const unsigned char *)argv, argc);
+                    buf, (int)n);
+    free(buf);
     return 1;
 }
 
@@ -591,10 +620,14 @@ Status XGetCommand(Display *d, Window w, char ***argv, int *argc)
     int n = 0;
     for (unsigned long i = 0; i < ni; i++) if (data[i] == 0) n++;
     char **v = calloc(n + 2, sizeof(char *));
+    if (!v) { free(data); return 0; }
     int i = 0, start = 0;
     for (unsigned long k = 0; k < ni; k++) {
         if (data[k] == 0) { v[i++] = strdup((char *)data + start); start = (int)k + 1; }
     }
+    /* A last string without its NUL still counts (the stored data is always
+     * NUL-terminated past nitems). */
+    if ((unsigned long)start < ni) v[i++] = strdup((char *)data + start);
     v[i] = NULL;
     *argv = v; *argc = i;
     free(data);
@@ -603,15 +636,16 @@ Status XGetCommand(Display *d, Window w, char ***argv, int *argc)
 
 int XSetClassHint(Display *d, Window w, XClassHint *ch)
 {
-    unsigned char buf[1024];
-    int n = 0;
     const char *res = ch->res_name ? ch->res_name : "";
     const char *cls = ch->res_class ? ch->res_class : "";
-    int rl = (int)strlen(res), cl = (int)strlen(cls);
-    memcpy(buf, res, rl); buf[rl] = 0;
-    memcpy(buf + rl + 1, cls, cl); buf[rl + 1 + cl] = 0;
-    n = rl + 1 + cl + 1;
-    XChangeProperty(d, w, XA_WM_CLASS, XA_STRING, 8, PropModeReplace, buf, n);
+    size_t rl = strlen(res), cl = strlen(cls);
+    size_t n = rl + 1 + cl + 1;
+    unsigned char *buf = malloc(n);     /* the name can come from argv/-name */
+    if (!buf) return 0;
+    memcpy(buf, res, rl + 1);
+    memcpy(buf + rl + 1, cls, cl + 1);
+    XChangeProperty(d, w, XA_WM_CLASS, XA_STRING, 8, PropModeReplace, buf, (int)n);
+    free(buf);
     return 1;
 }
 
@@ -621,9 +655,11 @@ Status XGetClassHint(Display *d, Window w, XClassHint *ch)
     if (XGetWindowProperty(d, w, XA_WM_CLASS, 0, 1024, False, XA_STRING,
                            &at, &af, &ni, &ba, &data) != Success || !data)
         return 0;
-    ch->res_name = strdup((char *)data);
-    char *cls = (char *)data + strlen((char *)data) + 1;
-    ch->res_class = strdup(cls);
+    size_t rl = strnlen((char *)data, ni);
+    ch->res_name = strndup((char *)data, rl);
+    /* Only one string present: libX11 reports an empty class. */
+    ch->res_class = rl + 1 < ni ? strndup((char *)data + rl + 1, ni - rl - 1)
+                                : strdup("");
     free(data);
     return 1;
 }

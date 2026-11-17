@@ -88,7 +88,8 @@ void mw_xdnd_fini(Display *d)
 {
     MwXdnd *x = MWD(d)->xdnd;
     if (!x) return;
-    if (x->src != None) XDestroyWindow(d, x->src);
+    /* x->src is not destroyed here: XCloseDisplay has already freed every
+     * window, and a lookup would return the freed one. */
     for (int i = 0; i < x->nmimes; i++) free(x->mimes[i]);
     free(x->mimes);
     free(x->drop_data);

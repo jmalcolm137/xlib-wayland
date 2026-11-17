@@ -149,6 +149,7 @@ char *mw_clipboard_from_utf8(const unsigned char *in, size_t inlen, size_t *outl
 }
 
 static void sync_x_owner(Display *d);
+static void clip_update_wake(Display *d);
 static void sync_x_owner_primary(Display *d);
 
 /* Non-text MIME types we advertise on behalf of an X selection owner, so a
@@ -414,8 +415,38 @@ static void dnd_offer_source_actions(void *data, struct wl_data_offer *offer,
 static void dnd_offer_action(void *data, struct wl_data_offer *offer,
                              uint32_t action)
 {
-    (void)data; (void)offer; (void)action;
-    /* The action the compositor selected; only copy matters to us. */
+    (void)offer;
+    /* The action the compositor selected; finish() is only valid once there
+     * is one. */
+    MwWlOffer *o = data;
+    if (o) o->action = action;
+}
+
+/* The type to accept for a drag: the best text type, or -- for an XDND
+ * target, which can take any type the source names -- the first offered. */
+static const char *drag_accept_mime(MwWlOffer *o, bool xdnd)
+{
+    if (!o) return NULL;
+    if (o->mime) return o->mime;
+    if (xdnd && o->nmimes > 0) return o->mimes[0];
+    return NULL;
+}
+
+static void drag_accept(XDisplayImpl *dp, MwWlOffer *o, bool xdnd)
+{
+    const char *m = drag_accept_mime(o, xdnd);
+    if (!o || !o->offer || !m) return;
+    wl_data_offer_accept(o->offer, dp->drag_serial, m);
+    o->accepted = true;
+}
+
+/* Tell the source the drop is done (v3).  It is a protocol error without an
+ * accepted type and a chosen action, so only then. */
+static void drag_finish(MwWlOffer *o)
+{
+    if (o && o->offer && o->accepted && o->action &&
+        wl_proxy_get_version((struct wl_proxy *)o->offer) >= 3)
+        wl_data_offer_finish(o->offer);
 }
 
 static const struct wl_data_offer_listener offer_listener = {
@@ -644,6 +675,7 @@ static void dd_selection(void *data, struct wl_data_device *dd, struct wl_data_o
     (void)dd;
 
     if (id && dp->pending_offer && dp->pending_offer->offer == id) {
+        offer_free(dp->wayland_offer);
         dp->wayland_offer = dp->pending_offer;
         dp->pending_offer = NULL;
     } else {
@@ -689,8 +721,10 @@ static void dd_enter(void *data, struct wl_data_device *dd, uint32_t serial,
     dp->drag_window = w ? w->id : None;
 
     /* Tell the compositor which type we would take and that we are a copy
-     * target, so it keeps sending motion and a drop. */
-    if (o->mime) wl_data_offer_accept(offer, serial, o->mime);
+     * target, so it keeps sending motion and a drop.  An XDND window takes
+     * non-text types too (image/png, text/uri-list ...). */
+    bool xdnd_target = !o->motif_drag && mw_xdnd_aware(d, dp->drag_window);
+    drag_accept(dp, o, xdnd_target);
     if (wl_proxy_get_version((struct wl_proxy *)offer) >= 3)
         wl_data_offer_set_actions(offer,
             WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
@@ -741,9 +775,7 @@ static void dd_motion(void *data, struct wl_data_device *dd, uint32_t time,
     if (!dp->drag_active) return;
     dp->drag_x = wl_fixed_to_double(x);
     dp->drag_y = wl_fixed_to_double(y);
-    if (dp->drag_offer && dp->drag_offer->mime)
-        wl_data_offer_accept(dp->drag_offer->offer, dp->drag_serial,
-                             dp->drag_offer->mime);
+    drag_accept(dp, dp->drag_offer, dp->drag_xdnd);
     if (dp->drag_xdnd)
         mw_xdnd_wl_motion(d, dp->drag_x, dp->drag_y);
     else
@@ -761,6 +793,8 @@ static void dd_drop(void *data, struct wl_data_device *dd)
      * the selection broker.  Just start the drop at the site. */
     if (dp->drag_offer && dp->drag_offer->motif_drag) {
         mw_dnd_wl_drop(d, NULL, 0);
+        drag_finish(dp->drag_offer);
+        wl_display_flush(dp->wl_display);
         return;
     }
 
@@ -780,6 +814,9 @@ static void dd_drop(void *data, struct wl_data_device *dd)
         fcntl(fds[0], F_SETFD, FD_CLOEXEC);
         wl_data_offer_receive(o->offer, m, fds[1]);
         close(fds[1]);
+        /* Without finish a v3 source treats the drop as cancelled (a MOVE
+         * source keeps its data, and some abort the transfer). */
+        drag_finish(o);
         wl_display_flush(dp->wl_display);
 
         MwClipFetch *f = &dp->clip_fetch;
@@ -796,12 +833,12 @@ static void dd_drop(void *data, struct wl_data_device *dd)
         f->requestor = None;
         f->time = CurrentTime;
         f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
+        clip_update_wake(d);
         return;
     }
 
     if (!dp->drag_active || !dp->drag_offer || !dp->drag_offer->mime) {
-        if (dp->drag_offer && wl_proxy_get_version((struct wl_proxy *)dp->drag_offer->offer) >= 3)
-            wl_data_offer_finish(dp->drag_offer->offer);
+        drag_finish(dp->drag_offer);
         dd_leave(data, dd);
         return;
     }
@@ -816,8 +853,7 @@ static void dd_drop(void *data, struct wl_data_device *dd)
 
     wl_data_offer_receive(dp->drag_offer->offer, dp->drag_offer->mime, fds[1]);
     close(fds[1]);
-    if (wl_proxy_get_version((struct wl_proxy *)dp->drag_offer->offer) >= 3)
-        wl_data_offer_finish(dp->drag_offer->offer);
+    drag_finish(dp->drag_offer);
     wl_display_flush(dp->wl_display);
 
     MwClipFetch *f = &dp->clip_fetch;
@@ -833,6 +869,7 @@ static void dd_drop(void *data, struct wl_data_device *dd)
     f->requestor = None;
     f->time = CurrentTime;
     f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
+    clip_update_wake(d);
 }
 
 static const struct wl_data_device_listener device_listener = {
@@ -963,6 +1000,18 @@ static void fetch_finish(Display *d)
     f->active = false;
 }
 
+/* Tell the wakeup thread what to watch for: the fetch's pipe, and the
+ * earliest transfer deadline. */
+static void clip_update_wake(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    uint64_t t = 0;
+    if (dp->clip_fetch.active) t = dp->clip_fetch.deadline_ms;
+    if (dp->clip_serve.active && (!t || dp->clip_serve.deadline_ms < t))
+        t = dp->clip_serve.deadline_ms;
+    mw_wakeup_watch(dp, mw_clipboard_poll_fd(d), t);
+}
+
 void mw_clipboard_handle_ready(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
@@ -971,9 +1020,12 @@ void mw_clipboard_handle_ready(Display *d)
     if (f->active) {
         for (;;) {
             if (f->len + 65536 > f->cap) {
-                f->cap = f->cap ? f->cap * 2 : 65536;
-                if (f->cap < f->len + 65536) f->cap = f->len + 65536;
-                f->data = realloc(f->data, f->cap);
+                size_t ncap = f->cap ? f->cap * 2 : 65536;
+                if (ncap < f->len + 65536) ncap = f->len + 65536;
+                unsigned char *nd = realloc(f->data, ncap);
+                if (!nd) { fetch_finish(d); break; }
+                f->data = nd;
+                f->cap = ncap;
             }
             ssize_t n = read(f->fd, f->data + f->len, 65536);
             if (n > 0) { f->len += (size_t)n; continue; }
@@ -993,7 +1045,7 @@ void mw_clipboard_handle_ready(Display *d)
         if (dp->clip_serve.fd >= 0) close(dp->clip_serve.fd);
         dp->clip_serve.fd = -1;
         dp->clip_serve.active = false;
-    }
+    }    clip_update_wake(d);
 }
 
 /* ----------------------------------------------------- Wayland -> X serve */
@@ -1031,6 +1083,7 @@ bool mw_clipboard_fetch_from_offer(Display *d, struct wl_data_offer *offer,
     f->requestor = requestor;
     f->time = time;
     f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
+    clip_update_wake(d);
     return true;
 }
 
@@ -1084,6 +1137,7 @@ static bool prim_xconvert(Display *d, Atom target, Atom property,
     f->requestor = requestor;
     f->time = time;
     f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
+    clip_update_wake(d);
     return true;
 }
 
@@ -1143,6 +1197,7 @@ bool mw_clipboard_xconvert(Display *d, Atom selection, Atom target,
     f->requestor = requestor;
     f->time = time;
     f->deadline_ms = now_ms() + CLIP_FETCH_TIMEOUT_MS;
+    clip_update_wake(d);
     return true;
 }
 
@@ -1164,24 +1219,37 @@ bool mw_clipboard_serve_notify(Display *d, XSelectionEvent *se)
                            AnyPropertyType, &type, &format, &n, &ba, &data);
 
     if (data && sv->fd >= 0) {
-        if (sv->to_utf8) {
-            size_t olen = 0;
-            char *enc = mw_clipboard_to_utf8(data, n, &olen);
-            ssize_t off = 0;
-            while (off < (ssize_t)olen) {
-                ssize_t w = write(sv->fd, enc + off, (size_t)(olen - off));
-                if (w <= 0) break;
-                off += w;
+        /* The property's bytes: format-32 data comes back from
+         * XGetWindowProperty as longs and goes out as 32-bit words; an INCR
+         * reply (a size announcement, not the data) is not forwarded. */
+        Atom incr = mw_intern_atom(d, "INCR", False);
+        unsigned char *bytes = NULL;
+        size_t blen = 0;
+        if (type == incr) {
+            blen = 0;
+        } else if (format == 32) {
+            bytes = malloc(n * 4 + 1);
+            if (bytes) {
+                const long *l = (const long *)data;
+                for (unsigned long i = 0; i < n; i++) {
+                    uint32_t v = (uint32_t)l[i];
+                    memcpy(bytes + i * 4, &v, 4);
+                }
+                blen = n * 4;
             }
-            free(enc);
         } else {
-            ssize_t off = 0;
-            while (off < (ssize_t)n) {
-                ssize_t w = write(sv->fd, data + off, (size_t)(n - off));
-                if (w <= 0) break;
-                off += w;
-            }
+            blen = n * (format == 16 ? 2 : 1);
         }
+        const unsigned char *out = bytes ? bytes : data;
+        if (sv->to_utf8 && format == 8 && blen) {
+            size_t olen = 0;
+            char *enc = mw_clipboard_to_utf8(out, blen, &olen);
+            if (enc) mw_write_all(sv->fd, enc, olen, CLIP_SERVE_TIMEOUT_MS);
+            free(enc);
+        } else if (blen) {
+            mw_write_all(sv->fd, out, blen, CLIP_SERVE_TIMEOUT_MS);
+        }
+        free(bytes);
     }
     if (data) XFree(data);
     if (sv->fd >= 0) close(sv->fd);

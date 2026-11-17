@@ -58,6 +58,22 @@ int XSetSelectionOwner(Display *d, Atom selection, Window owner, Time time)
     return 1;
 }
 
+/* X resets a selection's owner to None when the owner window is destroyed;
+ * the bridges are told as for any ownership change, but no SelectionClear is
+ * sent (there is no window left to receive it). */
+void mw_selection_owner_destroyed(Display *d, Window w)
+{
+    for (MwSelection *s = MWD(d)->selections; s; s = s->next) {
+        if (s->owner != w) continue;
+        s->owner = None;
+        mw_clipboard_owner_changed(d, s->selection, None);
+        mw_broker_owner_changed(d, s->selection, None);
+        mw_dnd_selection_changed(d, s->selection, None);
+        mw_xdnd_selection_changed(d, s->selection, None);
+        mw_xfixes_selection_notify(d, s->selection, None, mw_now());
+    }
+}
+
 Window XGetSelectionOwner(Display *d, Atom selection)
 {
     MwSelection *s = find_sel(d, selection);

@@ -14,12 +14,15 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name,
     Display *d = data;
     XDisplayImpl *dp = MWD(d);
 
-    if (strcmp(interface, wl_compositor_interface.name) == 0) {
+    if (strcmp(interface, wl_compositor_interface.name) == 0 &&
+               dp->wl_compositor == NULL) {
         uint32_t v = version < 5 ? version : 5;
         dp->wl_compositor = wl_registry_bind(reg, name, &wl_compositor_interface, v);
-    } else if (strcmp(interface, wl_shm_interface.name) == 0) {
+    } else if (strcmp(interface, wl_shm_interface.name) == 0 &&
+               dp->wl_shm == NULL) {
         dp->wl_shm = wl_registry_bind(reg, name, &wl_shm_interface, 1);
-    } else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
+    } else if (strcmp(interface, xdg_wm_base_interface.name) == 0 &&
+               dp->wm_base == NULL) {
         uint32_t v = version < 6 ? version : 6;
         dp->wm_base = wl_registry_bind(reg, name, &xdg_wm_base_interface, v);
     } else if (strcmp(interface, wl_seat_interface.name) == 0 &&
@@ -35,13 +38,16 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name,
                dp->wl_output == NULL) {
         uint32_t v = version < 3 ? version : 3;
         dp->wl_output = wl_registry_bind(reg, name, &wl_output_interface, v);
-    } else if (strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0) {
+    } else if (strcmp(interface, zxdg_decoration_manager_v1_interface.name) == 0 &&
+               dp->deco_mgr == NULL) {
         dp->deco_mgr = wl_registry_bind(reg, name,
                           &zxdg_decoration_manager_v1_interface, 1);
-    } else if (strcmp(interface, wp_viewporter_interface.name) == 0) {
+    } else if (strcmp(interface, wp_viewporter_interface.name) == 0 &&
+               dp->viewporter == NULL) {
         dp->viewporter = wl_registry_bind(reg, name,
                           &wp_viewporter_interface, version < 1 ? version : 1);
-    } else if (strcmp(interface, wl_data_device_manager_interface.name) == 0) {
+    } else if (strcmp(interface, wl_data_device_manager_interface.name) == 0 &&
+               dp->dnd_mgr == NULL) {
         dp->dnd_mgr = wl_registry_bind(reg, name,
                           &wl_data_device_manager_interface, version < 3 ? version : 3);
     } else if (strcmp(interface, zwp_text_input_manager_v3_interface.name) == 0 &&

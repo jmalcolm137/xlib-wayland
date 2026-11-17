@@ -45,22 +45,31 @@ static unsigned int current_mods(Display *d)
     return m;
 }
 
-/* Deliver to target, then propagate up the tree like X. */
-static void deliver(Display *d, MwWindow *target, XEvent *ev, long mask)
+#define MW_MOTION_MASKS (PointerMotionMask | ButtonMotionMask | \
+                         Button1MotionMask | Button2MotionMask | \
+                         Button3MotionMask | Button4MotionMask | Button5MotionMask)
+
+/* X event propagation: starting at `from`, the first window up the tree that
+ * selected the event (`mask`; for motion, any motion mask that applies to
+ * `state`), unless a window on the way lists it in its do_not_propagate_mask.
+ * *subwindow is the child of that window on the path (None when it is `from`
+ * itself).  NULL when nobody selected it. */
+MwWindow *mw_propagate(MwWindow *from, long mask, unsigned int state,
+                       Window *subwindow)
 {
-    for (MwWindow *w = target; w; w = w->parent) {
-        if (w->event_mask & mask) {
-            if (getenv("MW_TRACE") &&
-                (ev->type == EnterNotify || ev->type == LeaveNotify))
-                fprintf(stderr, "MW: deliver crossing %s to 0x%lx mode=%d detail=%d\n",
-                        ev->type == EnterNotify ? "Enter" : "Leave", w->id,
-                        ev->xcrossing.mode, ev->xcrossing.detail);
-            ev->xany.window = w->id;
-            mw_put_event(d, ev);
-            return;
+    Window child = None;
+    for (MwWindow *w = from; w; child = w->id, w = w->parent) {
+        bool sel = (mask & MW_MOTION_MASKS)
+                   ? mw_motion_selected(w->event_mask, state)
+                   : (w->event_mask & mask) != 0;
+        if (sel) {
+            if (subwindow) *subwindow = child;
+            return w;
         }
-        if (w->do_not_propagate_mask & mask) return;
+        if (w->do_not_propagate_mask & mask) break;
     }
+    if (subwindow) *subwindow = None;
+    return NULL;
 }
 
 /* Offset of a window's content origin from its top-level surface origin.
@@ -80,6 +89,7 @@ static void pt_event(Display *d, MwWindow *w, XEvent *ev, int type,
 {
     int wx, wy;
     origin_rel(w, &wx, &wy);
+    memset(ev, 0, sizeof *ev);
     ev->xany.type = type;
     ev->xany.display = d;
     ev->xany.serial = MWD(d)->serial++;
@@ -107,6 +117,18 @@ static void pt_event(Display *d, MwWindow *w, XEvent *ev, int type,
     ev->xbutton.state = state;
     ev->xbutton.button = (unsigned int)detail;
     ev->xbutton.same_screen = True;
+    if (type == EnterNotify || type == LeaveNotify) {
+        /* XCrossingEvent's same_screen/focus/state follow a different layout
+         * from XButtonEvent's: fill them through the right member. */
+        /* focus: the event window is the focus window or inside it. */
+        MwWindow *f = MWD(d)->kbd_focus;
+        bool in_focus = false;
+        for (MwWindow *a = w; f && a; a = a->parent)
+            if (a == f) { in_focus = true; break; }
+        ev->xcrossing.same_screen = True;
+        ev->xcrossing.focus = in_focus;
+        ev->xcrossing.state = state;
+    }
 
     /* Mirror the event as XInput2 for windows that selected it (the XI mask is
      * independent of the core event mask).  4/5 = ButtonPress/Release,
@@ -218,6 +240,8 @@ static void kbd_enter(void *data, struct wl_keyboard *kbd, uint32_t serial,
     }
 }
 
+static void repeat_notify(Display *d);
+
 static void kbd_leave(void *data, struct wl_keyboard *kbd, uint32_t serial,
                       struct wl_surface *surface)
 {
@@ -225,6 +249,12 @@ static void kbd_leave(void *data, struct wl_keyboard *kbd, uint32_t serial,
     Display *d = data;
     XDisplayImpl *dp = MWD(d);
     MwWindow *w = window_for_surface(d, surface);
+    /* No release follows a leave, so a key held while focus moves (Alt-Tab,
+     * Enter opening a dialog) would otherwise repeat forever. */
+    if (dp->repeat_key) {
+        dp->repeat_key = 0;
+        repeat_notify(d);
+    }
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: kbd_leave surface->win=%lx kbd_focus=%lx\n",
                 w ? w->id : 0UL, dp->kbd_focus ? dp->kbd_focus->id : 0UL);
@@ -291,11 +321,24 @@ static void deliver_key(Display *d, KeyCode kc, int type)
         unsigned int mods = current_mods(d) & ~LockMask;
         for (MwKeyGrab *g = dp->key_grabs; g; g = g->next) {
             if (g->keycode != AnyKey && g->keycode != kc) continue;
-            if ((g->modifiers & ~LockMask) != mods) continue;
+            if (!mw_grab_mods_match(g->modifiers, mods)) continue;
             MwWindow *gw = mw_window(d, g->window);
             if (gw && focus && is_ancestor(gw, focus)) { target = gw; break; }
         }
-        if (!target) target = focus;
+    }
+    /* Otherwise the X rule: the event starts at the window under the pointer
+     * if that is inside the focus window, else at the focus window, and
+     * propagates up to the first window that selected it. */
+    MwWindow *source = target;
+    if (!target) {
+        source = focus;
+        if (focus && dp->ptr_focus && is_ancestor(focus, dp->ptr_focus))
+            source = dp->ptr_focus;
+        Window sub = None;
+        target = mw_propagate(source, type == KeyPress ? KeyPressMask
+                                                       : KeyReleaseMask,
+                              ke.state, &sub);
+        ke.subwindow = sub;
     }
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: kbd_key kc=%u %s target=%lx mask=%lx\n", kc,
@@ -308,10 +351,14 @@ static void deliver_key(Display *d, KeyCode kc, int type)
         ke.y = dp->ptr_y - wy;
         ke.window = target->id;
         mw_put_event(d, (XEvent *)&ke);
-        /* XI2 keyboard event (2/3 = KeyPress/Release); device 3 is the master
-         * keyboard. */
-        mw_xi2_event(d, target->id, type == KeyPress ? 2 : 3, kc, 3, 3,
-                     ke.x, ke.y, ke.time);
+    }
+    /* XI2 keyboard event (2/3 = KeyPress/Release; device 3 is the master
+     * keyboard); XI2 does its own propagation from the source window. */
+    if (source) {
+        int wx, wy;
+        origin_rel(source, &wx, &wy);
+        mw_xi2_event(d, source->id, type == KeyPress ? 2 : 3, kc, 3, 3,
+                     dp->ptr_x - wx, dp->ptr_y - wy, ke.time);
     }
 }
 
@@ -511,8 +558,10 @@ static void kbd_repeat(void *data, struct wl_keyboard *kbd, int32_t rate, int32_
      * the delay to keep the first repeat prompt while still honouring shorter
      * compositor values.  MW_REPEAT_DELAY / MW_REPEAT_RATE override both. */
     if (dl > 200) dl = 200;
-    if (const char *e = getenv("MW_REPEAT_DELAY")) { int v = atoi(e); if (v >= 0) dl = v; }
-    if (const char *e = getenv("MW_REPEAT_RATE"))  { int v = atoi(e); if (v >  0) r  = v; }
+    const char *e = getenv("MW_REPEAT_DELAY");
+    if (e) { int v = atoi(e); if (v >= 0) dl = v; }
+    e = getenv("MW_REPEAT_RATE");
+    if (e) { int v = atoi(e); if (v >  0) r  = v; }
     dp->repeat_rate  = r;
     dp->repeat_delay = dl;
     if (getenv("MW_TRACE"))
@@ -573,28 +622,111 @@ static int win_depth(MwWindow *w)
     return n;
 }
 
+/* One crossing event, reported only to `w` itself (crossing events do not
+ * propagate). */
+static void cross_one(Display *d, MwWindow *w, int type, int mode, int detail,
+                      int rx, int ry, Window subwindow)
+{
+    if (!w) return;
+    if (getenv("MW_TRACE"))
+        fprintf(stderr, "MW: crossing %s -> 0x%lx at %d,%d mode=%d detail=%d\n",
+                type == EnterNotify ? "Enter" : "Leave", w->id, rx, ry, mode, detail);
+    XEvent ev;
+    pt_event(d, w, &ev, type, rx, ry, current_mods(d) | MWD(d)->ptr_state,
+             detail, mode, 0);
+    ev.xcrossing.mode = mode;
+    ev.xcrossing.detail = detail;
+    ev.xcrossing.subwindow = subwindow;
+    if (!(w->event_mask & (type == EnterNotify ? EnterWindowMask : LeaveWindowMask)))
+        return;
+    ev.xany.window = w->id;
+    mw_put_event(d, &ev);
+}
+
+static bool inside(MwWindow *a, MwWindow *w)      /* w is a or an inferior */
+{
+    for (; w; w = w->parent) if (w == a) return true;
+    return false;
+}
+
+/* The child of `anc` on the path down to `w` (w must be inside anc). */
+static MwWindow *child_toward(MwWindow *anc, MwWindow *w)
+{
+    while (w && w->parent != anc) w = w->parent;
+    return w;
+}
+
+/* The X crossing events for the pointer moving from `from` to `to`, either
+ * of which may be NULL (outside this client's windows).  Windows between the
+ * two get the virtual crossings X sends, with the details X uses: Inferior /
+ * Ancestor / Virtual when one contains the other, Nonlinear(Virtual)
+ * otherwise.  (rx,ry) is the pointer in `to`'s toplevel space; `from`'s side
+ * is computed from the current pointer. */
+static void pointer_cross(Display *d, MwWindow *from, MwWindow *to, int mode,
+                          int rx, int ry)
+{
+    if (from == to) return;
+    int lx = 0, ly = 0;
+    if (from) ptr_in_win_space(d, from, &lx, &ly);
+    if (from && to && inside(from, to)) {
+        /* Into an inferior. */
+        cross_one(d, from, LeaveNotify, mode, NotifyInferior, lx, ly,
+                  child_toward(from, to)->id);
+        for (MwWindow *w = child_toward(from, to); w != to; w = child_toward(w, to))
+            cross_one(d, w, EnterNotify, mode, NotifyVirtual, rx, ry,
+                      child_toward(w, to)->id);
+        cross_one(d, to, EnterNotify, mode, NotifyAncestor, rx, ry, None);
+    } else if (from && to && inside(to, from)) {
+        /* Out to an ancestor. */
+        cross_one(d, from, LeaveNotify, mode, NotifyAncestor, lx, ly, None);
+        for (MwWindow *w = from->parent; w != to; w = w->parent)
+            cross_one(d, w, LeaveNotify, mode, NotifyVirtual, lx, ly,
+                      child_toward(w, from)->id);
+        cross_one(d, to, EnterNotify, mode, NotifyInferior, rx, ry,
+                  child_toward(to, from)->id);
+    } else {
+        /* Neither contains the other: up to the common ancestor (the root
+         * for a window of another client) and down again. */
+        MwWindow *common = NULL;
+        for (MwWindow *a = from; a && !common; a = a->parent)
+            if (to && inside(a, to)) common = a;
+        if (from) {
+            cross_one(d, from, LeaveNotify, mode, NotifyNonlinear, lx, ly, None);
+            for (MwWindow *w = from->parent; w && w != common && w->parent; w = w->parent)
+                cross_one(d, w, LeaveNotify, mode, NotifyNonlinearVirtual, lx, ly,
+                          child_toward(w, from)->id);
+        }
+        if (to) {
+            MwWindow *path[64];
+            int n = 0;
+            for (MwWindow *w = to->parent; w && w != common && w->parent && n < 64;
+                 w = w->parent)
+                path[n++] = w;
+            while (n-- > 0)
+                cross_one(d, path[n], EnterNotify, mode, NotifyNonlinearVirtual,
+                          rx, ry, child_toward(path[n], to)->id);
+            cross_one(d, to, EnterNotify, mode, NotifyNonlinear, rx, ry, None);
+        }
+    }
+}
+
 /* Move the pointer focus to `deep`, emitting the X crossing events. */
 static void ptr_set_focus(Display *d, MwWindow *deep, int rx, int ry)
 {
     XDisplayImpl *dp = MWD(d);
     if (deep == dp->ptr_focus) return;
-    if (dp->ptr_focus) {
-        XLeaveWindowEvent le;
-        int lx, ly;
-        ptr_in_win_space(d, dp->ptr_focus, &lx, &ly);
-        pt_event(d, dp->ptr_focus, (XEvent *)&le, LeaveNotify, lx, ly,
-                 current_mods(d), NotifyNonlinear, NotifyNormal, 0);
-        le.mode = NotifyNormal; le.detail = NotifyAncestor;
-        deliver(d, dp->ptr_focus, (XEvent *)&le, LeaveWindowMask);
-    }
+    MwWindow *from = dp->ptr_focus;
     dp->ptr_focus = deep;
-    if (deep) {
-        XEnterWindowEvent en;
-        pt_event(d, deep, (XEvent *)&en, EnterNotify, rx, ry,
-                 current_mods(d), NotifyNonlinear, NotifyNormal, 0);
-        en.mode = NotifyNormal; en.detail = NotifyAncestor;
-        deliver(d, deep, (XEvent *)&en, EnterWindowMask);
-    }
+    pointer_cross(d, from, deep, NotifyNormal, rx, ry);
+}
+
+/* Move the pointer to `w` as if it had been entered (crossing events and
+ * all); used by the unit tests. */
+void mw_pointer_move_to(Display *d, MwWindow *w)
+{
+    int x = 0, y = 0;
+    if (w) ptr_in_win_space(d, w, &x, &y);
+    ptr_set_focus(d, w, x, y);
 }
 
 /* Once a menu is open the compositor reports the whole popup chain
@@ -702,12 +834,9 @@ static void ptr_leave(void *data, struct wl_pointer *p, uint32_t serial,
      * A drag that stays inside this application is left native. */
     mw_dnd_maybe_start(d);
     if (dp->ptr_focus) {
-        XLeaveWindowEvent le;
-        pt_event(d, dp->ptr_focus, (XEvent *)&le, LeaveNotify,
-                 dp->ptr_x, dp->ptr_y, current_mods(d), NotifyNonlinear,
-                 NotifyNormal, 0);
-        deliver(d, dp->ptr_focus, (XEvent *)&le, LeaveWindowMask);
+        MwWindow *from = dp->ptr_focus;
         dp->ptr_focus = NULL;
+        pointer_cross(d, from, NULL, NotifyNormal, 0, 0);
     }
     dp->ptr_toplevel = NULL;
     dp->ptr_wl_surface = NULL;
@@ -768,15 +897,60 @@ static MwWindow *ptr_deepest(Display *d, int *rx, int *ry)
 static void crossing(Display *d, MwWindow *w, int type, int mode, int detail,
                      int rx, int ry)
 {
-    if (!w) return;
-    if (getenv("MW_TRACE"))
-        fprintf(stderr, "MW: crossing %s -> 0x%lx at %d,%d mode=%d detail=%d\n",
-                type == EnterNotify ? "Enter" : "Leave", w->id, rx, ry, mode, detail);
+    cross_one(d, w, type, mode, detail, rx, ry, None);
+}
+
+/* Report a pointer event (button or motion) the X way.  An active grab with
+ * owner_events reports it normally when some window of the client selected
+ * it, and otherwise to the grab window if the grab's mask selects it; an
+ * implicit grab (the press window) is a grab without owner_events whose mask
+ * is that window's own selection; with no grab the event propagates up from
+ * the window under the pointer.  Returns the window it went to, or NULL. */
+static MwWindow *pointer_deliver(Display *d, MwWindow *deep, int type,
+                                 int rx, int ry, unsigned int state,
+                                 int detail, long mask)
+{
+    XDisplayImpl *dp = MWD(d);
+    MwWindow *t = NULL;
+    Window sub = None;
+    bool motion = (mask & MW_MOTION_MASKS) != 0;
+    if (dp->ptr_grab_active) {
+        if (dp->ptr_grab_owner && deep) t = mw_propagate(deep, mask, state, &sub);
+        if (!t) {
+            long gm = (long)dp->ptr_grab_mask;
+            if (motion ? mw_motion_selected(gm, state) : (gm & mask) != 0)
+                t = dp->ptr_grab_window;
+        }
+    } else if (dp->implicit_grab) {
+        long im = dp->implicit_grab->event_mask;
+        if (motion ? mw_motion_selected(im, state) : (im & mask) != 0)
+            t = dp->implicit_grab;
+    } else if (deep) {
+        t = mw_propagate(deep, mask, state, &sub);
+    }
+    if (!t) {
+        /* No core selection -- but XI2 selections are independent, and
+         * pt_event mirrors the event for those. */
+        MwWindow *xi = dp->ptr_grab_active ? dp->ptr_grab_window
+                     : dp->implicit_grab ? dp->implicit_grab : deep;
+        if (xi) {
+            int ex = rx, ey = ry;
+            if (!deep || !same_toplevel(xi, deep)) ptr_in_win_space(d, xi, &ex, &ey);
+            XEvent ev;
+            pt_event(d, xi, &ev, type, ex, ey, state, detail, NotifyNormal, 0);
+        }
+        return NULL;
+    }
+    /* (rx,ry) is in the pointer's toplevel; a grab window elsewhere (a menu
+     * bar while the pointer is over its popup) gets its own coordinates. */
+    int ex = rx, ey = ry;
+    if (!deep || !same_toplevel(t, deep)) ptr_in_win_space(d, t, &ex, &ey);
     XEvent ev;
-    pt_event(d, w, &ev, type, rx, ry, current_mods(d), detail, mode, 0);
-    ev.xcrossing.mode = mode;
-    ev.xcrossing.detail = detail;
-    deliver(d, w, &ev, type == EnterNotify ? EnterWindowMask : LeaveWindowMask);
+    pt_event(d, t, &ev, type, ex, ey, state, detail, NotifyNormal, 0);
+    ev.xbutton.subwindow = sub;
+    ev.xany.window = t->id;
+    mw_put_event(d, &ev);
+    return t;
 }
 
 static void ptr_motion(void *data, struct wl_pointer *p, uint32_t time,
@@ -791,8 +965,6 @@ static void ptr_motion(void *data, struct wl_pointer *p, uint32_t time,
     MwWindow *deep = ptr_deepest(d, &rx, &ry);
     dp->ptr_x = rx; dp->ptr_y = ry;
 
-    bool grabbed = dp->ptr_grab_active || dp->implicit_grab;
-
     /* Enter/Leave follow the real pointer position and are reported even
      * while a grab is active -- that is how X behaves, and Motif relies on it:
      * an XmMenuButton arms on EnterNotify and disarms on LeaveNotify, so
@@ -802,16 +974,7 @@ static void ptr_motion(void *data, struct wl_pointer *p, uint32_t time,
      * unconditionally further down regardless of grab state, so deriving the
      * crossing events the same way keeps the two consistent. */
     bool hover_changed = (deep != dp->ptr_focus);
-    if (deep && deep != dp->ptr_focus) {
-        if (dp->ptr_focus) {
-            int lx, ly;
-            ptr_in_win_space(d, dp->ptr_focus, &lx, &ly);
-            crossing(d, dp->ptr_focus, LeaveNotify, NotifyNormal, NotifyNonlinear, lx, ly);
-        }
-        dp->ptr_focus = deep;
-        crossing(d, deep, EnterNotify, NotifyNormal, NotifyNonlinear, rx, ry);
-    }
-    if (deep) dp->ptr_focus = deep;
+    if (deep && deep != dp->ptr_focus) ptr_set_focus(d, deep, rx, ry);
     /* Cursor inheritance follows the window under the pointer. */
     if (hover_changed) mw_pointer_update_cursor(d, deep);
 
@@ -823,24 +986,48 @@ static void ptr_motion(void *data, struct wl_pointer *p, uint32_t time,
         dp->ptr_grab_mask = 0;
     }
 
-    MwWindow *target;
-    if (dp->ptr_grab_active)
-        target = (dp->ptr_grab_owner && deep) ? deep : dp->ptr_grab_window;
-    else if (dp->implicit_grab)
-        target = dp->implicit_grab;
-    else
-        target = deep;
-    if (!target) return;
+    pointer_deliver(d, deep, MotionNotify, rx, ry,
+                    current_mods(d) | dp->ptr_state, 0, MW_MOTION_MASKS);
+}
 
-    XEvent ev;
-    pt_event(d, target, &ev, MotionNotify, rx, ry, current_mods(d) | dp->ptr_state,
-             0, NotifyNormal, 0);
-    bool want = grabbed ? (dp->ptr_grab_active ? (dp->ptr_grab_mask & PointerMotionMask)
-                                               : true)
-                        : (target->event_mask & PointerMotionMask);
-    if (want) {
-        ev.xmotion.window = target->id;
-        mw_put_event(d, &ev);
+/* Does a passive grab registered for `grab_mods` fire for an event whose
+ * state is `state`?  AnyModifier matches everything; otherwise the key
+ * modifiers must be equal.  Caps Lock and Num Lock (Mod2) are ignored:
+ * toolkits register a grab once per lock combination, and treating them as
+ * significant only made a grab miss whenever a lock was on. */
+bool mw_grab_mods_match(unsigned int grab_mods, unsigned int state)
+{
+    if (grab_mods & AnyModifier) return true;
+    const unsigned int ignore = LockMask | Mod2Mask;
+    return ((grab_mods ^ state) & 0xff & ~ignore) == 0;
+}
+
+/* Is a MotionNotify with pointer state `state` selected by `mask`?
+ * PointerMotionMask always; ButtonMotionMask while any button is held;
+ * ButtonNMotionMask while button N is held (its bit coincides with ButtonNMask
+ * in the state). */
+bool mw_motion_selected(long mask, unsigned int state)
+{
+    const unsigned int buttons = Button1Mask | Button2Mask | Button3Mask |
+                                 Button4Mask | Button5Mask;
+    if (mask & PointerMotionMask) return true;
+    if ((mask & ButtonMotionMask) && (state & buttons)) return true;
+    return ((unsigned long)mask & state & buttons) != 0;
+}
+
+/* Linux input button code -> X button number, as the X.Org libinput driver
+ * maps them: left/middle/right are 1/2/3 (BTN_RIGHT is 0x111 but X button 3),
+ * and BTN_SIDE onwards start at 8, past the wheel buttons 4-7.  0 for codes
+ * that are not mouse buttons. */
+unsigned int mw_wl_button_to_x(uint32_t code)
+{
+    switch (code) {
+    case 0x110: return 1;                 /* BTN_LEFT */
+    case 0x112: return 2;                 /* BTN_MIDDLE */
+    case 0x111: return 3;                 /* BTN_RIGHT */
+    default:
+        if (code >= 0x113 && code <= 0x117) return 8 + (code - 0x113);
+        return 0;
     }
 }
 
@@ -850,8 +1037,8 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial,
     (void)p; (void)time;
     Display *d = data;
     XDisplayImpl *dp = MWD(d);
-    unsigned int xbutton = button;
-    if (xbutton >= 0x110) xbutton = xbutton - 0x110 + 1;
+    unsigned int xbutton = mw_wl_button_to_x(button);
+    if (xbutton == 0) return;
     bool pressed = state == WL_POINTER_BUTTON_STATE_PRESSED;
 
     dp->last_input_serial = serial;
@@ -868,7 +1055,9 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial,
      * depends on a held button -- NEdit's "Button1<MotionNotify>:
      * extend_adjust()" among them -- silently never matched and mouse
      * text selection did nothing. */
-    unsigned int btn_mask = xbutton >= 1 ? (1u << (8 + xbutton - 1)) : 0;
+    /* Only buttons 1-5 have a state bit. */
+    unsigned int btn_mask = (xbutton >= 1 && xbutton <= 5)
+                            ? (1u << (8 + xbutton - 1)) : 0;
     unsigned int ev_state = current_mods(d) | dp->ptr_state;
     if (pressed) dp->ptr_state |= btn_mask;
     else dp->ptr_state &= ~btn_mask;
@@ -903,69 +1092,35 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial,
     }
 
     long bit = pressed ? ButtonPressMask : ButtonReleaseMask;
-    MwWindow *target = NULL;
-    bool want = false;
 
-    if (dp->ptr_grab_active) {
-        /* An owner_events grab reports the event to the window under the
-         * pointer when that window selected it, and otherwise to the grab
-         * window through the grab's mask.  Xt registers its popup-menu action
-         * that way, and it is the path by which xterm's scrollbar child
-         * receives the press that drives it; checking only the grab's mask
-         * dropped the event before Xt could see it. */
-        if (dp->ptr_grab_owner && deep && (deep->event_mask & bit)) {
-            target = deep;
-            want = true;
-        } else {
-            target = dp->ptr_grab_window;
-            want = (dp->ptr_grab_mask & bit) != 0;
-        }
-    } else if (dp->implicit_grab) {
-        target = dp->implicit_grab;
-        want = true;
-    } else {
-        target = deep;
-        if (pressed && deep) {
-            for (MwBtnGrab *g = dp->btn_grabs; g; g = g->next) {
-                if (g->button != xbutton && g->button != AnyButton) continue;
-                MwWindow *gw = mw_window(d, g->window);
-                if (gw && (deep == gw || is_ancestor(gw, deep))) {
-                    dp->ptr_grab_window = gw;
-                    dp->ptr_grab_owner = g->owner_events;
-                    dp->ptr_grab_mask = g->event_mask;
-                    dp->ptr_grab_mode = g->pointer_mode;
-                    dp->ptr_grab_active = true;
-                    dp->ptr_grab_temporary = true;
-                    if (g->owner_events && (deep->event_mask & bit)) {
-                        target = deep;
-                        want = true;
-                    } else {
-                        target = gw;
-                        want = (g->event_mask & bit) != 0;
-                    }
-                    if (getenv("MW_TRACE"))
-                        fprintf(stderr, "MW: passive grab 0x%lx activated\n", gw->id);
-                    break;
-                }
+    /* A press with no grab in effect may activate a passive grab
+     * (XGrabButton) on the window under the pointer or an ancestor. */
+    if (pressed && deep && !dp->ptr_grab_active && !dp->implicit_grab) {
+        for (MwBtnGrab *g = dp->btn_grabs; g; g = g->next) {
+            if (g->button != xbutton && g->button != AnyButton) continue;
+            if (!mw_grab_mods_match(g->modifiers, current_mods(d))) continue;
+            MwWindow *gw = mw_window(d, g->window);
+            if (gw && (deep == gw || is_ancestor(gw, deep))) {
+                dp->ptr_grab_window = gw;
+                dp->ptr_grab_owner = g->owner_events;
+                dp->ptr_grab_mask = g->event_mask;
+                dp->ptr_grab_mode = g->pointer_mode;
+                dp->ptr_grab_active = true;
+                dp->ptr_grab_temporary = true;
+                if (getenv("MW_TRACE"))
+                    fprintf(stderr, "MW: passive grab 0x%lx activated\n", gw->id);
+                break;
             }
         }
-        if (!dp->ptr_grab_active)
-            want = target && (target->event_mask & bit);
     }
-    if (!target) return;
+
+    MwWindow *target = pointer_deliver(d, deep, pressed ? ButtonPress : ButtonRelease,
+                                       rx, ry, ev_state, (int)xbutton, bit);
     if (getenv("MW_TRACE"))
-        fprintf(stderr, "MW: button %s -> target=0x%lx mask=0x%lx want=%d at %d,%d (deep ptr=%d,%d)\n",
-                pressed ? "press" : "release", target->id, target->event_mask, want,
-                rx, ry, dp->ptr_x, dp->ptr_y);
+        fprintf(stderr, "MW: button %s -> target=0x%lx at %d,%d\n",
+                pressed ? "press" : "release", target ? target->id : 0UL, rx, ry);
 
-    XEvent ev;
-    pt_event(d, target, &ev, pressed ? ButtonPress : ButtonRelease, rx, ry,
-             ev_state, (int)xbutton, NotifyNormal, 0);
-    if (want) {
-        ev.xbutton.window = target->id;
-        mw_put_event(d, &ev);
-    }
-
+    /* The press window holds an implicit grab until the last release. */
     if (pressed && !dp->ptr_grab_active && !dp->implicit_grab)
         dp->implicit_grab = target;
     if (!pressed && dp->ptr_state == 0) {
@@ -982,7 +1137,9 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial,
 void mw_pointer_synthetic_release(Display *d, unsigned int xbutton)
 {
     XDisplayImpl *dp = MWD(d);
-    unsigned int btn_mask = xbutton >= 1 ? (1u << (8 + xbutton - 1)) : 0;
+    /* Only buttons 1-5 have a state bit. */
+    unsigned int btn_mask = (xbutton >= 1 && xbutton <= 5)
+                            ? (1u << (8 + xbutton - 1)) : 0;
     if (dp->ptr_state & btn_mask) dp->ptr_state &= ~btn_mask;
 
     MwWindow *target = dp->ptr_grab_window;
@@ -1011,18 +1168,18 @@ void mw_pointer_synthetic_release(Display *d, unsigned int xbutton)
 /* One wheel click as the X button clients expect: 4/5 vertical, 6/7 horizontal.
  * Wayland's positive direction is down/right, which X reports as 5 and 7. */
 static void wheel_click(Display *d, int axis, int dir){
-    MwWindow *target = MWD(d)->ptr_focus;
-    if (!target) return;
+    XDisplayImpl *dp = MWD(d);
     unsigned int b;
     if (axis == WL_POINTER_AXIS_VERTICAL_SCROLL) b = dir > 0 ? 5 : 4;
     else                                         b = dir > 0 ? 7 : 6;
-    XButtonEvent be;
-    pt_event(d, target, (XEvent *)&be, ButtonPress, MWD(d)->ptr_x, MWD(d)->ptr_y,
-             current_mods(d), (int)b, NotifyNormal, 0);
-    deliver(d, target, (XEvent *)&be, ButtonPressMask);
-    pt_event(d, target, (XEvent *)&be, ButtonRelease, MWD(d)->ptr_x,
-             MWD(d)->ptr_y, current_mods(d), (int)b, NotifyNormal, 0);
-    deliver(d, target, (XEvent *)&be, ButtonReleaseMask);
+    /* Like any button: through grabs and propagation, with the held
+     * buttons in the state. */
+    unsigned int st = current_mods(d) | dp->ptr_state;
+    MwWindow *deep = dp->ptr_focus;
+    pointer_deliver(d, deep, ButtonPress, dp->ptr_x, dp->ptr_y, st, (int)b,
+                    ButtonPressMask);
+    pointer_deliver(d, deep, ButtonRelease, dp->ptr_x, dp->ptr_y, st, (int)b,
+                    ButtonReleaseMask);
 }
 
 /* Wayland delivers scroll on the axis, in surface-local coordinates; X clients
@@ -1207,9 +1364,11 @@ void mw_input_fini(Display *d)
     if (dp->wl_keyboard) wl_keyboard_destroy(dp->wl_keyboard);
     if (dp->wl_pointer) wl_pointer_destroy(dp->wl_pointer);
     if (dp->wl_touch) wl_touch_destroy(dp->wl_touch);
+    if (dp->wl_seat) wl_seat_destroy(dp->wl_seat);
     dp->wl_keyboard = NULL;
     dp->wl_pointer = NULL;
     dp->wl_touch = NULL;
+    dp->wl_seat = NULL;
     MwBtnGrab *bg = dp->btn_grabs;
     while (bg) { MwBtnGrab *n = bg->next; free(bg); bg = n; }
     MwKeyGrab *kg = dp->key_grabs;
@@ -1304,13 +1463,21 @@ int XGrabButton(Display *d, unsigned int button, unsigned int modifiers,
 {
     (void)confine_to;
     XDisplayImpl *dp = MWD(d);
-    MwBtnGrab *g = calloc(1, sizeof *g);
+    /* Grabbing the same combination again replaces the earlier grab. */
+    MwBtnGrab *g = dp->btn_grabs;
+    while (g && !(g->window == grab_window && g->button == button &&
+                  g->modifiers == modifiers))
+        g = g->next;
+    if (!g) {
+        g = calloc(1, sizeof *g);
+        if (!g) return 0;
+        g->next = dp->btn_grabs;
+        dp->btn_grabs = g;
+    }
     g->window = grab_window; g->button = button; g->modifiers = modifiers;
     g->owner_events = owner_events; g->event_mask = event_mask;
     g->pointer_mode = pointer_mode; g->keyboard_mode = keyboard_mode;
     g->cursor = cursor;
-    g->next = dp->btn_grabs;
-    dp->btn_grabs = g;
     return 1;
 }
 
@@ -1321,11 +1488,11 @@ int XUngrabButton(Display *d, unsigned int button, unsigned int modifiers,
     MwBtnGrab **pp = &dp->btn_grabs;
     while (*pp) {
         if ((*pp)->window == grab_window &&
-            ((*pp)->button == button || button == AnyButton)) {
+            ((*pp)->button == button || button == AnyButton) &&
+            ((*pp)->modifiers == modifiers || modifiers == AnyModifier)) {
             MwBtnGrab *dead = *pp; *pp = dead->next; free(dead);
         } else pp = &(*pp)->next;
     }
-    (void)modifiers;
     return 1;
 }
 
@@ -1333,12 +1500,19 @@ int XGrabKey(Display *d, int keycode, unsigned int modifiers, Window grab_window
              Bool owner_events, int pointer_mode, int keyboard_mode)
 {
     XDisplayImpl *dp = MWD(d);
-    MwKeyGrab *g = calloc(1, sizeof *g);
+    MwKeyGrab *g = dp->key_grabs;
+    while (g && !(g->window == grab_window && g->keycode == (KeyCode)keycode &&
+                  g->modifiers == modifiers))
+        g = g->next;
+    if (!g) {
+        g = calloc(1, sizeof *g);
+        if (!g) return 0;
+        g->next = dp->key_grabs;
+        dp->key_grabs = g;
+    }
     g->window = grab_window; g->keycode = (KeyCode)keycode; g->modifiers = modifiers;
     g->owner_events = owner_events; g->pointer_mode = pointer_mode;
     g->keyboard_mode = keyboard_mode;
-    g->next = dp->key_grabs;
-    dp->key_grabs = g;
     return 1;
 }
 
@@ -1348,11 +1522,11 @@ int XUngrabKey(Display *d, int keycode, unsigned int modifiers, Window grab_wind
     MwKeyGrab **pp = &dp->key_grabs;
     while (*pp) {
         if ((*pp)->window == grab_window &&
-            ((*pp)->keycode == keycode || keycode == AnyKey)) {
+            ((*pp)->keycode == keycode || keycode == AnyKey) &&
+            ((*pp)->modifiers == modifiers || modifiers == AnyModifier)) {
             MwKeyGrab *dead = *pp; *pp = dead->next; free(dead);
         } else pp = &(*pp)->next;
     }
-    (void)modifiers;
     return 1;
 }
 
@@ -1390,14 +1564,22 @@ Bool XQueryPointer(Display *d, Window w, Window *root, Window *child,
 {
     XDisplayImpl *dp = MWD(d);
     MwWindow *win = mw_window(d, w);
-    /* Pointer position relative to `w` (dp->ptr_x/y are toplevel-relative). */
+    /* dp->ptr_x/y are relative to the toplevel under the pointer; the root
+     * position adds that toplevel's origin, and `w`'s position is taken from
+     * the root position, so a window of another toplevel is right too. */
+    int px = dp->ptr_x, py = dp->ptr_y;
+    if (dp->ptr_toplevel) {
+        int tx, ty;
+        mw_window_origin(dp->ptr_toplevel, &tx, &ty);
+        px += tx; py += ty;
+    }
     int ox = 0, oy = 0;
-    if (win) origin_rel(win, &ox, &oy);
-    int rx = dp->ptr_x - ox;
-    int ry = dp->ptr_y - oy;
+    if (win) mw_window_origin(win, &ox, &oy);
+    int rx = px - ox;
+    int ry = py - oy;
     if (root) *root = MWSCR(d)->root;
-    if (root_x) *root_x = dp->ptr_x;
-    if (root_y) *root_y = dp->ptr_y;
+    if (root_x) *root_x = px;
+    if (root_y) *root_y = py;
     if (win_x) *win_x = rx;
     if (win_y) *win_y = ry;
     if (mask) *mask = dp->ptr_state | current_mods(d);
@@ -1444,25 +1626,7 @@ static void ptr_warp(Display *d, int root_x, int root_y)
     int off = top->tl ? mw_toplevel_content_offset(top->tl) : 0;
     int rx = dp->ptr_surf_x, ry = dp->ptr_surf_y - off;
     MwWindow *deep = (ry >= 0) ? mw_deepest_at(top, rx, ry, NULL, NULL) : NULL;
-    if (deep != dp->ptr_focus) {
-        if (dp->ptr_focus) {
-            XLeaveWindowEvent le;
-            int lx, ly;
-            ptr_in_win_space(d, dp->ptr_focus, &lx, &ly);
-            pt_event(d, dp->ptr_focus, (XEvent *)&le, LeaveNotify, lx, ly,
-                     current_mods(d), NotifyNonlinear, NotifyNormal, 0);
-            le.mode = NotifyNormal; le.detail = NotifyAncestor;
-            deliver(d, dp->ptr_focus, (XEvent *)&le, LeaveWindowMask);
-        }
-        dp->ptr_focus = deep;
-        if (deep) {
-            XEnterWindowEvent en;
-            pt_event(d, deep, (XEvent *)&en, EnterNotify, rx, ry,
-                     current_mods(d), NotifyNonlinear, NotifyNormal, 0);
-            en.mode = NotifyNormal; en.detail = NotifyAncestor;
-            deliver(d, deep, (XEvent *)&en, EnterWindowMask);
-        }
-    }
+    if (deep != dp->ptr_focus) ptr_set_focus(d, deep, rx, ry);
     dp->ptr_x = rx; dp->ptr_y = ry;
     if (deep) {
         XEvent ev;

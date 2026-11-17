@@ -80,7 +80,7 @@ xlib_sources = files(
   'src/xlib/xim.c', 'src/xlib/xi2.c', 'src/xlib/xkb.c', 'src/xlib/xmb.c', 'src/xlib/xtcompat.c', 'src/xlib/xlibint.c',
   'src/xlib/xresources.c', 'src/xlib/xftbridge.c', 'src/xlib/render.c',
   'src/xlib/xshape.c', 'src/xlib/broker.c', 'src/xlib/smprops.c', 'src/xlib/dnd.c',
-  'src/xlib/xsettings.c', 'src/xlib/xdnd.c', 'src/xlib/xfixes.c', 'src/xlib/xsync.c',
+  'src/xlib/xsettings.c', 'src/xlib/fdio.c', 'src/xlib/xdnd.c', 'src/xlib/xfixes.c', 'src/xlib/xsync.c',
   'src/xlib/xdamage.c', 'src/xlib/session.c', 'src/xlib/xinerama.c')
 
 # Installed as libX11.so.6 so that -lX11, dlopen("libX11.so.6") and the
@@ -298,8 +298,27 @@ if get_option('tests')
     link_with: libx11,
     install: false)
 
-  test('unit', executable('test_core', 'tests/test_core.c',
-      include_directories: inc, link_with: libx11))
+  # Registered at the end of the file, once the headless compositor exists.
+  test_core = executable('test_core', 'tests/test_core.c',
+    include_directories: inc, link_with: libx11)
+
+  # Render through the real libXrender request encoders.
+  test_render = executable('test_render', 'tests/test_render.c',
+    include_directories: inc,
+    dependencies: [xrender_dep],
+    link_with: libx11)
+
+  # A shared selection carried between two shim processes by the broker.
+  test_broker = executable('test_broker', 'tests/test_broker.c',
+    include_directories: inc,
+    link_with: libx11)
+
+  # White-box tests of the event queue, window tree, keymap and wire helpers.
+  test_internal = executable('test_internal', 'tests/test_internal.c',
+    client_protos,
+    include_directories: inc,
+    dependencies: [wl_dep, wcursor_dep, xkb_dep, pixman_dep],
+    link_with: libx11)
 
   # Motif-free reproduction of the menu item-selection path: override-redirect
   # popup + XGrabPointer(owner_events=True) + item child windows.  Driven by
@@ -472,7 +491,7 @@ if get_option('tools')
       command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
   ]
   wl_server_dep = dependency('wayland-server')
-  executable('headless-compositor',
+  headless_compositor = executable('headless-compositor',
     'tools/headless-compositor.c', server_protos,
     include_directories: inc,
     dependencies: [wl_server_dep, xkb_dep, dependency('libpng')],
@@ -480,4 +499,21 @@ if get_option('tools')
 
   # Relay an X session command ("save"/"close") to every shim process.
   executable('mw-session', 'tools/mw-session.c', install: false)
+endif
+
+# The unit test opens a display for its atom/property/window/keymap checks.
+# Give it a private headless compositor rather than whatever WAYLAND_DISPLAY
+# names (on a desktop, the session's own compositor).
+if get_option('tests')
+  if get_option('tools')
+    with_compositor = find_program('tests/with-compositor.sh')
+    test('unit', with_compositor, args: [headless_compositor, test_core])
+    test('internal', with_compositor,
+      args: [headless_compositor, test_internal])
+    test('render', with_compositor, args: [headless_compositor, test_render])
+    test('broker', with_compositor, args: [headless_compositor, test_broker],
+      timeout: 60)
+  else
+    test('unit', test_core, env: ['WAYLAND_DISPLAY=mw-no-such-display'])
+  endif
 endif

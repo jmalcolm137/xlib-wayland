@@ -11,30 +11,71 @@ static MwXFont *load_xfont(Display *d, const char *name, bool query)
 {
     (void)query;
     if (!name) name = "fixed";
-    /* Reuse if the same name is already loaded. */
-    XDisplayImpl *dp = MWD(d);
-    for (size_t i = 0; i < dp->table_cap; i++) {
-        if (dp->table[i].id && dp->table[i].kind == MW_OBJ_FONT) {
-            MwXFont *e = dp->table[i].obj;
-            if (e && e->fs && e->fs->per_char) {
-                /* match by name stored in properties? compare approximations */
-            }
-        }
-    }
     MwFont *rf = mw_font_create(name, 0);
     if (!rf) return NULL;
     MwXFont *xf = calloc(1, sizeof *xf);
+    XFontStruct *fs = calloc(1, sizeof *fs);
+    if (!xf || !fs) { free(xf); free(fs); mw_font_destroy(rf); return NULL; }
     xf->id = mw_alloc_id(d);
     xf->rfont = rf;
     xf->ascent = mw_font_ascent(rf);
     xf->descent = mw_font_descent(rf);
     xf->max_width = mw_font_max_width(rf);
-    XFontStruct *fs = calloc(1, sizeof *fs);
     fs->fid = xf->id;
     fill_font_struct(d, xf, fs);
     xf->fs = fs;
     mw_register(d, xf->id, MW_OBJ_FONT, xf);
     return xf;
+}
+
+static void destroy_xfont(Display *d, MwXFont *xf)
+{
+    mw_unregister(d, xf->id);
+    if (xf->fs) { free(xf->fs->per_char); free(xf->fs); }
+    if (xf->rfont) mw_font_destroy(xf->rfont);
+    free(xf);
+}
+
+void mw_font_unref(Display *d, MwXFont *xf)
+{
+    if (!xf) return;
+    if (--xf->refs <= 0 && xf->released) destroy_xfont(d, xf);
+}
+
+/* Point a GC at a font, holding a reference so the font survives its ID
+ * being released while the GC still draws with it. */
+void mw_gc_set_xfont(Display *d, GC gc, MwXFont *xf)
+{
+    if (xf) xf->refs++;
+    MwXFont *old = gc->xfont;
+    gc->xfont = xf;
+    gc->font = xf ? xf->id : None;
+    mw_font_unref(d, old);
+}
+
+/* The font a GC gets when none is given: one per display, not one per GC
+ * (each load measures 256 glyphs three times).  The display holds a
+ * reference; if the client released its ID, a fresh one is loaded. */
+MwXFont *mw_default_font(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (dp->default_font && dp->default_font->released) {
+        mw_font_unref(d, dp->default_font);
+        dp->default_font = NULL;
+    }
+    if (!dp->default_font) {
+        dp->default_font = load_xfont(d, "fixed", false);
+        if (dp->default_font) dp->default_font->refs++;
+    }
+    return dp->default_font;
+}
+
+static void release_font_id(Display *d, Font id)
+{
+    MwXFont *xf = mw_lookup(d, id, MW_OBJ_FONT);
+    if (!xf || xf->released) return;
+    xf->released = true;
+    if (xf->refs <= 0) destroy_xfont(d, xf);
 }
 
 static void fill_font_struct(Display *d, MwXFont *xf, XFontStruct *fs)
@@ -105,20 +146,14 @@ XFontStruct *XQueryFont(Display *d, XID font_ID)
 int XFreeFont(Display *d, XFontStruct *fs)
 {
     if (!fs) return 0;
-    mw_unregister(d, fs->fid);
-    free(fs->per_char);
-    free(fs);
+    release_font_id(d, fs->fid);
     return 1;
 }
 
 int XUnloadFont(Display *d, Font font)
 {
-    MwXFont *xf = mw_font(d, font);
-    if (!xf) return 0;
-    if (xf->fs) { free(xf->fs->per_char); free(xf->fs); }
-    if (xf->rfont) mw_font_destroy(xf->rfont);
-    mw_unregister(d, font);
-    free(xf);
+    if (!mw_font(d, font)) return 0;
+    release_font_id(d, font);
     return 1;
 }
 
@@ -133,7 +168,9 @@ char **XListFonts(Display *d, _Xconst char *pattern, int maxnames, int *count)
     };
     int n = (int)(sizeof(names) / sizeof(names[0]));
     if (maxnames > 0 && n > maxnames) n = maxnames;
-    char **out = calloc(n, sizeof(char *));
+    /* NULL-terminated: XFreeFontNames walks the list to its NULL. */
+    char **out = calloc((size_t)n + 1, sizeof(char *));
+    if (!out) { *count = 0; return NULL; }
     for (int i = 0; i < n; i++) out[i] = strdup(names[i]);
     *count = n;
     return out;
@@ -227,8 +264,7 @@ int XTextExtents16(XFontStruct *fs, _Xconst XChar2b *s, int n, int *dir,
 
 int XSetFont(Display *d, GC gc, Font font)
 {
-    gc->font = font;
-    gc->xfont = mw_font(d, font);
+    mw_gc_set_xfont(d, gc, mw_font(d, font));
     return 1;
 }
 
@@ -238,7 +274,15 @@ static int draw_glyphs(Display *d, Drawable dr, GC gc, int x, int y,
     int w, h;
     MwCanvas *c = mw_canvas_for_drawable(d, dr, gc, &w, &h);
     if (!c) return 0;
-    if (fill_bg) {
+    if (fill_bg && gc->xfont && gc->xfont->rfont) {
+        int tw = mw_font_text_width_utf8(gc->xfont->rfont, (const char *)utf8, len);
+        if (tw < 1) tw = 1;
+        mw_set_source_argb(c, 0xff000000u | (uint32_t)(gc->background & 0xffffff));
+        mw_rect(c, x - 1, y - gc->xfont->ascent - 1,
+                tw + 2, gc->xfont->ascent + gc->xfont->descent + 2);
+        mw_fill_path(c);
+        mw_set_source_argb(c, 0xff000000u | (uint32_t)(gc->foreground & 0xffffff));
+    } else if (fill_bg) {
         /* XDrawImageString paints the string's background over its full text
          * extent before drawing the glyphs.  The extent is a pixel width, not
          * the byte count: using the byte count under-filled badly ("a" erased
@@ -287,13 +331,44 @@ static const char *char2b_to_utf8(unsigned int c, char *buf, int *out)
     return buf;
 }
 
+/* Core 8-bit text is Latin-1 (the core fonts are ISO 8859-1): convert it to
+ * UTF-8 for the raster, or a byte like 0xE9 (é) would be taken as the lead of
+ * a multibyte sequence and swallow the characters after it. */
+static int draw_latin1(Display *d, Drawable dr, GC gc, int x, int y,
+                       const char *s, int length, int fill_bg)
+{
+    if (length <= 0) return 1;
+    unsigned char stackbuf[512], *buf = stackbuf;
+    if ((size_t)length * 2 > sizeof stackbuf) {
+        buf = malloc((size_t)length * 2);
+        if (!buf) return 0;
+    }
+    int o = 0;
+    for (int i = 0; i < length; i++) {
+        unsigned char ch = (unsigned char)s[i];
+        if (ch < 0x80) buf[o++] = ch;
+        else { buf[o++] = (unsigned char)(0xc0 | (ch >> 6));
+               buf[o++] = (unsigned char)(0x80 | (ch & 0x3f)); }
+    }
+    int r = draw_glyphs(d, dr, gc, x, y, buf, o, fill_bg);
+    if (buf != stackbuf) free(buf);
+    return r;
+}
+
+/* UTF-8 text for the Xmb/Xutf8 entry points. */
+int mw_draw_utf8(Display *d, Drawable dr, GC gc, int x, int y,
+                 const char *s, int length, int fill_bg)
+{
+    return draw_glyphs(d, dr, gc, x, y, (const unsigned char *)s, length, fill_bg);
+}
+
 int XDrawString(Display *d, Drawable dr, GC gc, int x, int y,
                 _Xconst char *s, int length)
-{ return draw_glyphs(d, dr, gc, x, y, (const unsigned char *)s, length, 0); }
+{ return draw_latin1(d, dr, gc, x, y, s, length, 0); }
 
 int XDrawImageString(Display *d, Drawable dr, GC gc, int x, int y,
                      _Xconst char *s, int length)
-{ return draw_glyphs(d, dr, gc, x, y, (const unsigned char *)s, length, 1); }
+{ return draw_latin1(d, dr, gc, x, y, s, length, 1); }
 
 int XDrawString16(Display *d, Drawable dr, GC gc, int x, int y,
                   _Xconst XChar2b *s, int length)

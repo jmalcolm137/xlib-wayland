@@ -31,6 +31,10 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <wchar.h>
+#include <strings.h>
+#include <langinfo.h>
+#include <stdbool.h>
+#include <stdint.h>
 
 /* The nested-list layout produced by XVaCreateNestedList (src/xlib/xtcompat.c)
  * and by Motif's VaCopy.  Kept in sync with that file. */
@@ -47,9 +51,12 @@ typedef struct { char *name; long value; } MwArg;
 /* XIM attribute names are string literals, not pointer identities. */
 #define KEYEQ(a, b) (strcmp((a), (b)) == 0)
 
+struct _XIC;
+
 struct _XIM {
     Display     *display;
     XIMCallback *destroy_cb;   /* from XSetIMValues(XNDestroyCallback) */
+    struct _XIC *ics;          /* the IM's input contexts (XCloseIM frees them) */
 };
 
 struct _XIC {
@@ -87,6 +94,7 @@ struct _XIC {
     int           ncommits, commit_cap;
 
     MwToplevel   *tl;               /* toplevel the IC lives in, if known */
+    struct _XIC  *next_ic;          /* in im->ics */
 };
 
 /* ------------------------------------------------------------- utf-8 helpers */
@@ -523,13 +531,17 @@ XIM XOpenIM(Display *d, XrmDatabase db, char *res_name, char *res_class)
 {
     (void)db; (void)res_name; (void)res_class;
     struct _XIM *im = calloc(1, sizeof *im);
+    if (!im) return NULL;
     im->display = d;
     return im;
 }
 
+/* As in libX11, closing an IM destroys its input contexts: they would keep
+ * text input enabled and point at the freed IM. */
 Status XCloseIM(XIM im)
 {
     if (!im) return 1;
+    while (im->ics) XDestroyIC((XIC)im->ics);
     if (im->destroy_cb && im->destroy_cb->callback)
         im->destroy_cb->callback((XIM)im, im->destroy_cb->client_data, NULL);
     free(im);
@@ -638,6 +650,10 @@ XIC XCreateIC(XIM im, ...)
     va_end(ap);
 
     if (!ic->client && ic->focus) ic->client = ic->focus;
+    if (ic->im) {
+        ic->next_ic = ic->im->ics;
+        ic->im->ics = ic;
+    }
     return ic;
 }
 
@@ -662,9 +678,36 @@ void XDestroyIC(XIC xic)
         MWD(d)->text_input_ic = NULL;
     }
     ic_clear_preedit(ic);
+    if (ic->im)
+        for (struct _XIC **pp = &ic->im->ics; *pp; pp = &(*pp)->next_ic)
+            if (*pp == ic) { *pp = ic->next_ic; break; }
     for (int i = 0; i < ic->ncommits; i++) free(ic->commits[i]);
     free(ic->commits);
     free(ic);
+}
+
+/* One XGetICValues item: `value` is where to store the attribute.  A nested
+ * list is a list of more items to fill (not values to apply). */
+static void ic_get(struct _XIC *ic, const char *key, void *value)
+{
+    if (!value) return;
+    if (KEYEQ(key, XNInputStyle))
+        *(XIMStyle *)value = ic->input_style;
+    else if (KEYEQ(key, XNClientWindow))
+        *(Window *)value = ic->client;
+    else if (KEYEQ(key, XNFocusWindow))
+        *(Window *)value = ic->focus;
+    else if (KEYEQ(key, XNFilterEvents))
+        *(unsigned long *)value = 0;
+    else if (KEYEQ(key, XNResetState))
+        *(XIMResetState *)value = ic->reset_state;
+    else if (KEYEQ(key, XNPreeditAttributes))
+        ic_fill_preedit(ic, (const MwArg *)value);
+    else if (KEYEQ(key, XNStatusAttributes))
+        ic_fill_status(ic, (const MwArg *)value);
+    else if (KEYEQ(key, XNVaNestedList))
+        for (const MwArg *l = value; l->name; l++)
+            ic_get(ic, l->name, (void *)(uintptr_t)l->value);
 }
 
 char *XGetICValues(XIC xic, ...)
@@ -674,26 +717,8 @@ char *XGetICValues(XIC xic, ...)
     va_list ap;
     va_start(ap, xic);
     const char *key;
-    while ((key = va_arg(ap, const char *)) != NULL) {
-        void *value = va_arg(ap, void *);
-        if (!value) continue;
-        if (KEYEQ(key, XNInputStyle))
-            *(XIMStyle *)value = ic->input_style;
-        else if (KEYEQ(key, XNClientWindow))
-            *(Window *)value = ic->client;
-        else if (KEYEQ(key, XNFocusWindow))
-            *(Window *)value = ic->focus;
-        else if (KEYEQ(key, XNFilterEvents))
-            *(unsigned long *)value = 0;
-        else if (KEYEQ(key, XNResetState))
-            *(XIMResetState *)value = ic->reset_state;
-        else if (KEYEQ(key, XNPreeditAttributes))
-            ic_fill_preedit(ic, (const MwArg *)value);
-        else if (KEYEQ(key, XNStatusAttributes))
-            ic_fill_status(ic, (const MwArg *)value);
-        else if (KEYEQ(key, XNVaNestedList))
-            ic_apply_list(ic, (const MwArg *)value, 0);
-    }
+    while ((key = va_arg(ap, const char *)) != NULL)
+        ic_get(ic, key, va_arg(ap, void *));
     va_end(ap);
     return NULL;
 }
@@ -771,10 +796,17 @@ Bool XFilterEvent(XEvent *event, Window w)
 
 /* ------------------------------------------------------ string lookup / reset */
 
-int XmbLookupString(XIC xic, XKeyEvent *event, char *buffer, int nbytes,
-                    KeySym *keysym, Status *status)
+/* XLookupString yields Latin-1 for keysyms 0xA0-0xFF (é, ü, £ ...); the
+ * multibyte entry points must hand those back in the locale's encoding. */
+static bool locale_is_utf8(void)
 {
-    struct _XIC *ic = xic;
+    const char *cs = nl_langinfo(CODESET);
+    return cs && (strcasecmp(cs, "UTF-8") == 0 || strcasecmp(cs, "utf8") == 0);
+}
+
+static int im_lookup(struct _XIC *ic, XKeyEvent *event, char *buffer,
+                     int nbytes, KeySym *keysym, Status *status, bool utf8)
+{
     if (keysym) *keysym = NoSymbol;
 
     /* A synthetic keycode-0 KeyPress carries a queued IME commit. */
@@ -782,9 +814,11 @@ int XmbLookupString(XIC xic, XKeyEvent *event, char *buffer, int nbytes,
         ic && ic->ncommits > 0) {
         const char *s = ic->commits[0];
         int len = (int)strlen(s);
-        if (nbytes < len + 1) {
+        /* As in libX11 no NUL is written, so exactly len bytes suffice; on
+         * overflow the commit stays queued for the retry. */
+        if (!buffer || nbytes < len) {
             if (status) *status = XBufferOverflow;
-            return len + 1;
+            return len;
         }
         memcpy(buffer, s, (size_t)len);
         free(ic->commits[0]);
@@ -801,36 +835,114 @@ int XmbLookupString(XIC xic, XKeyEvent *event, char *buffer, int nbytes,
         if (status) *status = XLookupNone;
         return 0;
     }
-    int n = XLookupString(event, buffer, nbytes, keysym, NULL);
+    KeySym ks = NoSymbol;
+    char tmp[64];
+    int n = XLookupString(event, tmp, (int)sizeof tmp, &ks, NULL);
+    if (keysym) *keysym = ks;
+    if (utf8 && n == 1 && (unsigned char)tmp[0] >= 0x80) {
+        unsigned char c = (unsigned char)tmp[0];
+        tmp[0] = (char)(0xc0 | (c >> 6));
+        tmp[1] = (char)(0x80 | (c & 0x3f));
+        n = 2;
+    }
+    if (n > 0 && (!buffer || nbytes < n)) {
+        if (status) *status = XBufferOverflow;
+        return n;
+    }
+    if (n > 0) memcpy(buffer, tmp, (size_t)n);
     if (status)
-        *status = n > 0
-                  ? ((keysym && *keysym != NoSymbol) ? XLookupBoth : XLookupChars)
-                  : XLookupKeySym;
+        *status = n > 0 ? (ks != NoSymbol ? XLookupBoth : XLookupChars)
+                        : (ks != NoSymbol ? XLookupKeySym : XLookupNone);
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: XmbLookupString kc=%u n=%d sym=0x%lx status=%d\n",
-                event->keycode, n, keysym ? (unsigned long)*keysym : 0UL,
-                status ? *status : 0);
+                event->keycode, n, (unsigned long)ks, status ? *status : 0);
     return n;
+}
+
+int XmbLookupString(XIC ic, XKeyEvent *event, char *buffer, int nbytes,
+                    KeySym *keysym, Status *status)
+{
+    return im_lookup(ic, event, buffer, nbytes, keysym, status,
+                     locale_is_utf8());
 }
 
 int Xutf8LookupString(XIC ic, XKeyEvent *event, char *buffer, int nbytes,
                       KeySym *keysym, Status *status)
 {
-    return XmbLookupString(ic, event, buffer, nbytes, keysym, status);
+    return im_lookup(ic, event, buffer, nbytes, keysym, status, true);
+}
+
+/* Decode one UTF-8 sequence; invalid input yields U+FFFD and consumes a byte. */
+static int utf8_decode(const unsigned char *s, int len, uint32_t *cp)
+{
+    unsigned char c = s[0];
+    int n = c < 0x80 ? 1 : (c & 0xe0) == 0xc0 ? 2 : (c & 0xf0) == 0xe0 ? 3
+          : (c & 0xf8) == 0xf0 ? 4 : 0;
+    if (n == 0 || n > len) { *cp = 0xfffd; return 1; }
+    uint32_t v = n == 1 ? c : c & (0x7f >> n);
+    for (int i = 1; i < n; i++) {
+        if ((s[i] & 0xc0) != 0x80) { *cp = 0xfffd; return 1; }
+        v = (v << 6) | (s[i] & 0x3f);
+    }
+    *cp = v;
+    return n;
 }
 
 int XwcLookupString(XIC ic, XKeyEvent *event, wchar_t *buffer, int nchars,
                     KeySym *keysym, Status *status)
 {
-    char mb[1024];
-    int n = XmbLookupString(ic, event, mb, sizeof mb, keysym, status);
-    if (n <= 0) return 0;
-    mb[n] = 0;
-    const char *p = mb;
-    mbstate_t st;
-    memset(&st, 0, sizeof st);
-    size_t r = mbsrtowcs(buffer, &p, (size_t)nchars, &st);
-    return r == (size_t)-1 ? 0 : (int)r;
+    /* Commits can be arbitrarily long: size the UTF-8 buffer from what the
+     * lookup reports rather than truncating (or overrunning) a fixed one. */
+    struct _XIC *xic = ic;
+    if (event && event->type == KeyPress && event->keycode == 0 &&
+        xic && xic->ncommits > 0) {
+        /* Check the size before the commit is dequeued, so the caller can
+         * retry with a larger buffer. */
+        const char *s = xic->commits[0];
+        int len = (int)strlen(s), count = 0;
+        for (int i = 0; i < len; count++) {
+            uint32_t cp;
+            i += utf8_decode((const unsigned char *)s + i, len - i, &cp);
+        }
+        if (!buffer || count > nchars) {
+            if (keysym) *keysym = NoSymbol;
+            if (status) *status = XBufferOverflow;
+            return count;
+        }
+    }
+
+    char stackbuf[256], *mb = stackbuf;
+    Status st = XLookupNone;
+    int n = Xutf8LookupString(ic, event, mb, (int)sizeof stackbuf, keysym, &st);
+    if (st == XBufferOverflow) {
+        mb = malloc((size_t)n);
+        if (!mb) { if (status) *status = XLookupNone; return 0; }
+        n = Xutf8LookupString(ic, event, mb, n, keysym, &st);
+    }
+    if (st != XLookupChars && st != XLookupBoth) {
+        if (mb != stackbuf) free(mb);
+        if (status) *status = st;
+        return 0;
+    }
+    int count = 0;
+    for (int i = 0; i < n; count++) {
+        uint32_t cp;
+        i += utf8_decode((const unsigned char *)mb + i, n - i, &cp);
+    }
+    if (!buffer || count > nchars) {
+        if (mb != stackbuf) free(mb);
+        if (status) *status = XBufferOverflow;
+        return count;
+    }
+    int k = 0;
+    for (int i = 0; i < n; k++) {
+        uint32_t cp;
+        i += utf8_decode((const unsigned char *)mb + i, n - i, &cp);
+        buffer[k] = (wchar_t)cp;
+    }
+    if (mb != stackbuf) free(mb);
+    if (status) *status = st;
+    return count;
 }
 
 /* Xlib's contract: reset the IC and return the string it had preedited (which

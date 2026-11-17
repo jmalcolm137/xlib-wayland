@@ -95,7 +95,11 @@ int mw_display_scale(Display *d)
 
 MwWindow   *mw_window(Display *d, Window w)       { return mw_lookup(d, w, MW_OBJ_WINDOW); }
 MwPixmap   *mw_pixmap(Display *d, Pixmap p)       { return mw_lookup(d, p, MW_OBJ_PIXMAP); }
-MwXFont    *mw_font(Display *d, Font f)           { return mw_lookup(d, f, MW_OBJ_FONT); }
+MwXFont    *mw_font(Display *d, Font f)
+{
+    MwXFont *xf = mw_lookup(d, f, MW_OBJ_FONT);
+    return xf && !xf->released ? xf : NULL;        /* a released ID is gone */
+}
 MwColormap *mw_colormap(Display *d, Colormap c)   { return mw_lookup(d, c, MW_OBJ_COLORMAP); }
 MwCursor   *mw_cursor(Display *d, Cursor c)       { return mw_lookup(d, c, MW_OBJ_CURSOR); }
 
@@ -342,8 +346,7 @@ int XCloseDisplay(Display *d)
     for (size_t i = 0; i < dp->table_cap; i++) {
         if (dp->table[i].id && dp->table[i].kind == MW_OBJ_WINDOW) {
             MwWindow *w = dp->table[i].obj;
-            if (w && w->tl) mw_toplevel_destroy(w->tl);
-            w->tl = NULL;
+            if (w && w->tl) { mw_toplevel_destroy(w->tl); w->tl = NULL; }
         }
     }
     for (size_t i = 0; i < dp->table_cap; i++) {
@@ -352,7 +355,10 @@ int XCloseDisplay(Display *d)
         switch (e.kind) {
         case MW_OBJ_WINDOW: {
             MwWindow *w = e.obj;
-            if (w) { if (w->surface) mw_surface_destroy(w->surface);
+            if (w) { while (w->props) { MwProp *p = w->props;
+                                         w->props = p->next;
+                                         free(p->data); free(p); }
+                     if (w->surface) mw_surface_destroy(w->surface);
                      if (w->has_shape) pixman_region32_fini(&w->shape);
                      free(w); }
             break; }
@@ -370,10 +376,17 @@ int XCloseDisplay(Display *d)
             }
             break; }
         case MW_OBJ_COLORMAP: free(e.obj); break;
-        case MW_OBJ_CURSOR: free(e.obj); break;
+        case MW_OBJ_CURSOR: {
+            MwCursor *c = e.obj;
+            if (c) { free(c->wl_name); free(c->img_pixels); free(c); }
+            break; }
         default: break;
         }
     }
+    /* Every object is freed: empty the table so a lookup by the fini hooks
+     * below finds nothing instead of a dangling pointer. */
+    memset(dp->table, 0, dp->table_cap * sizeof *dp->table);
+    dp->table_used = 0;
 
     /* Last reference: take it out of the open-display list. */
     pthread_mutex_lock(&display_list_lock);
@@ -397,6 +410,8 @@ int XCloseDisplay(Display *d)
         for (int i = 0; i < dp->natoms; i++) free(dp->atom_names[i]);
         free(dp->atom_names);
     }
+    if (dp->defaults_db) XrmDestroyDatabase(dp->defaults_db);
+    free(dp->private12);                 /* Xlib output buffer */
     free(dp->atom_buf);
     free(dp->queue);
     free(dp->table);

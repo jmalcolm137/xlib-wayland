@@ -258,7 +258,10 @@ XftFont *XftFontOpenName(Display *dpy, int screen, _Xconst char *name)
     FcPattern *match = XftFontMatch(dpy, screen, pat, &res);
     FcPatternDestroy(pat);
     if (!match) return NULL;
-    return XftFontOpenPattern(dpy, match);
+    /* XftFontOpenPattern only takes ownership of the pattern on success. */
+    XftFont *font = XftFontOpenPattern(dpy, match);
+    if (!font) FcPatternDestroy(match);
+    return font;
 }
 
 XftFont *XftFontOpen(Display *dpy, int screen, ...)
@@ -272,7 +275,10 @@ XftFont *XftFontOpen(Display *dpy, int screen, ...)
     FcPattern *match = XftFontMatch(dpy, screen, pat, &res);
     FcPatternDestroy(pat);
     if (!match) return NULL;
-    return XftFontOpenPattern(dpy, match);
+    /* XftFontOpenPattern only takes ownership of the pattern on success. */
+    XftFont *font = XftFontOpenPattern(dpy, match);
+    if (!font) FcPatternDestroy(match);
+    return font;
 }
 
 Bool XftCharExists(Display *dpy, XftFont *pub, FcChar32 ucs4)
@@ -622,7 +628,7 @@ static unsigned render_argb(Display *dpy, Picture src)
 {
     unsigned short rgba[4];
     if (!mw_render_picture_solid(dpy, (XID)src, rgba))
-        return 0xffffffffu;              /* no usable source: opaque black */
+        return 0xff000000u;              /* no usable source: opaque black */
     unsigned a = rgba[3] >> 8, r = rgba[0] >> 8, g = rgba[1] >> 8, b = rgba[2] >> 8;
     if (!a) a = 0xff;
     return (a << 24) | (r << 16) | (g << 8) | b;

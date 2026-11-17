@@ -41,7 +41,8 @@ static bool smp_interest(const char *name)
     size_t len = strlen(name);
     char  *list = strdup(env);
     bool   ok = false;
-    for (char *t = strtok(list, ","); t && !ok; t = strtok(NULL, ",")) {
+    char *save_t = NULL;
+    for (char *t = strtok_r(list, ",", &save_t); t && !ok; t = strtok_r(NULL, ",", &save_t)) {
         while (*t == ' ') t++;
         size_t l = strlen(t);
         if (l && len >= l && strncmp(name, t, l) == 0) ok = true;

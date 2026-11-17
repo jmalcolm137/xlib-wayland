@@ -15,17 +15,6 @@ struct _XOC { struct _XOM *om; };
 
 static MwXFont *fs_font(XFontSet fs) { return (MwXFont *)fs; }
 
-static int utf8_len(const char *s, int n)
-{
-    int count = 0;
-    for (int i = 0; i < n; ) {
-        unsigned char c = (unsigned char)s[i];
-        int adv = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : 4;
-        i += adv; count++;
-    }
-    return count;
-}
-
 static unsigned int utf8_next(const char **sp, const char *end)
 {
     const unsigned char *s = (const unsigned char *)*sp;
@@ -77,8 +66,7 @@ static void mb_draw(Display *d, Drawable dr, XFontSet fs, GC gc,
         of = gc->font; ox = gc->xfont;
         gc->font = ff->id; gc->xfont = ff;
     }
-    if (image) XDrawImageString(d, dr, gc, x, y, str, n);
-    else       XDrawString(d, dr, gc, x, y, str, n);
+    mw_draw_utf8(d, dr, gc, x, y, str, n, image);
     if (ff && ff->rfont) { gc->font = of; gc->xfont = ox; }
 }
 
@@ -110,6 +98,31 @@ int XmbTextExtents(XFontSet fs, _Xconst char *s, int n,
     return w;
 }
 
+/* Shared tail of the PerCharExtents calls.  The per-character arrays hold
+ * nink entries; the overall ink/logical returns are single rectangles.  As in
+ * libX11, a buffer too small for every character fails with 0. */
+static void per_char_put(XRectangle *ink, XRectangle *logical, int nink,
+                         int i, int xoff, int cw, int asc, int desc)
+{
+    if (i >= nink) return;
+    XRectangle r = { (short)xoff, (short)-asc, (unsigned short)cw,
+                     (unsigned short)(asc + desc) };
+    if (ink) ink[i] = r;
+    if (logical) logical[i] = r;
+}
+
+static int per_char_finish(int count, int nink, int width, int asc, int desc,
+                           int *num, XRectangle *ink_ret,
+                           XRectangle *logical_ret)
+{
+    if (num) *num = count;
+    XRectangle all = { 0, (short)-asc, (unsigned short)width,
+                       (unsigned short)(asc + desc) };
+    if (ink_ret) *ink_ret = all;
+    if (logical_ret) *logical_ret = all;
+    return count > nink ? 0 : 1;
+}
+
 int XmbTextPerCharExtents(XFontSet fs, _Xconst char *s, int n, XRectangle *ink,
                           XRectangle *logical, int nink, int *num,
                           XRectangle *ink_ret, XRectangle *logical_ret)
@@ -118,56 +131,46 @@ int XmbTextPerCharExtents(XFontSet fs, _Xconst char *s, int n, XRectangle *ink,
     int asc = f ? f->ascent : 10, desc = f ? f->descent : 3;
     int count = 0, xoff = 0;
     const char *p = s, *end = s + (n < 0 ? (int)strlen(s) : n);
-    float scale = nink > 0 ? (float)nink / (utf8_len(s, (int)(end - s)) ? utf8_len(s, (int)(end - s)) : 1) : 1.0f;
     while (p < end) {
         unsigned int ch = utf8_next(&p, end);
         int cw = f && f->rfont ? mw_font_char_width(f->rfont, ch) : 6;
-        if (ink && count < nink) { ink[count].x = (short)xoff; ink[count].y = (short)-asc; ink[count].width = (unsigned short)cw; ink[count].height = (unsigned short)(asc+desc); }
-        if (logical && count < nink) logical[count] = ink[count];
-        if (ink_ret && count < nink) { ink_ret[count].x = (short)((short)xoff); ink_ret[count].width = (unsigned short)cw; }
-        if (logical_ret && count < nink) { logical_ret[count].x = (short)xoff; logical_ret[count].width = (unsigned short)cw; }
+        per_char_put(ink, logical, nink, count, xoff, cw, asc, desc);
         xoff += cw; count++;
     }
-    (void)scale;
-    if (num) *num = count;
-    return count;
+    return per_char_finish(count, nink, xoff, asc, desc, num, ink_ret,
+                           logical_ret);
 }
 
 /* ------------------------------------------------------------------ Xwc */
 
-void XwcDrawString(Display *d, Drawable dr, XFontSet fs, GC gc, int x, int y,
-                   _Xconst wchar_t *s, int n)
+/* Wide text goes through the same UTF-8 path as Xmb, so it is drawn with
+ * the fontset's font -- the one XwcTextEscapement measures with. */
+static void wc_draw(Display *d, Drawable dr, XFontSet fs, GC gc, int x, int y,
+                    _Xconst wchar_t *s, int n, int image)
 {
-    (void)fs;
-    /* Convert to UTF-8 and reuse the core text path. */
-    int cap = n * 4 + 1, o = 0;
-    char *buf = malloc(cap);
+    if (n <= 0) return;
+    char *buf = malloc((size_t)n * 4 + 1);
+    if (!buf) return;
+    int o = 0;
     for (int i = 0; i < n; i++) {
         unsigned int c = (unsigned int)s[i];
+        if (c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) c = 0xFFFD;
         if (c < 0x80) buf[o++] = (char)c;
         else if (c < 0x800) { buf[o++] = (char)(0xC0|(c>>6)); buf[o++] = (char)(0x80|(c&0x3F)); }
         else if (c < 0x10000) { buf[o++] = (char)(0xE0|(c>>12)); buf[o++] = (char)(0x80|((c>>6)&0x3F)); buf[o++] = (char)(0x80|(c&0x3F)); }
         else { buf[o++] = (char)(0xF0|(c>>18)); buf[o++] = (char)(0x80|((c>>12)&0x3F)); buf[o++] = (char)(0x80|((c>>6)&0x3F)); buf[o++] = (char)(0x80|(c&0x3F)); }
     }
-    XDrawString(d, dr, gc, x, y, buf, o);
+    mb_draw(d, dr, fs, gc, x, y, buf, o, image);
     free(buf);
 }
 
+void XwcDrawString(Display *d, Drawable dr, XFontSet fs, GC gc, int x, int y,
+                   _Xconst wchar_t *s, int n)
+{ wc_draw(d, dr, fs, gc, x, y, s, n, 0); }
+
 void XwcDrawImageString(Display *d, Drawable dr, XFontSet fs, GC gc, int x, int y,
                         _Xconst wchar_t *s, int n)
-{
-    (void)fs;
-    int cap = n * 4 + 1, o = 0;
-    char *buf = malloc(cap);
-    for (int i = 0; i < n; i++) {
-        unsigned int c = (unsigned int)s[i];
-        if (c < 0x80) buf[o++] = (char)c;
-        else if (c < 0x800) { buf[o++] = (char)(0xC0|(c>>6)); buf[o++] = (char)(0x80|(c&0x3F)); }
-        else { buf[o++] = (char)(0xE0|(c>>12)); buf[o++] = (char)(0x80|((c>>6)&0x3F)); buf[o++] = (char)(0x80|(c&0x3F)); }
-    }
-    XDrawImageString(d, dr, gc, x, y, buf, o);
-    free(buf);
-}
+{ wc_draw(d, dr, fs, gc, x, y, s, n, 1); }
 
 int XwcTextEscapement(XFontSet fs, _Xconst wchar_t *s, int n)
 { return wc_text_width(fs, s, n); }
@@ -193,14 +196,11 @@ int XwcTextPerCharExtents(XFontSet fs, _Xconst wchar_t *s, int n, XRectangle *in
     int asc = f ? f->ascent : 10, desc = f ? f->descent : 3, xoff = 0;
     for (int i = 0; i < n; i++) {
         int cw = f && f->rfont ? mw_font_char_width(f->rfont, (unsigned)s[i]) : 6;
-        if (ink && i < nink) { ink[i].x = (short)xoff; ink[i].y = (short)-asc; ink[i].width = (unsigned short)cw; ink[i].height = (unsigned short)(asc+desc); }
-        if (logical && i < nink) logical[i] = ink[i];
-        if (ink_ret && i < nink) { ink_ret[i].x = (short)xoff; ink_ret[i].width = (unsigned short)cw; }
-        if (logical_ret && i < nink) { logical_ret[i].x = (short)xoff; logical_ret[i].width = (unsigned short)cw; }
+        per_char_put(ink, logical, nink, i, xoff, cw, asc, desc);
         xoff += cw;
     }
-    if (num) *num = n;
-    return n;
+    return per_char_finish(n, nink, xoff, asc, desc, num, ink_ret,
+                           logical_ret);
 }
 
 /* ---------------------------------------------------------------- Xutf8 */

@@ -2,6 +2,8 @@
 #define _GNU_SOURCE
 #include "internal.h"
 
+#include <ctype.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -76,6 +78,22 @@ KeySym XStringToKeysym(_Xconst char *s)
     for (size_t i = 0; i < sizeof(vendor_table) / sizeof(vendor_table[0]); i++)
         if (strcmp(vendor_table[i].name, s) == 0) return vendor_table[i].ks;
     if (s[0] && s[1] == 0) return (KeySym)(unsigned char)s[0];  /* single char */
+    /* libX11's numeric forms: "U20AC" is the Unicode keysym 0x10020AC (a
+     * Latin-1 code point is its own keysym), "0x1008ff13" a raw value. */
+    if (s[0] == 'U' && s[1]) {
+        char *end;
+        unsigned long cp = strtoul(s + 1, &end, 16);
+        if (*end == 0 && cp <= 0x10ffff && isxdigit((unsigned char)s[1])) {
+            if (cp >= 0x20 && cp <= 0x7e) return cp;
+            if (cp >= 0xa0 && cp <= 0xff) return cp;
+            return 0x01000000 | cp;
+        }
+    }
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X') && s[2]) {
+        char *end;
+        unsigned long v = strtoul(s + 2, &end, 16);
+        if (*end == 0 && v <= 0x1fffffff) return v;
+    }
     return NoSymbol;
 }
 
@@ -85,6 +103,38 @@ char *XKeysymToString(KeySym ks)
         if (ks_table[i].ks == ks) return (char *)ks_table[i].name;
     for (size_t i = 0; i < sizeof(vendor_table) / sizeof(vendor_table[0]); i++)
         if (vendor_table[i].ks == ks) return (char *)vendor_table[i].name;
+    /* An unnamed Unicode keysym prints as "U20AC", as in libX11.  Each name
+     * is made once and kept for the life of the process, so the string stays
+     * valid (libX11 instead leaks a fresh copy per call). */
+    if (ks >= 0x01000100 && ks <= 0x0110ffff) {
+        static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+        /* One allocation per name, so a returned pointer never moves. */
+        struct ksname { KeySym ks; char name[12]; };
+        static struct ksname **names;
+        static size_t nnames, cap;
+        char *out = NULL;
+        pthread_mutex_lock(&lock);
+        for (size_t i = 0; i < nnames && !out; i++)
+            if (names[i]->ks == ks) out = names[i]->name;
+        if (!out) {
+            if (nnames == cap) {
+                size_t ncap = cap ? cap * 2 : 16;
+                void *nn = realloc(names, ncap * sizeof *names);
+                if (nn) { names = nn; cap = ncap; }
+            }
+            struct ksname *e = nnames < cap ? malloc(sizeof *e) : NULL;
+            if (e) {
+                unsigned long cp = ks & 0xffffff;
+                e->ks = ks;
+                snprintf(e->name, sizeof e->name,
+                         cp > 0xffff ? "U%06lX" : "U%04lX", cp);
+                names[nnames++] = e;
+                out = e->name;
+            }
+        }
+        pthread_mutex_unlock(&lock);
+        return out;
+    }
     return NULL;
 }
 
@@ -117,14 +167,26 @@ void mw_keymap_init_fd(Display *d, int fd, uint32_t size, uint32_t format)
     char *map = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (map == MAP_FAILED) return;
     if (!dp->xkb_ctx) dp->xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    /* Compile before replacing: on failure keep the working keymap rather
+     * than leave xkb_state pointing at a freed one. */
+    struct xkb_keymap *km = xkb_keymap_new_from_string(dp->xkb_ctx, map,
+                        XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
+    munmap(map, size);
+    struct xkb_state *st = km ? xkb_state_new(km) : NULL;
+    if (!st) {
+        if (km) xkb_keymap_unref(km);
+        return;
+    }
     if (dp->xkb_keymap) xkb_keymap_unref(dp->xkb_keymap);
     if (dp->xkb_state) xkb_state_unref(dp->xkb_state);
-    dp->xkb_keymap = xkb_keymap_new_from_string(dp->xkb_ctx, map,
-                        XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
-    if (dp->xkb_keymap) dp->xkb_state = xkb_state_new(dp->xkb_keymap);
+    dp->xkb_keymap = km;
+    dp->xkb_state = st;
     mw_compose_init(d);
     dp->keymap_inited = 1;
-    munmap(map, size);
+    /* The modifier map built from the default keymap at XOpenDisplay is stale
+     * now (swapped Ctrl/Caps, another layout): rebuild it from this one. */
+    free(dp->modmap);
+    dp->modmap = NULL;
     mw_update_modmap(d);
 }
 
@@ -200,7 +262,7 @@ KeySym *XGetKeyboardMapping(Display *d, KeyCode first, int count, int *nkeys)
 void mw_update_modmap(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
-    if (dp->modmap) return;
+    if (dp->modmap || !dp->xkb_keymap) return;
 
     /* Map each modifier index to the keycodes that carry it, derived from the
      * keysyms of those keys.  Xt turns an event's state mask back into
@@ -210,6 +272,7 @@ void mw_update_modmap(Display *d)
      * paste) silently degraded to inserting the plain character. */
     const int per = 4;
     XModifierKeymap *m = malloc(sizeof(*m) + 8 * per * sizeof(KeyCode));
+    if (!m) return;
     m->max_keypermod = per;
     m->modifiermap = (KeyCode *)(m + 1);
     memset(m->modifiermap, 0, 8 * per * sizeof(KeyCode));
@@ -242,6 +305,7 @@ XModifierKeymap *XGetModifierMapping(Display *d)
     if (!dp->modmap) return NULL;
     int per = dp->modmap->max_keypermod;
     XModifierKeymap *m = malloc(sizeof(*m) + 8 * per * sizeof(KeyCode));
+    if (!m) return NULL;
     m->max_keypermod = per;
     m->modifiermap = (KeyCode *)(m + 1);
     memcpy(m->modifiermap, dp->modmap->modifiermap, 8 * per * sizeof(KeyCode));

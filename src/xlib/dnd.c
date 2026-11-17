@@ -670,7 +670,8 @@ void mw_dnd_fini(Display *d)
 {
     MwDnd *x = MWD(d)->dnd;
     if (!x) return;
-    if (x->src_win != None) XDestroyWindow(d, x->src_win);
+    /* x->src_win is not destroyed here: XCloseDisplay has already freed
+     * every window, and a lookup would return the freed one. */
     free(x->drop_data);
     free(x->payload);
     free(x);

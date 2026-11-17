@@ -253,8 +253,9 @@ Bool mw_xi2_reply(Display *d, void *repbuf)
         put32(rep, 4, 0);                     /* no such property */
         return True;
     case MW_XI_GET_SELECTED_EVENTS: {
-        Window win;
-        memcpy(&win, req + 4, 4);
+        uint32_t w32;
+        memcpy(&w32, req + 4, 4);        /* a CARD32 on the wire; Window is 64-bit */
+        Window win = w32;
         MwXiSelect *s = xi_select_find(d, win, false);
         int any = 0;
         if (s) for (int i = 0; i < 4; i++) if (s->mask[i]) any = 1;
@@ -353,10 +354,11 @@ void mw_xi2_request(Display *d, const unsigned char *req, size_t len)
     if (req[1] != 46 /* X_XISelectEvents */) return;
     if (len < 12) return;
 
-    Window win;
+    uint32_t w32;
     unsigned short num;
-    memcpy(&win, req + 4, 4);
+    memcpy(&w32, req + 4, 4);            /* a CARD32 on the wire; Window is 64-bit */
     memcpy(&num, req + 8, 2);
+    Window win = w32;
 
     MwXiSelect *s = xi_select_find(d, win, true);
     if (!s) return;

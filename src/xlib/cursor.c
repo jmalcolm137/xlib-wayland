@@ -70,6 +70,7 @@ Cursor XCreateFontCursor(Display *d, unsigned int shape)
                                                           cursor_name_for(shape));
         c->wl = wc;
     }
+    c->wl_name = strdup(cursor_name_for(shape));
     mw_register(d, c->id, MW_OBJ_CURSOR, c);
     return c->id;
 }
@@ -103,6 +104,7 @@ Cursor XCreateGlyphCursor(Display *d, Font source_font, Font mask_font,
                                                           cursor_name_for(source_char));
         c->wl = wc;
     }
+    c->wl_name = strdup(cursor_name_for(source_char));
     mw_register(d, c->id, MW_OBJ_CURSOR, c);
     return c->id;
 }
@@ -112,7 +114,9 @@ int XFreeCursor(Display *d, Cursor cursor)
     MwCursor *c = mw_cursor(d, cursor);
     if (c) {
         if (c->img_buffer) wl_buffer_destroy(c->img_buffer);
+        if (c->created_surface && c->surface) wl_surface_destroy(c->surface);
         free(c->img_pixels);
+        free(c->wl_name);
         mw_unregister(d, cursor);
         free(c);
     }
@@ -263,19 +267,29 @@ static void cursor_theme_reload(Display *d)
         if (dp->default_cursor->img_buffer)
             wl_buffer_destroy(dp->default_cursor->img_buffer);
         free(dp->default_cursor->img_pixels);
+        free(dp->default_cursor->wl_name);
         free(dp->default_cursor);
         dp->default_cursor = NULL;
     }
-    if (dp->cursor_theme) {
-        wl_cursor_theme_destroy(dp->cursor_theme);
-        dp->cursor_theme = NULL;
+    struct wl_cursor_theme *old = dp->cursor_theme;
+    dp->cursor_theme = NULL;
+    if (dp->wl_shm) {
+        int size = dp->xcursor_size > 0 ? dp->xcursor_size : 24;
+        const char *theme = (dp->xcursor_theme && *dp->xcursor_theme)
+                                ? dp->xcursor_theme : NULL;
+        dp->cursor_theme = wl_cursor_theme_load(theme, size, dp->wl_shm);
+        dp->cursor_theme_size = size;
     }
-    if (!dp->wl_shm) return;
-    int size = dp->xcursor_size > 0 ? dp->xcursor_size : 24;
-    const char *theme = (dp->xcursor_theme && *dp->xcursor_theme)
-                            ? dp->xcursor_theme : NULL;
-    dp->cursor_theme = wl_cursor_theme_load(theme, size, dp->wl_shm);
-    dp->cursor_theme_size = size;
+    /* Every cursor still pointing into the old theme is looked up again in
+     * the new one before the old one is freed. */
+    for (size_t i = 0; i < dp->table_cap; i++) {
+        if (!dp->table[i].id || dp->table[i].kind != MW_OBJ_CURSOR) continue;
+        MwCursor *c = dp->table[i].obj;
+        if (!c || !c->wl) continue;
+        c->wl = (dp->cursor_theme && c->wl_name)
+                ? wl_cursor_theme_get_cursor(dp->cursor_theme, c->wl_name) : NULL;
+    }
+    if (old) wl_cursor_theme_destroy(old);
 }
 
 Cursor mw_cursor_load_named(Display *d, const char *name)
@@ -288,6 +302,7 @@ Cursor mw_cursor_load_named(Display *d, const char *name)
     if (!c) return None;
     c->id = mw_alloc_id(d);
     c->wl = wc;
+    c->wl_name = strdup(name);
     mw_register(d, c->id, MW_OBJ_CURSOR, c);
     return c->id;
 }

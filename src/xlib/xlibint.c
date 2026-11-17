@@ -10,6 +10,8 @@
  */
 #include "internal.h"
 
+#include <stdint.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -142,11 +144,17 @@ int _XRead(Display *d, char *data, long size)
     return (int)size;
 }
 
+/* As in libX11, len is the number of 32-bit wire bytes; the caller's buffer
+ * holds len/4 longs.  Read the packed words into the front of it, then widen
+ * from the end backwards so no word is overwritten before it is read. */
 int _XRead32(Display *d, long *data, long len)
 {
     if (data && len > 0) {
-        size_t bytes = (size_t)len * sizeof(long);
-        if (mw_xi2_read(d, (char *)data, bytes) < 0) memset(data, 0, bytes);
+        size_t n = (size_t)len / 4;
+        uint32_t *w = (uint32_t *)data;
+        if (mw_xi2_read(d, (char *)data, n * 4) < 0) memset(data, 0, n * 4);
+        for (size_t i = n; i-- > 0; )
+            data[i] = (long)(int32_t)w[i];
     }
     return (int)len;
 }

@@ -69,8 +69,8 @@ void mw_set_source_argb(MwCanvas *c, uint32_t argb);
 void mw_set_line(MwCanvas *c, int width, int line_style, int cap, int join,
                  int dash_offset, const char *dashes, int ndash);
 void mw_set_fill(MwCanvas *c, int fill_style, int fill_rule, int arc_mode);
-/* A stipple/tile source used by FillStippled/FillTiled (ARGB, may be 1-bit). */
-void mw_set_stipple(MwCanvas *c, MwSurface *stipple, int x_origin, int y_origin);
+/* The GC plane mask: only these bits of the destination change. */
+void mw_set_plane_mask(MwCanvas *c, unsigned long plane_mask);
 
 /* Clip management, in drawable coordinates. */
 void mw_clip_rects(MwCanvas *c, const XRectangle *r, int n, int x_org, int y_org);
@@ -85,9 +85,10 @@ void mw_stroke_path(MwCanvas *c);
 /* Offset subsequently constructed path coordinates by half a pixel, to match
  * X's integer pixel grid for odd-width stroked lines. */
 void mw_set_snap(MwCanvas *c, int on);
-/* Fill the current path using `pattern` as an alpha stipple, tinted by the
- * current source colour (FillStippled / FillTiled approximation). */
-void mw_fill_with_stipple(MwCanvas *c, MwSurface *pattern, int x_origin, int y_origin);
+/* Fill the current path with a stipple (FillStippled/FillOpaqueStippled:
+ * bit 0 of each pixel selects fg, else nothing/bg) or a tile (FillTiled). */
+void mw_fill_pattern(MwCanvas *c, MwSurface *pat, int x_origin, int y_origin,
+                     int fill_style, uint32_t fg, uint32_t bg);
 
 /* ------------------------------------------------------------------- paths */
 
@@ -113,7 +114,8 @@ void mw_canvas_put_image(MwCanvas *c, MwSurface *img, int dx, int dy,
 
 /* XCopyPlane: copy one bitplane of src (bit) into dst using fg/bg. */
 void mw_canvas_copy_plane(MwCanvas *c, MwSurface *src, int sx, int sy,
-                          int dx, int dy, int w, int h, int bit);
+                          int dx, int dy, int w, int h, int bit,
+                          uint32_t fg, uint32_t bg);
 
 /* Store a clipping result (XGetImage) — copy surface pixels out. */
 void mw_surface_get(MwSurface *s, int x, int y, int w, int h,
