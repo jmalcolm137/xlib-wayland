@@ -34,7 +34,8 @@ compositor (`tests/with-compositor.sh`), never the desktop session's:
   `XDamageSubtract`/`XDamageAdd`, registrations dying with their window, and
   `XextAddDisplay` close hooks.
 - `tests/test_broker.c` carries a 200 KiB shared selection between two shim
-  processes.
+  processes, and checks an owner stays responsive while its requestor does
+  not read.
 
 `scripts/run-tests.sh` still drives the integration tests (Xt, Motif, NEdit,
 XV, clipboard, DnD, IME, menus).
@@ -247,9 +248,20 @@ And in the code the first pass covered least:
   cleared each glyph's box); Render requests still buffered at
   `XCloseDisplay` are run, and leftover pictures and glyph sets freed.
 
+### Fifth round: the rest of the open list
+
+- **Broker**: the owner's reply goes out as the peer takes it, from the
+  event loop (the broker thread watches the socket for writability), with
+  a deadline that each bit of progress extends; a requestor that connects
+  and does not read used to freeze the owning client for up to 5 s.
+- **Core text under a raster op or plane mask**: the glyph outlines become
+  coverage and the op is applied bitwise, like any other shape (cairo's
+  operators blended the edges, and GXxor text drawn twice left marks).
+- **Raster-op coverage** is rasterised in bands of 64 rows, so a shape's
+  mask no longer grows with its bounding box (a diagonal rubber band across
+  a HiDPI window allocated tens of megabytes).
+
 ## Still open
 
-- **Clipboard**: the broker still serves with a blocking write (bounded at
-  5 s).
-- **Render**: core text under a raster op uses cairo operators; a raster-op
-  line across a huge HiDPI window allocates a large coverage mask.
+- Zero-width lines do not draw their final endpoint (X draws it for
+  CapButt; only CapNotLast omits it).
