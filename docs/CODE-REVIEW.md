@@ -10,7 +10,7 @@ code and by running the test suite under AddressSanitizer/UBSan
 
 ## Tests
 
-`meson test` runs four programs, each against a private headless
+`meson test` runs five programs, each against a private headless
 compositor (`tests/with-compositor.sh`), never the desktop session's:
 
 - `tests/test_core.c` uses the public API: regions, geometry, keysyms,
@@ -20,11 +20,19 @@ compositor (`tests/with-compositor.sh`), never the desktop session's:
   Latin-1 text).
 - `tests/test_internal.c` is a white-box test (`internal.h`): the event
   queue, window destruction, focus, propagation and crossing events, grab
-  matching, keymap updates, XIM, cursor theme reloads, output-scale changes,
-  the wakeup thread, `mw_write_all`, `_XRead32`, and XI2 selection.
+  matching, keymap updates and key levels (Caps/Num Lock, AltGr, compose),
+  XIM text input, core odds and ends (`XSendEvent` targets, `XSync`
+  discard, reparent cycles, `XClearArea` clipping, grabs on unmap), cursor
+  theme reloads, output-scale changes, the wakeup thread, `mw_write_all`,
+  `_XRead32`, and XI2 selection.
 - `tests/test_render.c` drives Render through the real libXrender encoders:
   batched and A1/ARGB32 glyph uploads, referenced glyph sets, solid and
-  gradient masks, CPClipMask pixmaps, and trapezoid source origins.
+  gradient masks, CPClipMask pixmaps, trapezoid source origins, and glyph
+  runs accumulated through a mask format.
+- `tests/test_ext.c` uses the libXext, libXfixes and libXdamage facades:
+  Sync value overflow, XFIXES regions, DAMAGE report levels with
+  `XDamageSubtract`/`XDamageAdd`, registrations dying with their window, and
+  `XextAddDisplay` close hooks.
 - `tests/test_broker.c` carries a 200 KiB shared selection between two shim
   processes.
 
@@ -200,22 +208,48 @@ And in the code the first pass covered least:
   used to pass by skipping), cleans up after itself, and isolates the
   environment (HOME, resource files, `XLIB_WAYLAND_*`).
 
+### Fourth round: the open list
+
+- **Keyboard**: the keysym comes from the key's type under the whole state,
+  so Caps Lock, Num Lock, AltGr and groups choose levels (`XLookupString`,
+  `XkbLookupKeySym` with consumed modifiers, `XkbTranslateKeyCode`,
+  `_XTranslateKey`); event state carries all eight modifiers and the group;
+  the core keysym table is eight per key in Xorg's layout; compose is fed
+  presses only, once each, and reports the composed keysym; `XConvertCase`
+  covers every script; `XSetLocaleModifiers` treats NULL as a query and ""
+  as `$XMODIFIERS`.
+- **Core**: `XSendEvent` resolves PointerWindow/InputFocus and leaves the
+  caller's event alone (copying only the event's own structure: callers
+  pass an `XClientMessageEvent`, not a whole `XEvent`); `XSync(d, True)`
+  discards; `XNextRequest` only
+  looks; reparenting into a descendant is BadMatch (it made a cycle and
+  tree walks hung); `XClearArea` is clipped; unmapping a grab window (or an
+  ancestor) releases the grab; errors with no handler are printed like
+  libX11 (without exiting); the error queue is freed at close.
+- **Clipboard**: an X selection sent with INCR reaches Wayland whole (it
+  pasted empty); the serve fd is only polled for writing while bytes wait.
+- **XIM**: text-input events take effect at `done`, in protocol order
+  (delete, commit, preedit); `delete_surrounding_text` byte counts become
+  characters, using the text committed through the IC.
+- **Extensions**: XFIXES regions hold real contents (set, copy, union,
+  intersect, subtract, invert, translate, extents, fetch, from-window, GC
+  clip); DAMAGE accumulates per object and honours the four report levels,
+  `XDamageSubtract` (with repair/parts, re-reporting what remains) and
+  `XDamageAdd`; DAMAGE objects and XFIXES selections die with their
+  drawable; the owner's destruction is reported as
+  `SelectionWindowDestroyNotify` to those who asked (it was a
+  SetSelectionOwner event to everyone); an empty mask deselects;
+  `XESetCloseDisplay` works and `XextAddDisplay` registers the extension's
+  close hook; Xlib owns the `XExtCodes` it hands out; `XSyncValueAdd/
+  Subtract` report signed overflow.
+- **Render**: with a mask format a glyph run is added into one mask and
+  composited once (overlapping glyphs added coverage wrongly, and Src
+  cleared each glyph's box); Render requests still buffered at
+  `XCloseDisplay` are run, and leftover pictures and glyph sets freed.
+
 ## Still open
 
-- **Keyboard**: `XLookupString` picks only Shift levels (CapsLock, NumLock
-  and AltGr are ignored); compose is fed on KeyRelease too;
-  `XGetKeyboardMapping` reports two keysyms per key; `XConvertCase` is ASCII
-  only; `XSetLocaleModifiers` treats NULL and "" the wrong way round.
-- **Clipboard**: large X-to-Wayland copies (INCR) paste empty; the broker
-  still serves with a blocking write (bounded at 5 s).
-- **Render**: glyph runs do not accumulate into a mask (overlapping glyphs
-  with non-Over operators); core text under a raster op uses cairo
-  operators; a raster-op line across a huge HiDPI window allocates a large
-  coverage mask.
-- **Core odds and ends**: `XSendEvent` to PointerWindow/InputFocus,
-  `XSync(discard)`, `XNextRequest`, `XReparentWindow` into a descendant,
-  `XClearArea` clipping, unmapping a grab window, the default error handler.
-- **Extensions**: XFIXES/DAMAGE registrations outlive their window, DAMAGE
-  report levels, `XDamageSubtract`, `XextAddDisplay` close hooks,
-  `XSyncValue` overflow flags.
-- **XIM**: `delete_surrounding_text` counts bytes as characters.
+- **Clipboard**: the broker still serves with a blocking write (bounded at
+  5 s).
+- **Render**: core text under a raster op uses cairo operators; a raster-op
+  line across a huge HiDPI window allocates a large coverage mask.
