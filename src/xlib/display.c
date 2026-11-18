@@ -342,6 +342,10 @@ int XCloseDisplay(Display *d)
     }
     pthread_mutex_unlock(&display_list_lock);
 
+    /* Extensions free their per-display data first, while it is all alive. */
+    mw_extensions_close(d);
+    mw_render_fini(d);
+
     /* Tear down remaining windows (top-levels first, then children). */
     for (size_t i = 0; i < dp->table_cap; i++) {
         if (dp->table[i].id && dp->table[i].kind == MW_OBJ_WINDOW) {
@@ -417,6 +421,7 @@ int XCloseDisplay(Display *d)
         XEvent *e = &dp->queue[(dp->qhead + i) % dp->qcap];
         if (e->type == GenericEvent) free(e->xcookie.data);
     }
+    free(dp->errq);
     free(dp->private12);                 /* Xlib output buffer */
     free(dp->atom_buf);
     free(dp->queue);
@@ -475,7 +480,6 @@ int XFlush(Display *d)
 int XSync(Display *d, Bool discard)
 {
     XDisplayImpl *dp = MWD(d);
-    (void)discard;
     mw_render_drain(d);
     mw_dispatch_errors(d);
     if (getenv("MW_TRACE")) fprintf(stderr, "MW: XSync\n");
@@ -485,6 +489,12 @@ int XSync(Display *d, Bool discard)
         wl_display_dispatch_pending(dp->wl_display);
         wl_display_roundtrip(dp->wl_display);
         mw_input_settle(d);
+    }
+    /* discard: throw away everything queued (after the round trip, so
+     * events it produced go too, as on X). */
+    if (discard) {
+        XEvent ev;
+        while (dp->qcount > 0) XNextEvent(d, &ev);
     }
     return 1;
 }
@@ -531,7 +541,7 @@ char *XScreenResourceString(Screen *screen) { (void)screen; return NULL; }
 long XMaxRequestSize(Display *d) { return (long)MWD(d)->max_request_size; }
 long XExtendedMaxRequestSize(Display *d) { (void)d; return 0; }
 unsigned long XLastKnownRequestProcessed(Display *d) { return MWD(d)->last_request_read; }
-unsigned long XNextRequest(Display *d) { return ++MWD(d)->request; }
+unsigned long XNextRequest(Display *d) { return MWD(d)->request + 1; }   /* only looks */
 
 int XBell(Display *d, int percent) { (void)d; (void)percent; return 0; }
 int XKillClient(Display *d, XID resource) { (void)d; (void)resource; return 0; }

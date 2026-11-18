@@ -322,6 +322,37 @@ static void glyph_source_and_clip(void)
     target_free(t);
 }
 
+/* With a mask format, a glyph run is added into one mask and composited
+ * once, so overlapping glyphs add their coverage; without one, each glyph
+ * is composited in turn (the X server's two behaviours). */
+static void glyph_mask_accumulates(void)
+{
+    GlyphSet gs = XRenderCreateGlyphSet(d, XRenderFindStandardFormat(d, PictStandardA8));
+    Glyph id = 'h';
+    XGlyphInfo info = { 4, 4, 0, 0, 2, 0 };        /* 4x4, advance 2: overlap */
+    char img[16];
+    memset(img, 0x80, sizeof img);                   /* half coverage */
+    XRenderAddGlyphs(d, gs, &id, &info, 1, img, sizeof img);
+    Picture src = XRenderCreateSolidFill(d, &red);
+
+    Target t = target(20, 10);
+    XRenderCompositeString8(d, PictOpOver, src, t.pic,
+                            XRenderFindStandardFormat(d, PictStandardA8),
+                            gs, 0, 0, 4, 2, "hh", 2);
+    CHECK(near(px(t, 7, 3), 0xff0000, 3));           /* 0x80 + 0x80 coverage */
+    CHECK(near(px(t, 4, 3), 0xff7f7f, 3));           /* one glyph only */
+    target_free(t);
+
+    t = target(20, 10);
+    XRenderCompositeString8(d, PictOpOver, src, t.pic, NULL, gs, 0, 0,
+                            4, 2, "hh", 2);
+    CHECK(near(px(t, 7, 3), 0xff3f3f, 3));           /* half, then half again */
+    target_free(t);
+
+    XRenderFreePicture(d, src);
+    XRenderFreeGlyphSet(d, gs);
+}
+
 int main(void)
 {
     d = XOpenDisplay(NULL);
@@ -342,6 +373,7 @@ int main(void)
     trapezoid_source_origin();
     trapezoid_edges();
     glyph_source_and_clip();
+    glyph_mask_accumulates();
     XCloseDisplay(d);
     if (failures == 0) { printf("test_render: all checks passed\n"); return 0; }
     fprintf(stderr, "test_render: %d failure(s)\n", failures);

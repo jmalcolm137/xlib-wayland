@@ -27,22 +27,12 @@ static MwWindow *window_for_surface(Display *d, struct wl_surface *s)
     return NULL;
 }
 
+/* The core state of the keyboard: all eight modifiers (Lock, Num Lock and
+ * AltGr included, which X clients see in event state) and the group. */
 static unsigned int current_mods(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
-    unsigned int m = 0;
-    if (!dp->xkb_state) return 0;
-    if (xkb_state_mod_name_is_active(dp->xkb_state, XKB_MOD_NAME_SHIFT,
-                                     XKB_STATE_MODS_EFFECTIVE)) m |= ShiftMask;
-    if (xkb_state_mod_name_is_active(dp->xkb_state, XKB_MOD_NAME_CAPS,
-                                     XKB_STATE_MODS_EFFECTIVE)) m |= LockMask;
-    if (xkb_state_mod_name_is_active(dp->xkb_state, XKB_MOD_NAME_CTRL,
-                                     XKB_STATE_MODS_EFFECTIVE)) m |= ControlMask;
-    if (xkb_state_mod_name_is_active(dp->xkb_state, XKB_MOD_NAME_ALT,
-                                     XKB_STATE_MODS_EFFECTIVE)) m |= Mod1Mask;
-    if (xkb_state_mod_name_is_active(dp->xkb_state, "Super",
-                                     XKB_STATE_MODS_EFFECTIVE)) m |= Mod4Mask;
-    return m;
+    return dp->xkb_state ? mw_core_state(d, dp->xkb_state) : 0;
 }
 
 #define MW_MOTION_MASKS (PointerMotionMask | ButtonMotionMask | \

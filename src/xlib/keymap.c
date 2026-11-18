@@ -196,6 +196,9 @@ void mw_keymap_fini(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
     if (dp->xkb_state) xkb_state_unref(dp->xkb_state);
+    if (dp->xkb_lookup_state) xkb_state_unref(dp->xkb_lookup_state);
+    dp->xkb_lookup_state = NULL;
+    dp->xkb_lookup_keymap = NULL;
     if (dp->xkb_keymap) xkb_keymap_unref(dp->xkb_keymap);
     if (dp->xkb_ctx) xkb_context_unref(dp->xkb_ctx);
     if (dp->xkb_compose_state) { xkb_compose_state_unref(dp->xkb_compose_state); dp->xkb_compose_state = NULL; }
@@ -203,6 +206,102 @@ void mw_keymap_fini(Display *d)
     if (dp->modmap) { free(dp->modmap); dp->modmap = NULL; }
     dp->xkb_state = NULL; dp->xkb_keymap = NULL; dp->xkb_ctx = NULL;
     dp->modmap = NULL; dp->keymap_inited = 0;
+}
+
+/* ------------------------------------------------- modifier state <-> xkb
+ *
+ * An X key event's state is the effective modifier state: the eight core
+ * modifiers (Shift, Lock, Control, Mod1-Mod5: Num Lock is usually Mod2, AltGr
+ * Mod5) plus the group in bits 13-14.  xkbcommon names the core modifiers
+ * "Shift" ... "Mod5", so the two map by name. */
+static const char *const core_mod_names[8] = {
+    XKB_MOD_NAME_SHIFT, XKB_MOD_NAME_CAPS, XKB_MOD_NAME_CTRL, "Mod1",
+    "Mod2", "Mod3", "Mod4", "Mod5"
+};
+
+/* The core state (modifiers and group) of an xkb state. */
+unsigned int mw_core_state(Display *d, struct xkb_state *st)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (!st || !dp->xkb_keymap) return 0;
+    xkb_mod_mask_t eff = xkb_state_serialize_mods(st, XKB_STATE_MODS_EFFECTIVE);
+    unsigned int m = 0;
+    for (int i = 0; i < 8; i++) {
+        xkb_mod_index_t idx = xkb_keymap_mod_get_index(dp->xkb_keymap, core_mod_names[i]);
+        if (idx != XKB_MOD_INVALID && (eff & (1u << idx))) m |= 1u << i;
+    }
+    xkb_layout_index_t g = xkb_state_serialize_layout(st, XKB_STATE_LAYOUT_EFFECTIVE);
+    return m | ((g & 3u) << 13);
+}
+
+/* A private xkb state set from a core state: what a key means under it. */
+static struct xkb_state *lookup_state(Display *d, unsigned int state)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (!dp->xkb_keymap) return NULL;
+    if (dp->xkb_lookup_state && dp->xkb_lookup_keymap != dp->xkb_keymap) {
+        xkb_state_unref(dp->xkb_lookup_state);
+        dp->xkb_lookup_state = NULL;
+    }
+    if (!dp->xkb_lookup_state) {
+        dp->xkb_lookup_state = xkb_state_new(dp->xkb_keymap);
+        dp->xkb_lookup_keymap = dp->xkb_keymap;
+        if (!dp->xkb_lookup_state) return NULL;
+    }
+    xkb_mod_mask_t mods = 0;
+    for (int i = 0; i < 8; i++) {
+        if (!(state & (1u << i))) continue;
+        xkb_mod_index_t idx = xkb_keymap_mod_get_index(dp->xkb_keymap, core_mod_names[i]);
+        if (idx != XKB_MOD_INVALID) mods |= 1u << idx;
+    }
+    xkb_state_update_mask(dp->xkb_lookup_state, mods, 0, 0, 0, 0,
+                          (state >> 13) & 3u);
+    return dp->xkb_lookup_state;
+}
+
+/* The keysym a key produces under a core state, through the keymap's key
+ * types (Caps Lock on letters, Num Lock on the keypad, AltGr levels). */
+KeySym mw_keysym_for_state(Display *d, KeyCode kc, unsigned int state)
+{
+    struct xkb_state *st = lookup_state(d, state);
+    if (!st) return NoSymbol;
+    return (KeySym)xkb_state_key_get_one_sym(st, (xkb_keycode_t)kc);
+}
+
+/* The core modifiers a key's translation used under `state`. */
+static unsigned int consumed_core(Display *d, KeyCode kc, unsigned int state)
+{
+    XDisplayImpl *dp = MWD(d);
+    struct xkb_state *st = lookup_state(d, state);
+    if (!st) return 0;
+    unsigned int m = 0;
+    for (int i = 0; i < 8; i++) {
+        xkb_mod_index_t idx = xkb_keymap_mod_get_index(dp->xkb_keymap, core_mod_names[i]);
+        if (idx != XKB_MOD_INVALID &&
+            xkb_state_mod_index_is_consumed(st, (xkb_keycode_t)kc, idx) == 1)
+            m |= 1u << i;
+    }
+    return m;
+}
+
+/* One entry of the core keysym table, laid out as Xorg's X server does:
+ * G1L1 G1L2 G2L1 G2L2 G1L3 G1L4 G2L3 G2L4.  A key with one group repeats it
+ * for group 2. */
+#define MW_CORE_SYMS_PER_KEY 8
+static KeySym core_sym(Display *d, KeyCode kc, int index)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (!dp->xkb_keymap || index < 0 || index >= MW_CORE_SYMS_PER_KEY) return NoSymbol;
+    static const int grp[8] = { 0, 0, 1, 1, 0, 0, 1, 1 };
+    static const int lvl[8] = { 0, 1, 0, 1, 2, 3, 2, 3 };
+    xkb_keycode_t key = (xkb_keycode_t)kc;
+    xkb_layout_index_t ng = xkb_keymap_num_layouts_for_key(dp->xkb_keymap, key);
+    if (ng == 0) return NoSymbol;
+    xkb_layout_index_t g = (xkb_layout_index_t)grp[index] % ng;
+    const xkb_keysym_t *syms = NULL;
+    int n = xkb_keymap_key_get_syms_by_level(dp->xkb_keymap, key, g,
+                                             (xkb_level_index_t)lvl[index], &syms);
+    return n > 0 ? (KeySym)syms[0] : NoSymbol;
 }
 
 KeySym mw_keycode_to_keysym(Display *d, KeyCode kc, int index)
@@ -217,10 +316,10 @@ KeySym mw_keycode_to_keysym(Display *d, KeyCode kc, int index)
 }
 
 KeySym XKeycodeToKeysym(Display *d, KeyCode kc, int index)
-{ return mw_keycode_to_keysym(d, kc, index); }
+{ return core_sym(d, kc, index); }
 
 KeySym XLookupKeysym(XKeyEvent *event, int index)
-{ return mw_keycode_to_keysym(event->display, event->keycode, index); }
+{ return core_sym(event->display, event->keycode, index); }
 
 KeyCode mw_keysym_to_keycode(Display *d, KeySym ks)
 {
@@ -250,12 +349,15 @@ int XDisplayKeycodes(Display *d, int *min, int *max)
 
 KeySym *XGetKeyboardMapping(Display *d, KeyCode first, int count, int *nkeys)
 {
-    Display *dd = d;
-    int per = 2;
+    if (count <= 0) { if (nkeys) *nkeys = 0; return NULL; }
+    int per = MW_CORE_SYMS_PER_KEY;
     KeySym *out = calloc((size_t)count * per, sizeof(KeySym));
+    if (!out) { if (nkeys) *nkeys = 0; return NULL; }
     for (int i = 0; i < count; i++) {
-        out[i * per + 0] = mw_keycode_to_keysym(dd, (KeyCode)(first + i), 0);
-        out[i * per + 1] = mw_keycode_to_keysym(dd, (KeyCode)(first + i), 1);
+        int kc = first + i;
+        if (kc > 255) break;
+        for (int j = 0; j < per; j++)
+            out[i * per + j] = core_sym(d, (KeyCode)kc, j);
     }
     if (nkeys) *nkeys = per;
     return out;
@@ -330,11 +432,12 @@ unsigned int mw_keysym_to_modmask(Display *d, KeySym ks)
     }
 }
 
+/* Case pairs for every script xkbcommon knows (Latin-1/2/3/4, Greek,
+ * Cyrillic, Armenian, Unicode keysyms ...), not just ASCII. */
 void XConvertCase(KeySym sym, KeySym *lower, KeySym *upper)
 {
-    *lower = sym; *upper = sym;
-    if (sym >= XK_A && sym <= XK_Z) *lower = sym + 32;
-    else if (sym >= XK_a && sym <= XK_z) { *upper = sym - 32; }
+    *lower = (KeySym)xkb_keysym_to_lower((xkb_keysym_t)sym);
+    *upper = (KeySym)xkb_keysym_to_upper((xkb_keysym_t)sym);
 }
 
 int XRefreshKeyboardMapping(XMappingEvent *e) { (void)e; return 1; }
@@ -347,12 +450,22 @@ int XRefreshKeyboardMapping(XMappingEvent *e) { (void)e; return 1; }
  * i18n demos, for instance -- lose the locale component.  We have no input
  * method, so the honest answer is the empty string (or whatever was asked for,
  * or $XMODIFIERS when asked to use the default). */
+/* As in libX11: NULL queries the current modifiers without changing them,
+ * "" takes them from $XMODIFIERS, anything else sets them.  Returns the
+ * current modifiers (owned here). */
 char *XSetLocaleModifiers(_Xconst char *mods)
 {
     static char *cur;
-    const char *want = mods ? mods : getenv("XMODIFIERS");
+    if (!mods) return cur ? cur : (char *)"";
+    const char *want = mods;
+    if (!*mods) {
+        want = getenv("XMODIFIERS");
+        if (!want) want = "";
+    }
+    char *n = strdup(want);
+    if (!n) return NULL;
     free(cur);
-    cur = strdup(want ? want : "");
+    cur = n;
     return cur;
 }
 Bool XSupportsLocale(void) { return True; }
@@ -376,23 +489,40 @@ int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
     (void)status;
     Display *d = event->display;
     XDisplayImpl *dp = MWD(d);
-    KeySym ks = mw_keycode_to_keysym(d, event->keycode, 0);
-    if (event->state & ShiftMask) {
-        KeySym s2 = mw_keycode_to_keysym(d, event->keycode, 1);
-        if (s2 != NoSymbol) ks = s2;
-    }
+    KeySym ks = mw_keysym_for_state(d, event->keycode, event->state);
     if (keysym) *keysym = ks;
 
     /* Feed the keysym to the compose state: dead keys and multi-key sequences
      * resolve here, so an intl. layout's dead_acute then e yields é.  Skip it
-     * while Ctrl/Alt is held (there the key means something else). */
-    if (dp->xkb_compose_state && !(event->state & ControlMask) &&
-        !(event->state & Mod1Mask)) {
+     * while Ctrl/Alt is held (there the key means something else).  Only key
+     * presses are fed, and each only once: Xt looks releases up too, and
+     * clients look the same press up more than once (a dead key's release
+     * used to complete its own sequence).  The outcome for the press is
+     * remembered so a second lookup gets the same answer. */
+    static __thread struct {
+        Display *d; unsigned long serial; Time time; unsigned int keycode;
+        int status; char text[64]; int len;
+    } fed;
+    bool same = fed.d == d && fed.serial == event->serial &&
+                fed.time == event->time && fed.keycode == event->keycode;
+    if (event->type == KeyPress && same && fed.status != XKB_COMPOSE_NOTHING) {
+        if (fed.status == XKB_COMPOSE_COMPOSING) return 0;
+        if (fed.status == XKB_COMPOSE_COMPOSED) {
+            int len = fed.len < nbytes ? fed.len : nbytes;
+            if (len > 0) memcpy(buffer, fed.text, (size_t)len);
+            return len;
+        }
+    }
+    if (dp->xkb_compose_state && event->type == KeyPress && !same &&
+        !(event->state & ControlMask) && !(event->state & Mod1Mask)) {
+        fed.d = d; fed.serial = event->serial; fed.time = event->time;
+        fed.keycode = event->keycode; fed.status = XKB_COMPOSE_NOTHING;
         /* feed() only says whether the keysym was accepted into a sequence;
          * the outcome is read from get_status(). */
         xkb_compose_state_feed(dp->xkb_compose_state, ks);
         switch (xkb_compose_state_get_status(dp->xkb_compose_state)) {
         case XKB_COMPOSE_COMPOSING:
+            fed.status = XKB_COMPOSE_COMPOSING;
             if (getenv("MW_TRACE"))
                 fprintf(stderr, "MW: composing ks=0x%lx\n", (unsigned long)ks);
             return 0;                    /* part of a sequence: no bytes yet */
@@ -400,18 +530,24 @@ int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
             char cbuf[64];
             int r = xkb_compose_state_get_utf8(dp->xkb_compose_state,
                                                cbuf, sizeof cbuf);
+            KeySym cks = (KeySym)xkb_compose_state_get_one_sym(dp->xkb_compose_state);
+            xkb_compose_state_reset(dp->xkb_compose_state);
             /* Unlike xkb_state_key_get_utf8(), this returns the byte count
              * *without* the terminating NUL. */
             if (r > 0) {
-                int len = r;
-                if (len > nbytes) len = nbytes;
-                memcpy(buffer, cbuf, (size_t)len);
-                xkb_compose_state_reset(dp->xkb_compose_state);
+                if (r > (int)sizeof fed.text) r = (int)sizeof fed.text;
+                fed.status = XKB_COMPOSE_COMPOSED;
+                memcpy(fed.text, cbuf, (size_t)r);
+                fed.len = r;
+                /* The keysym reported is the composed one (é), not the last
+                 * key of the sequence. */
+                if (keysym && cks != XKB_KEY_NoSymbol) *keysym = cks;
+                int len = r < nbytes ? r : nbytes;
+                if (len > 0) memcpy(buffer, cbuf, (size_t)len);
                 if (getenv("MW_TRACE"))
-                    fprintf(stderr, "MW: composed '%s' n=%d\n", cbuf, len);
+                    fprintf(stderr, "MW: composed '%.*s' n=%d\n", r, cbuf, len);
                 return len;
             }
-            xkb_compose_state_reset(dp->xkb_compose_state);
             break;
         }
         case XKB_COMPOSE_CANCELLED:      /* partial sequence dropped: fall through */
@@ -440,10 +576,11 @@ int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
     if (ch >= 0) {
         if (event->state & ControlMask) ch = mw_to_control(ch);
         if (nbytes > 0) { buffer[0] = (char)ch; n = 1; }
-    } else if (dp->xkb_state && dp->xkb_keymap) {
-        /* A multi-byte character (composed or non-Latin-1); ask xkbcommon. */
+    } else if (lookup_state(d, event->state)) {
+        /* A multi-byte character (composed or non-Latin-1); ask xkbcommon,
+         * under the event's state rather than the keyboard's live one. */
         char buf[64];
-        int r = xkb_state_key_get_utf8(dp->xkb_state,
+        int r = xkb_state_key_get_utf8(lookup_state(d, event->state),
                                        (xkb_keycode_t)event->keycode,
                                        buf, sizeof buf);
         if (r > 1) {
@@ -462,13 +599,12 @@ int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
 int XkbLookupKeySym(Display *d, KeyCode kc, unsigned int state,
                     unsigned int *state_out, KeySym *sym)
 {
-    /* Honour Shift (and CapsLock, which shifts letters) by selecting the
-     * keymap level, as XkbTranslateKeyCode() does; ignoring the state made a
-     * shifted key report its unshifted keysym (gtk-demo's send-shift-key). */
-    int level = (state & ShiftMask) ? 1 : 0;
-    if (state_out) *state_out = state;
-    if (sym) *sym = mw_keycode_to_keysym(d, kc, level);
-    return 1;
+    /* The keysym for the whole state (Shift, Caps Lock, Num Lock, AltGr,
+     * group), and the modifiers that translation consumed, as libX11. */
+    KeySym ks = mw_keysym_for_state(d, kc, state);
+    if (state_out) *state_out = consumed_core(d, kc, state);
+    if (sym) *sym = ks;
+    return ks != NoSymbol;
 }
 
 int XkbLookupKeyBinding(Display *d, KeySym ks, unsigned int st, char *buf,

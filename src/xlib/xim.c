@@ -93,6 +93,21 @@ struct _XIC {
     char        **commits;
     int           ncommits, commit_cap;
 
+    /* text_input_v3 events are double-buffered: they take effect together
+     * at `done`, in the order delete-surrounding, commit, preedit. */
+    struct {
+        bool      preedit_set;
+        char     *preedit;
+        int32_t   cbegin, cend;
+        char     *commit;
+        uint32_t  before, after;        /* bytes */
+    } pend;
+
+    /* The tail of the text committed so far (UTF-8): what the IM's byte
+     * counts in delete_surrounding_text most likely refer to. */
+    char          history[256];
+    int           history_len;
+
     MwToplevel   *tl;               /* toplevel the IC lives in, if known */
     struct _XIC  *next_ic;          /* in im->ics */
 };
@@ -334,6 +349,13 @@ static void ti_commit_event(Display *d, struct _XIC *ic, const char *text)
     mw_put_event(d, (XEvent *)&ke);
 }
 
+static void ic_pend_clear(struct _XIC *ic)
+{
+    free(ic->pend.preedit);
+    free(ic->pend.commit);
+    memset(&ic->pend, 0, sizeof ic->pend);
+}
+
 static void set_preedit(struct _XIC *ic, const char *text, int cbegin, int cend)
 {
     (void)cend;
@@ -446,7 +468,12 @@ static void ti_leave(void *data, struct zwp_text_input_v3 *ti, struct wl_surface
     Display *d = data;
     XDisplayImpl *dp = MWD(d);
     dp->text_input_entered = false;
-    if (dp->text_input_ic) set_preedit(dp->text_input_ic, NULL, 0, 0);
+    struct _XIC *ic = dp->text_input_ic;
+    if (ic) {
+        set_preedit(ic, NULL, 0, 0);
+        ic_pend_clear(ic);
+        ic->history_len = 0;
+    }
 }
 
 static void ti_preedit_string(void *data, struct zwp_text_input_v3 *ti,
@@ -456,7 +483,12 @@ static void ti_preedit_string(void *data, struct zwp_text_input_v3 *ti,
     (void)ti;
     Display *d = data;
     struct _XIC *ic = MWD(d)->text_input_ic;
-    if (ic) set_preedit(ic, text, cursor_begin, cursor_end);
+    if (!ic) return;
+    free(ic->pend.preedit);
+    ic->pend.preedit = text ? strdup(text) : NULL;
+    ic->pend.preedit_set = true;
+    ic->pend.cbegin = cursor_begin;
+    ic->pend.cend = cursor_end;
 }
 
 static void ti_commit_string(void *data, struct zwp_text_input_v3 *ti,
@@ -466,11 +498,8 @@ static void ti_commit_string(void *data, struct zwp_text_input_v3 *ti,
     Display *d = data;
     struct _XIC *ic = MWD(d)->text_input_ic;
     if (!ic) return;
-    /* A commit always terminates any composition. */
-    set_preedit(ic, NULL, 0, 0);
-    if (getenv("MW_TRACE"))
-        fprintf(stderr, "MW: XIM commit '%s'\n", text ? text : "");
-    ti_commit_event(d, ic, text);
+    free(ic->pend.commit);
+    ic->pend.commit = text ? strdup(text) : NULL;
 }
 
 static void ti_delete_surrounding_text(void *data, struct zwp_text_input_v3 *ti,
@@ -478,28 +507,87 @@ static void ti_delete_surrounding_text(void *data, struct zwp_text_input_v3 *ti,
 {
     (void)ti;
     Display *d = data;
-    /* XIM has no delete-surrounding request, so edit the way a user would:
-     * BackSpace `before_length` times and Delete `after_length` times, to the
-     * focused widget.  This is what the IM (e.g. ibus) is asking for when it
-     * sends delete_surrounding_text. */
-    KeyCode bs = XKeysymToKeycode(d, XK_BackSpace);
-    KeyCode del = XKeysymToKeycode(d, XK_Delete);
-    for (uint32_t i = 0; i < before_length; i++) {
-        mw_key_send(d, bs, True);
-        mw_key_send(d, bs, False);
-    }
-    for (uint32_t i = 0; i < after_length; i++) {
-        mw_key_send(d, del, True);
-        mw_key_send(d, del, False);
-    }
-    if (getenv("MW_TRACE"))
-        fprintf(stderr, "MW: XIM delete_surrounding before=%u after=%u\n",
-                before_length, after_length);
+    struct _XIC *ic = MWD(d)->text_input_ic;
+    if (!ic) return;
+    ic->pend.before = before_length;
+    ic->pend.after = after_length;
 }
 
+static void history_append(struct _XIC *ic, const char *text)
+{
+    int n = (int)strlen(text), cap = (int)sizeof ic->history;
+    if (n >= cap) {
+        text += n - cap;
+        n = cap;
+        while (n > 0 && ((unsigned char)*text & 0xC0) == 0x80) { text++; n--; }
+        ic->history_len = 0;
+    }
+    if (ic->history_len + n > cap) {
+        int drop = ic->history_len + n - cap;
+        while (drop < ic->history_len &&
+               ((unsigned char)ic->history[drop] & 0xC0) == 0x80) drop++;
+        memmove(ic->history, ic->history + drop, (size_t)(ic->history_len - drop));
+        ic->history_len -= drop;
+    }
+    memcpy(ic->history + ic->history_len, text, (size_t)n);
+    ic->history_len += n;
+}
+
+/* How many characters the last `bytes` bytes before the cursor hold.  The
+ * text committed through us is all we know of; beyond it a byte counts as a
+ * character (the common case of ASCII the user typed). */
+static uint32_t chars_before(struct _XIC *ic, uint32_t bytes)
+{
+    uint32_t known = bytes < (uint32_t)ic->history_len ? bytes : (uint32_t)ic->history_len;
+    int start = ic->history_len - (int)known;
+    uint32_t chars = 0;
+    for (int i = start; i < ic->history_len; i++)
+        if (((unsigned char)ic->history[i] & 0xC0) != 0x80) chars++;
+    ic->history_len = start;
+    return chars + (bytes - known);
+}
+
+static void send_keys(Display *d, KeySym ks, uint32_t count)
+{
+    KeyCode kc = XKeysymToKeycode(d, ks);
+    if (!kc) return;
+    for (uint32_t i = 0; i < count; i++) {
+        mw_key_send(d, kc, True);
+        mw_key_send(d, kc, False);
+    }
+}
+
+/* Apply the events since the last done, in the order the protocol gives:
+ * the preedit goes, surrounding text is deleted, the commit is inserted and
+ * then the new preedit shown. */
 static void ti_done(void *data, struct zwp_text_input_v3 *ti, uint32_t serial)
 {
-    (void)data; (void)ti; (void)serial;
+    (void)ti; (void)serial;
+    Display *d = data;
+    struct _XIC *ic = MWD(d)->text_input_ic;
+    if (!ic) return;
+    if (ic->pend.before || ic->pend.after || ic->pend.commit)
+        set_preedit(ic, NULL, 0, 0);
+    if (ic->pend.before || ic->pend.after) {
+        /* XIM has no delete-surrounding request, so edit the way a user
+         * would: BackSpace and Delete, once per character, to the focused
+         * widget.  The protocol counts bytes; X widgets count characters. */
+        uint32_t back = chars_before(ic, ic->pend.before);
+        if (getenv("MW_TRACE"))
+            fprintf(stderr, "MW: XIM delete_surrounding before=%u (%u chars) after=%u\n",
+                    ic->pend.before, back, ic->pend.after);
+        send_keys(d, XK_BackSpace, back);
+        send_keys(d, XK_Delete, ic->pend.after);
+    }
+    if (ic->pend.commit && *ic->pend.commit) {
+        if (getenv("MW_TRACE"))
+            fprintf(stderr, "MW: XIM commit '%s'\n", ic->pend.commit);
+        history_append(ic, ic->pend.commit);
+        ti_commit_event(d, ic, ic->pend.commit);
+    }
+    if (ic->pend.preedit_set)
+        set_preedit(ic, ic->pend.preedit, ic->pend.cbegin, ic->pend.cend);
+    ic_pend_clear(ic);
 }
 
 static const struct zwp_text_input_v3_listener ti_listener = {
@@ -510,6 +598,10 @@ static const struct zwp_text_input_v3_listener ti_listener = {
     .delete_surrounding_text = ti_delete_surrounding_text,
     .done = ti_done,
 };
+
+/* For the tests, which have no input method to drive it. */
+const struct zwp_text_input_v3_listener *mw_xim_text_input_listener(void)
+{ return &ti_listener; }
 
 static void text_input_ensure(Display *d)
 {
@@ -683,6 +775,7 @@ void XDestroyIC(XIC xic)
             if (*pp == ic) { *pp = ic->next_ic; break; }
     for (int i = 0; i < ic->ncommits; i++) free(ic->commits[i]);
     free(ic->commits);
+    ic_pend_clear(ic);
     free(ic);
 }
 
@@ -757,6 +850,9 @@ void XSetICFocus(XIC xic)
 
     if (dp->text_input_ic && dp->text_input_ic != ic)
         ti_disable(d);
+    /* The cursor may be somewhere else now: what was committed before no
+     * longer says what precedes it. */
+    ic->history_len = 0;
     dp->text_input_ic = ic;
     text_input_ensure(d);
     if (dp->text_input)

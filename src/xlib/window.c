@@ -578,6 +578,8 @@ static void destroy_tree(Display *d, MwWindow *win, bool top)
     }
 
     unlink_child(win);
+    mw_xfixes_window_gone(d, win->id);
+    if (MWD(d)->damages) mw_xdamage_drawable_gone(d, win->id);
     while (win->props) { MwProp *p = win->props; win->props = p->next;
                          free(p->data); free(p); }
     if (win->surface) mw_surface_destroy(win->surface);
@@ -761,6 +763,15 @@ void mw_unmap_window(Display *d, MwWindow *win)
                 win->id, win->override_redirect, win->tl != NULL);
     win->mapped = false;
     win->map_state = IsUnmapped;
+    /* A grab whose window (or an ancestor of it) is unmapped becomes
+     * unviewable, and X releases it. */
+    {
+        XDisplayImpl *dp = MWD(d);
+        for (MwWindow *g = dp->ptr_grab_window; g; g = g->parent)
+            if (g == win) { mw_pointer_drop_grab(d, dp->ptr_grab_window); break; }
+        for (MwWindow *g = dp->kbd_grab_window; g; g = g->parent)
+            if (g == win) { dp->kbd_grab_window = NULL; break; }
+    }
     if (MWD(d)->active_toplevel == win)
         MWD(d)->active_toplevel = mw_any_mapped_toplevel(d, win);
     if (MWD(d)->open_menu == win)
@@ -1136,6 +1147,13 @@ int XReparentWindow(Display *d, Window w, Window parent, int x, int y)
     MwWindow *win = mw_window(d, w);
     MwWindow *par = mw_window(d, parent);
     if (!win || !par || win == par) return 0;
+    /* Into one of its own inferiors is BadMatch: it would make a cycle (and
+     * every walk up the tree would loop forever). */
+    for (MwWindow *a = par; a; a = a->parent)
+        if (a == win) {
+            mw_deliver_error(d, BadMatch, 7 /* X_ReparentWindow */, 0, w, 0);
+            return 0;
+        }
     MwWindow *old = win->parent;
 
     unlink_child(win);
@@ -1222,8 +1240,16 @@ int XClearArea(Display *d, Window w, int x, int y,
     MwWindow *win = mw_window(d, w);
     if (!win) return 0;
     mw_window_ensure_surface(win);
+    /* A zero width/height extends to the window's edge; the area is then
+     * clipped to the window (outside it there is nothing to clear or
+     * expose). */
     int cw = width ? (int)width : win->w - x;
     int ch = height ? (int)height : win->h - y;
+    if (x < 0) { cw += x; x = 0; }
+    if (y < 0) { ch += y; y = 0; }
+    if (x + cw > win->w) cw = win->w - x;
+    if (y + ch > win->h) ch = win->h - y;
+    if (cw <= 0 || ch <= 0) return 1;
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: XClearArea 0x%lx %d,%d %dx%d exposures=%d\n",
                 w, x, y, cw, ch, exposures);

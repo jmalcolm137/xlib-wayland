@@ -50,8 +50,17 @@ void mw_deliver_error(Display *d, int code, int request, int minor,
     e->minor_code = (unsigned char)minor;
     if (dp->errq_count < dp->errq_cap) dp->errq_count++;
     else dp->errq_head = (dp->errq_head + 1) % dp->errq_cap;
-    /* Xlib reports errors even if no handler: default handler prints/aborts. */
+    /* With no handler installed, libX11's default handler prints the error
+     * (and exits).  Print it the same way -- silently dropping it hid real
+     * client mistakes -- but do not exit: an error the shim raised in error
+     * must not take the application down. */
     if (!g_error_handler) {
+        char text[128] = "";
+        XGetErrorText(d, code, text, sizeof text);
+        fprintf(stderr, "X Error of failed request:  %s\n"
+                        "  Major opcode of failed request:  %d\n"
+                        "  Resource id in failed request:  0x%lx\n",
+                text, request, (unsigned long)resource);
         dp->errq_head = (dp->errq_head + 1) % dp->errq_cap;
         if (dp->errq_count) dp->errq_count--;
     }
@@ -164,6 +173,10 @@ void mw_put_event(Display *d, XEvent *ev)
     if (ev->type == SelectionNotify &&
         mw_broker_serve_notify(d, &ev->xselection))
         return;
+    /* A new INCR chunk on the clipboard bridge's requestor window. */
+    if (ev->type == PropertyNotify && ev->xproperty.state == PropertyNewValue &&
+        dp->clip_window != None && ev->xproperty.window == dp->clip_window)
+        mw_clipboard_incr_notify(d, ev->xproperty.atom);
     static int trace = -1;
     static long evtotal;
     static long evcount[64];
@@ -574,8 +587,64 @@ Bool XPeekIfEvent(Display *d, XEvent *event, Bool (*pred)(), XPointer arg)
     }
 }
 
-int XSendEvent(Display *d, Window w, Bool propagate, long event_mask, XEvent *event)
+/* The size of a core event's own structure.  Callers pass the specific
+ * struct (an XClientMessageEvent on the stack, say), not a whole XEvent. */
+static size_t core_event_size(int type)
 {
+    switch (type) {
+    case KeyPress: case KeyRelease:       return sizeof(XKeyEvent);
+    case ButtonPress: case ButtonRelease: return sizeof(XButtonEvent);
+    case MotionNotify:                    return sizeof(XMotionEvent);
+    case EnterNotify: case LeaveNotify:   return sizeof(XCrossingEvent);
+    case FocusIn: case FocusOut:          return sizeof(XFocusChangeEvent);
+    case KeymapNotify:                    return sizeof(XKeymapEvent);
+    case Expose:                          return sizeof(XExposeEvent);
+    case GraphicsExpose:                  return sizeof(XGraphicsExposeEvent);
+    case NoExpose:                        return sizeof(XNoExposeEvent);
+    case VisibilityNotify:                return sizeof(XVisibilityEvent);
+    case CreateNotify:                    return sizeof(XCreateWindowEvent);
+    case DestroyNotify:                   return sizeof(XDestroyWindowEvent);
+    case UnmapNotify:                     return sizeof(XUnmapEvent);
+    case MapNotify:                       return sizeof(XMapEvent);
+    case MapRequest:                      return sizeof(XMapRequestEvent);
+    case ReparentNotify:                  return sizeof(XReparentEvent);
+    case ConfigureNotify:                 return sizeof(XConfigureEvent);
+    case ConfigureRequest:                return sizeof(XConfigureRequestEvent);
+    case GravityNotify:                   return sizeof(XGravityEvent);
+    case ResizeRequest:                   return sizeof(XResizeRequestEvent);
+    case CirculateNotify:                 return sizeof(XCirculateEvent);
+    case CirculateRequest:                return sizeof(XCirculateRequestEvent);
+    case PropertyNotify:                  return sizeof(XPropertyEvent);
+    case SelectionClear:                  return sizeof(XSelectionClearEvent);
+    case SelectionRequest:                return sizeof(XSelectionRequestEvent);
+    case SelectionNotify:                 return sizeof(XSelectionEvent);
+    case ColormapNotify:                  return sizeof(XColormapEvent);
+    case ClientMessage:                   return sizeof(XClientMessageEvent);
+    case MappingNotify:                   return sizeof(XMappingEvent);
+    default:                              return sizeof(XEvent);
+    }
+}
+
+int XSendEvent(Display *d, Window w, Bool propagate, long event_mask, XEvent *event_in)
+{
+    /* The caller's event is not ours to modify (send_event is set on the
+     * copy that is delivered). */
+    XEvent copy;
+    memset(&copy, 0, sizeof copy);
+    memcpy(&copy, event_in, core_event_size(event_in->type & 0x7f));
+    XEvent *event = &copy;
+    XDisplayImpl *dp = MWD(d);
+    /* PointerWindow and InputFocus name the window under the pointer and
+     * the focus window -- or the pointer's window when it is inside the
+     * focus window, as X defines InputFocus. */
+    if (w == PointerWindow) {
+        w = dp->ptr_focus ? dp->ptr_focus->id : None;
+    } else if (w == InputFocus) {
+        MwWindow *f = dp->kbd_focus, *p = dp->ptr_focus;
+        MwWindow *t = f;
+        for (MwWindow *a = p; f && a; a = a->parent) if (a == f) { t = p; break; }
+        w = t ? t->id : None;
+    }
     MwWindow *win = mw_window(d, w);
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: XSendEvent win=0x%lx prop=%d mask=0x%lx type=%d win_valid=%d\n",

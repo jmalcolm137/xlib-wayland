@@ -289,7 +289,7 @@ Screen *_XScreenOfWindow(Display *d, Window w) { (void)w; return MWSCR(d); }
 Bool _XTranslateKeySym(Display *d, KeySym ks, unsigned int mods, char *buf, int *n)
 { (void)d; (void)ks; (void)mods; (void)buf; if (n) *n = 0; return False; }
 KeySym _XTranslateKey(Display *d, KeyCode kc, unsigned int mods)
-{ (void)mods; return mw_keycode_to_keysym(d, kc, 0); }
+{ return mw_keysym_for_state(d, kc, mods); }
 void _XUpdateGCCache(Display *d, GC gc, unsigned long mask, void *attr)
 { (void)d; (void)gc; (void)mask; (void)attr; }
 void *_XGetGCValues(Display *d, GC gc, unsigned long mask, void *v)

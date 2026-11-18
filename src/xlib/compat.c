@@ -329,6 +329,19 @@ Bool XQueryExtension(Display *d, _Xconst char *name, int *major_opcode,
     return False;
 }
 
+/* A display's record of an extension: the codes Xlib hands out (and keeps
+ * ownership of) and its close hook. */
+static XExtCodes *ext_record(Display *d, int extension)
+{
+    XDisplayImpl *dp = MWD(d);
+    MwExtension *e = calloc(1, sizeof *e);
+    if (!e) return NULL;
+    e->codes.extension = extension;
+    e->next = dp->extensions;
+    dp->extensions = e;
+    return &e->codes;
+}
+
 XExtCodes *XInitExtension(Display *d, _Xconst char *name)
 {
     /* XextAddDisplay (libXext) calls this to learn an extension's codes, and a
@@ -338,10 +351,9 @@ XExtCodes *XInitExtension(Display *d, _Xconst char *name)
     int major, first_event, first_error;
     if (!XQueryExtension(d, name, &major, &first_event, &first_error))
         return NULL;
-    XExtCodes *e = calloc(1, sizeof *e);
-    if (!e) return NULL;
     static int next_extension = 1;   /* XAddExtension uses 128 and up */
-    e->extension = next_extension++;
+    XExtCodes *e = ext_record(d, __atomic_fetch_add(&next_extension, 1, __ATOMIC_RELAXED));
+    if (!e) return NULL;
     e->major_opcode = major;
     e->first_event = first_event;
     e->first_error = first_error;
@@ -372,14 +384,8 @@ XExtCodes *XAddExtension(Display *d)
     /* Real Xlib allocates a client-side extension record with a unique
      * extension number.  Motif (ColorObj) stores dpy here and reads
      * xExt->extension for XESetCloseDisplay. */
-    (void)d;
     static int next_extension = 128;
-    XExtCodes *e = calloc(1, sizeof *e);
-    e->extension = next_extension++;
-    e->major_opcode = 0;
-    e->first_event = 0;
-    e->first_error = 0;
-    return e;
+    return ext_record(d, __atomic_fetch_add(&next_extension, 1, __ATOMIC_RELAXED));
 }
 
 XExtData **XEHeadOfExtensionList(XEDataObject object)
@@ -389,7 +395,29 @@ XExtData *XFindOnExtensionList(XExtData **head, int number)
 
 int (*XESetCloseDisplay(Display *d, int extension,
                         int (*proc)(Display *, XExtCodes *)))(Display *, XExtCodes *)
-{ (void)d; (void)extension; (void)proc; return NULL; }
+{
+    for (MwExtension *e = MWD(d)->extensions; e; e = e->next)
+        if (e->codes.extension == extension) {
+            int (*old)(Display *, XExtCodes *) = e->close_display;
+            e->close_display = proc;
+            return old;
+        }
+    return NULL;
+}
+
+/* XCloseDisplay: run the extensions' close hooks (newest first, as libX11),
+ * then free the records. */
+void mw_extensions_close(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    for (MwExtension *e = dp->extensions; e; e = e->next)
+        if (e->close_display) e->close_display(d, &e->codes);
+    while (dp->extensions) {
+        MwExtension *n = dp->extensions->next;
+        free(dp->extensions);
+        dp->extensions = n;
+    }
+}
 
 /* ------------------------------------------------------- keyboard/pointer */
 

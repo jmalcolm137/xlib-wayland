@@ -137,15 +137,23 @@ typedef struct MwXfixesSel {
 /* A region handle returned by XFixesCreateRegion (opaque to clients). */
 typedef struct MwXfixesRegion {
     unsigned long           id;
+    Region                  r;
     struct MwXfixesRegion  *next;
 } MwXfixesRegion;
 
 /* A DAMAGE object (XDamageCreate): GDK creates one per composited window and
  * repaints from XDamageNotify. */
+typedef struct MwExtension {
+    XExtCodes               codes;      /* handed out; owned here */
+    int                   (*close_display)(Display *, XExtCodes *);
+    struct MwExtension     *next;
+} MwExtension;
+
 typedef struct MwDamage {
     unsigned long           id;
     Drawable                drawable;
     int                     level;
+    Region                  damage;     /* accumulated, until subtracted */
     struct MwDamage        *next;
 } MwDamage;
 
@@ -299,6 +307,11 @@ typedef struct MwClipServe {
      * own windows the reader is this very thread). */
     unsigned char *pend;
     size_t   pend_len, pend_off;
+    /* ICCCM INCR: the owner sends the data in chunks on `incr_prop` of our
+     * requestor window, each written when we delete the previous one. */
+    bool     incr;
+    Atom     incr_prop;
+    int      incr_format;
 } MwClipServe;
 
 struct MwWindow {
@@ -631,6 +644,8 @@ typedef struct _XDisplayImpl {
     struct xkb_context         *xkb_ctx;
     struct xkb_keymap          *xkb_keymap;
     struct xkb_state           *xkb_state;
+    struct xkb_state           *xkb_lookup_state;  /* scratch: key under a given state */
+    struct xkb_keymap          *xkb_lookup_keymap; /* the keymap it was made for */
     /* Dead-key / compose sequences (e.g. dead_acute + e -> é). */
     struct xkb_compose_table   *xkb_compose_table;
     struct xkb_compose_state   *xkb_compose_state;
@@ -774,10 +789,13 @@ typedef struct _XDisplayImpl {
     /* XFIXES (xfixes.c) */
     MwXfixesSel                *xfixes_sels;
     MwXfixesRegion             *xfixes_regions;
-    unsigned long               xfixes_next_region;
 
     /* DAMAGE (xdamage.c) */
     MwDamage                   *damages;
+
+    /* Extensions initialised on this display (XInitExtension, XAddExtension)
+     * and their XESetCloseDisplay hooks, run by XCloseDisplay. */
+    struct MwExtension         *extensions;
 
     /* XInput2 event selection: per-window masks set by XISelectEvents. */
     MwXiSelect                 *xi_selects;
@@ -823,6 +841,7 @@ MwWindow *mw_create_window(Display *d, Window parent, int x, int y, int w, int h
                            Visual *visual, unsigned long valuemask,
                            XSetWindowAttributes *attr);
 void      mw_destroy_window(Display *d, MwWindow *win);
+void      mw_extensions_close(Display *d);
 void      mw_map_window(Display *d, MwWindow *win, bool raised);
 void      mw_unmap_window(Display *d, MwWindow *win);
 void      mw_set_focus(Display *d, MwWindow *win);
@@ -949,6 +968,8 @@ int  mw_kbd_repeat_timeout(Display *d);
 /* Synthesise a key press/release to the focused window (used by the XIM bridge
  * to turn a Wayland text-input delete_surrounding_text into editing keys). */
 void mw_key_send(Display *d, KeyCode kc, Bool press);
+/* The XIM bridge's text-input listener (for the tests). */
+const struct zwp_text_input_v3_listener *mw_xim_text_input_listener(void);
 /* Session-wide auto-repeat state, shared with the Style Manager's Keyboard
  * panel (auto_repeat is AutoRepeatModeOn/Off). */
 int  mw_keyboard_autorepeat_mode(Display *d);
@@ -1009,6 +1030,8 @@ void     mw_keymap_init(Display *d, const char *keymap_str);
 void     mw_keymap_init_fd(Display *d, int fd, uint32_t size, uint32_t format);
 void     mw_keymap_fini(Display *d);
 KeySym   mw_keycode_to_keysym(Display *d, KeyCode kc, int index);
+KeySym   mw_keysym_for_state(Display *d, KeyCode kc, unsigned int state);
+unsigned int mw_core_state(Display *d, struct xkb_state *st);
 KeyCode  mw_keysym_to_keycode(Display *d, KeySym ks);
 unsigned int mw_keysym_to_modmask(Display *d, KeySym ks);
 void     mw_update_modmap(Display *d);
@@ -1171,8 +1194,12 @@ void      mw_xfixes_select_input(Display *d, Window w, Atom selection,
                                  unsigned long mask);
 void      mw_xfixes_selection_notify(Display *d, Atom selection, Window owner,
                                      Time time);
-unsigned long mw_xfixes_new_region(Display *d);
+void      mw_xfixes_selection_event(Display *d, Atom selection, Window owner,
+                                    Time time, int subtype);
+unsigned long mw_xfixes_new_region(Display *d, XRectangle *rects, int n);
 void      mw_xfixes_free_region(Display *d, unsigned long region);
+Region    mw_xfixes_region(Display *d, unsigned long region);
+void      mw_xfixes_window_gone(Display *d, Window w);
 void      mw_xfixes_change_cursor(Display *d, Cursor image, Cursor target);
 unsigned long mw_xsync_new_counter(Display *d);
 
@@ -1192,6 +1219,10 @@ unsigned long mw_xdamage_new(Display *d, Drawable drawable, int level);
 void      mw_xdamage_free(Display *d, unsigned long id);
 void      mw_xdamage_notify(Display *d, Drawable drawable, int x, int y,
                             int w, int h);
+void      mw_xdamage_subtract(Display *d, unsigned long damage,
+                              unsigned long repair, unsigned long parts);
+void      mw_xdamage_add(Display *d, Drawable drawable, unsigned long region);
+void      mw_xdamage_drawable_gone(Display *d, Drawable drawable);
 
 /* XDND (xdnd.c): bridge the XDND drag-and-drop protocol to the Wayland data
  * device, the same way the Motif bridge does for Motif DnD.  As the X side, the
@@ -1234,6 +1265,7 @@ Atom      mw_xdnd_selection(Display *d);
 struct wl_data_source *mw_clipboard_make_source(Display *d, Atom selection);
 void mw_clipboard_free_source(Display *d, struct wl_data_source *src);
 void mw_io_update_wake(Display *d);
+void mw_clipboard_incr_notify(Display *d, Atom property);
 uint64_t mw_broker_deadline(Display *d);
 
 /* Start fetching `mime` from a Wayland offer and serving it to an X requestor
@@ -1264,6 +1296,7 @@ void      mw_shape_init(Display *d);
  * major opcode XQueryExtension("RENDER") returns. */
 int  mw_render_opcode(void);
 void mw_render_finish(Display *d);
+void mw_render_fini(Display *d);
 int  mw_render_reply(Display *d, void *rep);
 int  mw_render_read(Display *d, char *data, size_t size);
 void mw_render_drain(Display *d);

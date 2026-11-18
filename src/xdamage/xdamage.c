@@ -11,6 +11,9 @@ extern unsigned long mw_xdamage_new(Display *, Drawable, int);
 extern void          mw_xdamage_free(Display *, unsigned long);
 extern int           mw_xdamage_eventbase(void);
 extern int           mw_xdamage_errorbase(void);
+extern void          mw_xdamage_subtract(Display *, unsigned long, unsigned long,
+                                         unsigned long);
+extern void          mw_xdamage_add(Display *, Drawable, unsigned long);
 
 Bool XDamageQueryExtension(Display *dpy, int *event_base_return,
                            int *error_base_return)
@@ -40,15 +43,17 @@ void XDamageDestroy(Display *dpy, Damage damage)
     mw_xdamage_free(dpy, (unsigned long)damage);
 }
 
-/* The damage has already been delivered as events; there is no server-side
- * accumulation to subtract. */
+/* Repair damage: all of it (repair None) or the part in `repair`, with what
+ * was repaired stored in `parts`. */
 void XDamageSubtract(Display *dpy, Damage damage, XserverRegion repair,
                      XserverRegion parts)
 {
-    (void)dpy; (void)damage; (void)repair; (void)parts;
+    mw_xdamage_subtract(dpy, (unsigned long)damage, (unsigned long)repair,
+                        (unsigned long)parts);
 }
 
+/* Report a region of a drawable as damaged (to every damage object on it). */
 void XDamageAdd(Display *dpy, Drawable drawable, XserverRegion region)
 {
-    (void)dpy; (void)drawable; (void)region;
+    mw_xdamage_add(dpy, drawable, (unsigned long)region);
 }

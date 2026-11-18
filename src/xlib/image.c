@@ -334,6 +334,7 @@ int XFreePixmap(Display *d, Pixmap p)
     MwPixmap *pm = mw_pixmap(d, p);
     if (pm) {
         if (pm->surface) mw_surface_destroy(pm->surface);
+        if (MWD(d)->damages) mw_xdamage_drawable_gone(d, p);
         mw_unregister(d, p);
         free(pm);
     }

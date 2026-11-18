@@ -27,7 +27,6 @@ void mw_xfixes_init(Display *d)
     XDisplayImpl *dp = MWD(d);
     dp->xfixes_sels = NULL;
     dp->xfixes_regions = NULL;
-    dp->xfixes_next_region = 1;
 }
 
 void mw_xfixes_fini(Display *d)
@@ -37,7 +36,12 @@ void mw_xfixes_fini(Display *d)
     while (s) { MwXfixesSel *n = s->next; free(s); s = n; }
     dp->xfixes_sels = NULL;
     MwXfixesRegion *r = dp->xfixes_regions;
-    while (r) { MwXfixesRegion *n = r->next; free(r); r = n; }
+    while (r) {
+        MwXfixesRegion *n = r->next;
+        if (r->r) XDestroyRegion(r->r);
+        free(r);
+        r = n;
+    }
     dp->xfixes_regions = NULL;
 }
 
@@ -45,8 +49,15 @@ void mw_xfixes_select_input(Display *d, Window w, Atom selection,
                             unsigned long mask)
 {
     XDisplayImpl *dp = MWD(d);
-    for (MwXfixesSel *s = dp->xfixes_sels; s; s = s->next)
-        if (s->window == w && s->selection == selection) { s->mask = mask; return; }
+    for (MwXfixesSel **pp = &dp->xfixes_sels; *pp; pp = &(*pp)->next) {
+        MwXfixesSel *s = *pp;
+        if (s->window != w || s->selection != selection) continue;
+        if (mask) { s->mask = mask; return; }
+        *pp = s->next;                     /* an empty mask deselects */
+        free(s);
+        return;
+    }
+    if (!mask) return;
     MwXfixesSel *s = calloc(1, sizeof *s);
     if (!s) return;
     s->window = w;
@@ -59,19 +70,28 @@ void mw_xfixes_select_input(Display *d, Window w, Atom selection,
 void mw_xfixes_selection_notify(Display *d, Atom selection, Window owner,
                                 Time time)
 {
+    mw_xfixes_selection_event(d, selection, owner, time,
+                              XFixesSetSelectionOwnerNotify);
+}
+
+/* `subtype` is XFixesSetSelectionOwnerNotify, ...WindowDestroyNotify or
+ * ...ClientCloseNotify; each goes to the windows that selected its mask. */
+void mw_xfixes_selection_event(Display *d, Atom selection, Window owner,
+                               Time time, int subtype)
+{
     XDisplayImpl *dp = MWD(d);
     if (!dp->xfixes_sels) return;
     if (time == CurrentTime) time = mw_now();
 
     for (MwXfixesSel *s = dp->xfixes_sels; s; s = s->next) {
         if (s->selection != selection) continue;
-        if (!(s->mask & XFixesSetSelectionOwnerNotifyMask)) continue;
+        if (!(s->mask & (1ul << subtype))) continue;
 
         XFixesSelectionNotifyEvent ev;
         memset(&ev, 0, sizeof ev);
         ev.type = MW_XFIXES_EVENT_BASE + XFixesSelectionNotify;
         ev.window = s->window;
-        ev.subtype = XFixesSetSelectionOwnerNotify;
+        ev.subtype = subtype;
         ev.owner = owner;
         ev.selection = selection;
         ev.timestamp = time;
@@ -84,15 +104,43 @@ void mw_xfixes_selection_notify(Display *d, Atom selection, Window owner,
     }
 }
 
-unsigned long mw_xfixes_new_region(Display *d)
+/* A destroyed window's selections go with it (as the server forgets a
+ * window's event selections). */
+void mw_xfixes_window_gone(Display *d, Window w)
+{
+    XDisplayImpl *dp = MWD(d);
+    for (MwXfixesSel **pp = &dp->xfixes_sels; *pp; ) {
+        if ((*pp)->window == w) {
+            MwXfixesSel *dead = *pp;
+            *pp = dead->next;
+            free(dead);
+        } else {
+            pp = &(*pp)->next;
+        }
+    }
+}
+
+/* Regions are client-side Xlib regions behind an XID. */
+unsigned long mw_xfixes_new_region(Display *d, XRectangle *rects, int n)
 {
     XDisplayImpl *dp = MWD(d);
     MwXfixesRegion *r = calloc(1, sizeof *r);
     if (!r) return 0;
-    r->id = dp->xfixes_next_region++;
+    r->r = XCreateRegion();
+    if (!r->r) { free(r); return 0; }
+    for (int i = 0; rects && i < n; i++)
+        XUnionRectWithRegion(&rects[i], r->r, r->r);
+    r->id = mw_alloc_id(d);
     r->next = dp->xfixes_regions;
     dp->xfixes_regions = r;
     return r->id;
+}
+
+Region mw_xfixes_region(Display *d, unsigned long region)
+{
+    for (MwXfixesRegion *r = MWD(d)->xfixes_regions; r; r = r->next)
+        if (r->id == region) return r->r;
+    return NULL;
 }
 
 void mw_xfixes_free_region(Display *d, unsigned long region)
@@ -102,6 +150,7 @@ void mw_xfixes_free_region(Display *d, unsigned long region)
         if ((*pp)->id == region) {
             MwXfixesRegion *dead = *pp;
             *pp = dead->next;
+            if (dead->r) XDestroyRegion(dead->r);
             free(dead);
             return;
         }

@@ -70,7 +70,8 @@ void mw_selection_owner_destroyed(Display *d, Window w)
         mw_broker_owner_changed(d, s->selection, None);
         mw_dnd_selection_changed(d, s->selection, None);
         mw_xdnd_selection_changed(d, s->selection, None);
-        mw_xfixes_selection_notify(d, s->selection, None, mw_now());
+        mw_xfixes_selection_event(d, s->selection, None, mw_now(),
+                                  1 /* XFixesSelectionWindowDestroyNotify */);
     }
 }
 

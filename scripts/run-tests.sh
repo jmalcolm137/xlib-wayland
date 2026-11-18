@@ -107,6 +107,19 @@ else
     exit 1
 fi
 
+say "clipboard bridge: a large X selection (INCR) -> Wayland client"
+# Over the maximum request size an X owner sends the selection in chunks
+# (ICCCM INCR).  The bridge used to forward the INCR announcement as an
+# empty paste.
+if run_clip_case xtowlincr 10 "$BUILD/clip_x own-incr 300000" \
+        "$BUILD/clip_wl receive-check" "GOT-BYTES:300000 OK"; then
+    echo "  ok   a Wayland client received all 300000 bytes of an INCR transfer"
+else
+    echo "  FAIL: INCR selection did not arrive whole"
+    cat "$WORK/xtowlincr.client"
+    exit 1
+fi
+
 say "clipboard bridge: Wayland clipboard -> X client"
 if run_clip_case wltox 8 "$BUILD/clip_wl offer hello-from-wayland" \
         "$BUILD/clip_x convert" "GOT:hello-from-wayland"; then

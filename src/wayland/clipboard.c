@@ -1022,7 +1022,11 @@ void mw_io_update_wake(Display *d)
         t = dp->clip_serve.deadline_ms;
     uint64_t bt = mw_broker_deadline(d);
     if (bt && (!t || bt < t)) t = bt;
-    int out = (dp->clip_serve.active && dp->clip_serve.pend) ? dp->clip_serve.fd : -1;
+    /* Watch for writability only while there is something left to write
+     * (an INCR transfer between chunks has nothing). */
+    int out = (dp->clip_serve.active && dp->clip_serve.pend &&
+               dp->clip_serve.pend_off < dp->clip_serve.pend_len)
+              ? dp->clip_serve.fd : -1;
     mw_wakeup_watch(dp, mw_clipboard_poll_fd(d), out, t);
 }
 
@@ -1034,7 +1038,23 @@ static void serve_end(XDisplayImpl *dp)
     free(sv->pend);
     sv->pend = NULL;
     sv->pend_len = sv->pend_off = 0;
+    sv->incr = false;
+    sv->incr_prop = None;
     sv->active = false;
+}
+
+/* Queue converted bytes behind whatever is still waiting to be written. */
+static void serve_append(MwClipServe *sv, const unsigned char *b, size_t n)
+{
+    if (!n) return;
+    if (sv->pend && sv->pend_off == sv->pend_len) {   /* all written: restart */
+        sv->pend_len = sv->pend_off = 0;
+    }
+    unsigned char *nb = realloc(sv->pend, sv->pend_len + n);
+    if (!nb) return;
+    memcpy(nb + sv->pend_len, b, n);
+    sv->pend = nb;
+    sv->pend_len += n;
 }
 
 /* Write what the peer's pipe will take now; the rest waits for the next
@@ -1052,7 +1072,7 @@ static void serve_flush(Display *d)
         sv->pend_off += (size_t)n;
         sv->deadline_ms = now_ms() + CLIP_SERVE_TIMEOUT_MS;   /* progressing */
     }
-    serve_end(dp);
+    if (!sv->incr) serve_end(dp);      /* INCR: more chunks may follow */
 }
 
 void mw_clipboard_handle_ready(Display *d)
@@ -1268,7 +1288,15 @@ bool mw_clipboard_serve_notify(Display *d, XSelectionEvent *se)
         unsigned char *bytes = NULL;
         size_t blen = 0;
         if (type == incr) {
+            /* The owner will send the data in chunks: watch for them (the
+             * property we just deleted asks for the first). */
             blen = 0;
+            sv->incr = true;
+            sv->incr_prop = se->property;
+            sv->incr_format = 8;
+            MwWindow *cw = mw_window(d, dp->clip_window);
+            if (cw) cw->event_mask |= PropertyChangeMask;
+            sv->deadline_ms = now_ms() + CLIP_SERVE_TIMEOUT_MS;
         } else if (format == 32) {
             bytes = malloc(n * 4 + 1);
             if (bytes) {
@@ -1305,10 +1333,59 @@ bool mw_clipboard_serve_notify(Display *d, XSelectionEvent *se)
     if (sv->pend) {
         serve_flush(d);            /* as much as fits now, the rest later */
         mw_io_update_wake(d);
+    } else if (sv->incr) {
+        mw_io_update_wake(d);      /* chunks arrive as PropertyNotify */
     } else {
         serve_end(dp);
     }
     return true;
+}
+
+/* An INCR chunk: append it and delete the property, which asks the owner
+ * for the next; a zero-length chunk ends the transfer. */
+void mw_clipboard_incr_notify(Display *d, Atom property)
+{
+    XDisplayImpl *dp = MWD(d);
+    MwClipServe *sv = &dp->clip_serve;
+    if (!sv->active || !sv->incr || property != sv->incr_prop) return;
+    Atom type = None;
+    int format = 0;
+    unsigned long n = 0, ba = 0;
+    unsigned char *data = NULL;
+    XGetWindowProperty(d, dp->clip_window, property, 0, 0x7fffffff, True,
+                       AnyPropertyType, &type, &format, &n, &ba, &data);
+    sv->deadline_ms = now_ms() + CLIP_SERVE_TIMEOUT_MS;
+    if (n == 0) {                          /* the end */
+        if (data) XFree(data);
+        sv->incr = false;
+        if (sv->pend && sv->pend_off < sv->pend_len) serve_flush(d);
+        else serve_end(dp);
+        mw_io_update_wake(d);
+        return;
+    }
+    size_t blen = format == 32 ? n * 4 : format == 16 ? n * 2 : n;
+    unsigned char *bytes = NULL;
+    if (format == 32) {
+        bytes = malloc(blen);
+        if (bytes)
+            for (unsigned long i = 0; i < n; i++) {
+                uint32_t v = (uint32_t)((const long *)data)[i];
+                memcpy(bytes + i * 4, &v, 4);
+            }
+    }
+    const unsigned char *src = bytes ? bytes : data;
+    if (sv->to_utf8 && format == 8) {
+        size_t olen = 0;
+        char *enc = mw_clipboard_to_utf8(src, blen, &olen);   /* per byte: chunk-safe */
+        if (enc) serve_append(sv, (unsigned char *)enc, olen);
+        free(enc);
+    } else {
+        serve_append(sv, src, blen);
+    }
+    free(bytes);
+    if (data) XFree(data);
+    serve_flush(d);
+    mw_io_update_wake(d);
 }
 
 /* ----------------------------------------------- X ownership -> Wayland */

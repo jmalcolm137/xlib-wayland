@@ -643,6 +643,17 @@ Bool XkbTranslateKeyCode(XkbDescPtr xkb, KeyCode keycode, unsigned int modifiers
                          unsigned int *modifiers_return, KeySym *keysym_return)
 {
     if (modifiers_return) *modifiers_return = modifiers;
+    /* A description of our own keyboard: answer from the keymap itself, so
+     * every level (Caps Lock, Num Lock, AltGr, groups) is right -- the
+     * client map built here only models Shift. */
+    if (xkb && xkb->dpy && MWD(xkb->dpy)->xkb_keymap) {
+        unsigned int consumed = 0;
+        KeySym ks = NoSymbol;
+        XkbLookupKeySym(xkb->dpy, keycode, modifiers, &consumed, &ks);
+        if (modifiers_return) *modifiers_return = consumed;
+        if (keysym_return) *keysym_return = ks;
+        return ks != NoSymbol;
+    }
     if (!xkb || !XkbKeycodeInRange(xkb, keycode)) {
         if (keysym_return) *keysym_return = NoSymbol;
         return False;

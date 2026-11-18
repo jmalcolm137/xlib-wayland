@@ -243,6 +243,35 @@ int main(int argc, char **argv)
     }
     wl_display_roundtrip(disp);
 
+    if (strcmp(argv[1], "receive-check") == 0) {
+        /* Read everything, however large, and check it is 'a'..'z' over and
+         * over: prints GOT-BYTES:<n> OK|BAD. */
+        for (int i = 0; i < 200 && !selected; i++)
+            dispatch_timeout(disp, 50);
+        if (!cur_offer || !offer_mime) { printf("GOT-BYTES:<none>\n"); return 1; }
+        int fds[2];
+        if (pipe(fds) != 0) return 1;
+        wl_data_offer_receive(cur_offer, offer_mime, fds[1]);
+        close(fds[1]);
+        wl_display_flush(disp);
+        long len = 0;
+        int ok = 1;
+        char buf[65536];
+        for (int i = 0; i < 400; i++) {
+            struct pollfd pfd = { fds[0], POLLIN, 0 };
+            if (poll(&pfd, 1, 50) > 0) {
+                ssize_t n = read(fds[0], buf, sizeof buf);
+                if (n <= 0) break;
+                for (ssize_t k = 0; k < n; k++)
+                    if (buf[k] != (char)('a' + (len + k) % 26)) ok = 0;
+                len += n;
+            }
+        }
+        close(fds[0]);
+        printf("GOT-BYTES:%ld %s\n", len, ok ? "OK" : "BAD");
+        return 0;
+    }
+
     if (strcmp(argv[1], "receive") == 0 || strcmp(argv[1], "receive-mime") == 0) {
         if (strcmp(argv[1], "receive-mime") == 0 && argc >= 3) want_mime = argv[2];
         /* Wait for the compositor to hand us the clipboard offer. */

@@ -114,6 +114,60 @@ static int do_convert_target(Display *d, Window w, Atom clip, Atom target)
     return 0;
 }
 
+/* ICCCM INCR: announce the size with type INCR, then write a chunk each
+ * time the requestor deletes the property, and end with a zero-length one. */
+static int serve_incr(Display *d, Window w, long total)
+{
+    Atom incr = XInternAtom(d, "INCR", False);
+    Atom targets = XInternAtom(d, "TARGETS", False);
+    char *data = malloc((size_t)total);
+    for (long i = 0; i < total; i++) data[i] = (char)('a' + i % 26);
+    Window req = None;
+    Atom prop = None;
+    long sent = -1;                       /* -1: not started */
+    for (int i = 0; i < 600; i++) {
+        XEvent ev;
+        while (XPending(d)) {
+            XNextEvent(d, &ev);
+            if (ev.type == SelectionRequest && ev.xselectionrequest.owner == w) {
+                XSelectionRequestEvent *r = &ev.xselectionrequest;
+                Atom p = r->property == None ? r->target : r->property;
+                if (r->target == targets) {
+                    Atom list[2] = { targets, XA_STRING };
+                    XChangeProperty(d, r->requestor, p, XA_ATOM, 32,
+                                    PropModeReplace, (unsigned char *)list, 2);
+                } else {
+                    req = r->requestor;
+                    prop = p;
+                    XSelectInput(d, req, PropertyChangeMask);
+                    long size = total;
+                    XChangeProperty(d, req, prop, incr, 32, PropModeReplace,
+                                    (unsigned char *)&size, 1);
+                    sent = 0;
+                }
+                XSelectionEvent se;
+                memset(&se, 0, sizeof se);
+                se.type = SelectionNotify;
+                se.requestor = r->requestor; se.selection = r->selection;
+                se.target = r->target; se.property = p; se.time = r->time;
+                XSendEvent(d, r->requestor, False, 0, (XEvent *)&se);
+            } else if (ev.type == PropertyNotify && sent >= 0 &&
+                       ev.xproperty.window == req && ev.xproperty.atom == prop &&
+                       ev.xproperty.state == PropertyDelete) {
+                long n = total - sent > 65536 ? 65536 : total - sent;
+                XChangeProperty(d, req, prop, XA_STRING, 8, PropModeReplace,
+                                (unsigned char *)data + sent, (int)n);
+                if (n == 0) { printf("INCR-DONE\n"); sent = -1; req = None; }
+                else sent += n;
+            }
+        }
+        XFlush(d);
+        usleep(10 * 1000);
+    }
+    free(data);
+    return 0;
+}
+
 static int do_convert(Display *d, Window w, Atom clip)
 {
     return do_convert_target(d, w, clip, XA_STRING);
@@ -175,6 +229,16 @@ int main(int argc, char **argv)
         printf("OWNING\n");
         pump_serving(d, win, argv[3], 6000);
         return 0;
+    }
+
+    if (strcmp(argv[1], "own-incr") == 0) {
+        /* Serve <bytes> of 'a'..'z' over ICCCM INCR, as clients do for a
+         * selection larger than the maximum request. */
+        long total = argc > 2 ? atol(argv[2]) : 300000;
+        XSetSelectionOwner(d, clip, win, CurrentTime);
+        XFlush(d);
+        printf("OWNING\n");
+        return serve_incr(d, win, total);
     }
 
     if (strcmp(argv[1], "convert") == 0)

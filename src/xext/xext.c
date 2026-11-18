@@ -33,6 +33,7 @@ extern void mw_queue_event(Display *d, XEvent *ev);   /* libX11 (shim) */
 
 /* Shim helper (src/xlib/xsync.c): allocate a counter id. */
 extern unsigned long mw_xsync_new_counter(Display *);
+extern int (*XESetCloseDisplay(Display *, int, int (*)(Display *, XExtCodes *)))(Display *, XExtCodes *);
 
 /* --------------------------------------------------------------- extutil */
 
@@ -53,12 +54,16 @@ XExtDisplayInfo *XextAddDisplay(XExtensionInfo *extinfo, Display *dpy,
                                 _Xconst char *ext_name, XExtensionHooks *hooks,
                                 int nevents, XPointer data)
 {
-    (void)hooks; (void)nevents;
+    (void)nevents;
     if (!extinfo) return NULL;
     XExtCodes *codes = XInitExtension(dpy, ext_name);
     if (!codes) return NULL;
+    /* The extension frees its per-display data from close_display (which
+     * normally calls XextRemoveDisplay); XCloseDisplay has to run it. */
+    if (hooks && hooks->close_display)
+        XESetCloseDisplay(dpy, codes->extension, hooks->close_display);
     XExtDisplayInfo *info = calloc(1, sizeof *info);
-    if (!info) { free(codes); return NULL; }
+    if (!info) return NULL;              /* codes belong to Xlib */
     info->display = dpy;
     info->codes = codes;
     info->data = data;
@@ -252,27 +257,31 @@ Bool XSyncValueIsPositive(XSyncValue v) { return v.hi >= 0; }
 unsigned int XSyncValueLow32(XSyncValue v) { return v.lo; }
 int XSyncValueHigh32(XSyncValue v) { return v.hi; }
 
+/* 64-bit two's-complement arithmetic; overflow is signed overflow, as in
+ * libXext's macros. */
+static long long sync_ll(XSyncValue v)
+{ return (long long)(((unsigned long long)(unsigned)v.hi << 32) | (unsigned)v.lo); }
+
+static void sync_set(XSyncValue *r, unsigned long long v)
+{
+    r->lo = (unsigned int)v;
+    r->hi = (int)(unsigned int)(v >> 32);
+}
+
 void XSyncValueAdd(XSyncValue *r, XSyncValue a, XSyncValue b, int *overflow)
 {
-    unsigned long long sum = ((unsigned long long)(unsigned)a.lo |
-                              ((unsigned long long)(unsigned)a.hi << 32)) +
-                             ((unsigned long long)(unsigned)b.lo |
-                              ((unsigned long long)(unsigned)b.hi << 32));
-    r->lo = (unsigned int)sum;
-    r->hi = (int)(sum >> 32);
-    if (overflow) *overflow = 0;
+    long long res;
+    int o = __builtin_add_overflow(sync_ll(a), sync_ll(b), &res);
+    sync_set(r, (unsigned long long)res);
+    if (overflow) *overflow = o;
 }
 
 void XSyncValueSubtract(XSyncValue *r, XSyncValue a, XSyncValue b, int *overflow)
 {
-    unsigned long long av = (unsigned long long)(unsigned)a.lo |
-                            ((unsigned long long)(unsigned)a.hi << 32);
-    unsigned long long bv = (unsigned long long)(unsigned)b.lo |
-                            ((unsigned long long)(unsigned)b.hi << 32);
-    unsigned long long d = av - bv;
-    r->lo = (unsigned int)d;
-    r->hi = (int)(d >> 32);
-    if (overflow) *overflow = 0;
+    long long res;
+    int o = __builtin_sub_overflow(sync_ll(a), sync_ll(b), &res);
+    sync_set(r, (unsigned long long)res);
+    if (overflow) *overflow = o;
 }
 
 void XSyncMaxValue(XSyncValue *pv) { pv->hi = 0x7fffffff; pv->lo = 0xffffffffu; }

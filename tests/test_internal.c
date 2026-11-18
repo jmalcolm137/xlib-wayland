@@ -581,8 +581,51 @@ static void check_xim(Display *d, Window w)
     XGetICValues(ic, XNClientWindow, &again, NULL);
     CHECK(again == w);
 
-    /* Closing the IM destroys its ICs and detaches text input. */
+    /* Text input: events take effect at done, delete before commit, and
+     * delete_surrounding's byte counts become characters (BackSpaces). */
+    XWindowAttributes wa;
+    XGetWindowAttributes(d, w, &wa);
+    XSelectInput(d, w, wa.your_event_mask | KeyPressMask);
     XSetICFocus(ic);
+    XSetInputFocus(d, w, RevertToParent, CurrentTime);
+    drain(d);
+    const struct zwp_text_input_v3_listener *l = mw_xim_text_input_listener();
+    KeyCode bs = XKeysymToKeycode(d, XK_BackSpace);
+    XEvent ev;
+    char buf[64];
+    KeySym ks;
+    Status st;
+    l->commit_string(d, NULL, "h\xc3\xa9");                  /* "hé" */
+    CHECK(QLength(d) == 0);                                   /* not before done */
+    l->done(d, NULL, 1);
+    CHECK(XCheckTypedWindowEvent(d, w, KeyPress, &ev) && ev.xkey.keycode == 0);
+    int n = Xutf8LookupString(ic, &ev.xkey, buf, sizeof buf, &ks, &st);
+    CHECK(n == 3 && memcmp(buf, "h\xc3\xa9", 3) == 0);
+    drain(d);
+    /* Replace the é (2 bytes, one character) with e. */
+    l->commit_string(d, NULL, "e");
+    l->delete_surrounding_text(d, NULL, 2, 0);
+    l->done(d, NULL, 2);
+    int backs = 0, commits = 0, order_ok = 1;
+    while (XCheckMaskEvent(d, KeyPressMask, &ev)) {
+        if (ev.xkey.keycode == bs) { backs++; if (commits) order_ok = 0; }
+        else if (ev.xkey.keycode == 0) {
+            commits++;
+            n = Xutf8LookupString(ic, &ev.xkey, buf, sizeof buf, &ks, &st);
+            CHECK(n == 1 && buf[0] == 'e');
+        }
+    }
+    CHECK(backs == 1 && commits == 1 && order_ok);
+    /* Beyond what was committed here, a byte counts as a character. */
+    l->delete_surrounding_text(d, NULL, 4, 0);       /* "he" + 2 unknown */
+    l->done(d, NULL, 3);
+    backs = 0;
+    while (XCheckMaskEvent(d, KeyPressMask, &ev)) if (ev.xkey.keycode == bs) backs++;
+    CHECK(backs == 4);
+    drain(d);
+    XSelectInput(d, w, wa.your_event_mask);
+
+    /* Closing the IM destroys its ICs and detaches text input. */
     XCloseIM(im);
     CHECK(MWD(d)->text_input_ic == NULL);
 }
@@ -867,9 +910,194 @@ static void check_extension_numbers(void)
     CHECK(MW_XDAMAGE_ERROR_BASE != MW_XSYNC_ERROR_BASE);
 }
 
+static bool dp_compose(Display *d) { return MWD(d)->xkb_compose_state != NULL; }
+
+static void load_layout(Display *d, const char *layout)
+{
+    int fd = keymap_fd(layout);
+    if (fd < 0) return;
+    off_t size = lseek(fd, 0, SEEK_END);
+    mw_keymap_init_fd(d, fd, (uint32_t)size, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1);
+    close(fd);
+}
+
+static int lookup(Display *d, Window w, KeyCode kc, unsigned int state, int type,
+                  char *buf, int n, KeySym *ks)
+{
+    XKeyEvent ke;
+    memset(&ke, 0, sizeof ke);
+    ke.type = type; ke.display = d; ke.window = w; ke.keycode = kc;
+    ke.state = state;
+    ke.serial = ++MWD(d)->serial;
+    int r = XLookupString(&ke, buf, n, ks, NULL);
+    if (r >= 0 && r < n) buf[r] = 0;
+    return r;
+}
+
+/* The keysym comes from the key's type and the full modifier state, as on
+ * X: Caps Lock, Num Lock and AltGr choose levels too (only Shift did). */
+static void check_key_levels(Display *d, Window w)
+{
+    char buf[16];
+    KeySym ks;
+    load_layout(d, "us");
+    KeyCode a = XKeysymToKeycode(d, XK_a);
+    CHECK(lookup(d, w, a, LockMask, KeyPress, buf, sizeof buf, &ks) == 1 &&
+          ks == XK_A && buf[0] == 'A');
+    CHECK(lookup(d, w, a, LockMask | ShiftMask, KeyPress, buf, sizeof buf, &ks) == 1 &&
+          ks == XK_a);
+    KeyCode kp1 = XKeysymToKeycode(d, XK_KP_End);
+    CHECK(kp1 != 0);
+    CHECK(lookup(d, w, kp1, 0, KeyPress, buf, sizeof buf, &ks) == 0 && ks == XK_KP_End);
+    CHECK(lookup(d, w, kp1, Mod2Mask, KeyPress, buf, sizeof buf, &ks) == 1 &&
+          ks == XK_KP_1 && buf[0] == '1');
+
+    load_layout(d, "de");
+    KeyCode q = XKeysymToKeycode(d, XK_q);
+    CHECK(q != 0);
+    CHECK(lookup(d, w, q, Mod5Mask, KeyPress, buf, sizeof buf, &ks) == 1 &&
+          ks == XK_at && buf[0] == '@');
+    /* The core keysym table has the AltGr level where Xorg puts it:
+     * G1L1 G1L2 G2L1 G2L2 G1L3 ... */
+    int per = 0;
+    KeySym *map = XGetKeyboardMapping(d, q, 1, &per);
+    CHECK(map && per >= 6 && map[0] == XK_q && map[1] == XK_Q && map[4] == XK_at);
+    XFree(map);
+    CHECK(XKeycodeToKeysym(d, q, 4) == XK_at && XKeycodeToKeysym(d, q, 1) == XK_Q);
+
+    /* The XkbLookupKeySym and XkbTranslateKeyCode (GTK) paths agree. */
+    KeySym xs = 0;
+    unsigned int consumed = 0;
+    XkbLookupKeySym(d, q, Mod5Mask, &consumed, &xs);
+    CHECK(xs == XK_at && (consumed & Mod5Mask));
+    XkbDescPtr desc = XkbGetMap(d, XkbAllClientInfoMask, XkbUseCoreKbd);
+    xs = 0;
+    CHECK(desc && XkbTranslateKeyCode(desc, q, Mod5Mask, &consumed, &xs) &&
+          xs == XK_at);
+    if (desc) XkbFreeKeyboard(desc, 0, True);
+
+    /* Compose is fed key presses only, once each: Xt looks a key release up
+     * too, and a dead key's release used to complete the sequence. */
+    if (dp_compose(d)) {
+        load_layout(d, "fr");
+        KeyCode dead = XKeysymToKeycode(d, XK_dead_circumflex);
+        KeyCode e = XKeysymToKeycode(d, XK_e);
+        if (dead && e) {
+            CHECK(lookup(d, w, dead, 0, KeyPress, buf, sizeof buf, &ks) == 0);
+            CHECK(lookup(d, w, dead, 0, KeyRelease, buf, sizeof buf, &ks) == 0);
+            int n = lookup(d, w, e, 0, KeyPress, buf, sizeof buf, &ks);
+            CHECK(n == 2 && (unsigned char)buf[0] == 0xc3 &&
+                  (unsigned char)buf[1] == 0xaa);          /* ê in UTF-8 */
+        }
+    } else {
+        printf("note: no compose table; skipping the compose check\n");
+    }
+    load_layout(d, "us");
+}
+
+static void check_case_and_modifiers(void)
+{
+    KeySym lo, up;
+    XConvertCase(XK_agrave, &lo, &up);
+    CHECK(lo == XK_agrave && up == XK_Agrave);
+    XConvertCase(XK_Cyrillic_IE, &lo, &up);
+    CHECK(lo == XK_Cyrillic_ie && up == XK_Cyrillic_IE);
+    XConvertCase(0x1000101, &lo, &up);            /* U+0101 a-macron */
+    CHECK(up == 0x1000100);
+    /* XSetLocaleModifiers: NULL queries, "" takes $XMODIFIERS. */
+    setenv("XMODIFIERS", "@im=test", 1);
+    char *m = XSetLocaleModifiers("");
+    CHECK(m && strstr(m, "im=test"));
+    m = XSetLocaleModifiers(NULL);
+    CHECK(m && strstr(m, "im=test"));
+    m = XSetLocaleModifiers("@im=other");
+    CHECK(m && strstr(m, "im=other"));
+    m = XSetLocaleModifiers(NULL);
+    CHECK(m && strstr(m, "im=other"));
+    unsetenv("XMODIFIERS");
+}
+
+static int last_error;
+static int on_error(Display *d, XErrorEvent *e) { (void)d; last_error = e->error_code; return 0; }
+
+static void check_core_odds(Display *d, Window root)
+{
+    XDisplayImpl *dp = MWD(d);
+    Window top = XCreateSimpleWindow(d, root, 0, 0, 100, 100, 0, 0, 0);
+    Window kid = XCreateSimpleWindow(d, top, 10, 10, 20, 20, 0, 0, 0);
+    drain(d);
+
+    /* XSendEvent to InputFocus / PointerWindow reaches those windows, and
+     * the caller's event is not modified. */
+    XSetInputFocus(d, kid, RevertToParent, CurrentTime);
+    drain(d);
+    XEvent ev;
+    memset(&ev, 0, sizeof ev);
+    ev.xclient.type = ClientMessage;
+    ev.xclient.format = 32;
+    ev.xclient.window = 0;
+    CHECK(XSendEvent(d, InputFocus, False, NoEventMask, &ev));
+    CHECK(ev.xclient.send_event == False);
+    XEvent got;
+    CHECK(XCheckTypedEvent(d, ClientMessage, &got) && got.xclient.send_event);
+    mw_pointer_move_to(d, mw_window(d, top));
+    drain(d);
+    CHECK(XSendEvent(d, PointerWindow, False, NoEventMask, &ev));
+    CHECK(XCheckTypedEvent(d, ClientMessage, &got));
+    /* Callers pass the specific event structure, smaller than an XEvent;
+     * only that much is read (ASan caught a whole-XEvent copy). */
+    XClientMessageEvent *small = malloc(sizeof *small);
+    memset(small, 0, sizeof *small);
+    small->type = ClientMessage; small->format = 32; small->window = top;
+    small->data.l[0] = 42;
+    CHECK(XSendEvent(d, top, False, NoEventMask, (XEvent *)small));
+    CHECK(XCheckTypedEvent(d, ClientMessage, &got) && got.xclient.data.l[0] == 42);
+    free(small);
+    mw_pointer_move_to(d, NULL);
+
+    /* XSync(True) discards the queue; XNextRequest only looks. */
+    put_client_message(d, top, 1);
+    XSync(d, True);
+    CHECK(QLength(d) == 0 && dp->qcount == 0);
+    unsigned long r1 = XNextRequest(d), r2 = XNextRequest(d);
+    CHECK(r1 == r2);
+
+    /* Reparenting a window into its own descendant is BadMatch (it used to
+     * make a cycle, and the tree walks looped forever). */
+    XErrorHandler old = XSetErrorHandler(on_error);
+    last_error = 0;
+    XReparentWindow(d, top, kid, 0, 0);
+    XSync(d, False);
+    CHECK(last_error == BadMatch);
+    CHECK(mw_window(d, kid)->parent == mw_window(d, top));
+
+    /* XClearArea is clipped to the window: an area outside it exposes
+     * nothing (a negative width used to be sent as an Expose). */
+    XSelectInput(d, top, ExposureMask);
+    XMapWindow(d, top);
+    drain(d);
+    XClearArea(d, top, 150, 0, 0, 0, True);
+    CHECK(!XCheckTypedWindowEvent(d, top, Expose, &got));
+    XClearArea(d, top, 90, 90, 20, 20, True);
+    CHECK(XCheckTypedWindowEvent(d, top, Expose, &got) &&
+          got.xexpose.width == 10 && got.xexpose.height == 10);
+
+    /* Unmapping the grab window releases the grab, as X does when a grab
+     * window becomes unviewable. */
+    XGrabPointer(d, kid, False, ButtonPressMask, GrabModeAsync, GrabModeAsync,
+                 None, None, CurrentTime);
+    CHECK(dp->ptr_grab_active);
+    XUnmapWindow(d, top);
+    CHECK(!dp->ptr_grab_active && dp->ptr_grab_window == NULL);
+    XSetErrorHandler(old);
+    XDestroyWindow(d, top);
+    drain(d);
+}
+
 int main(void)
 {
     check_write_all();
+    check_case_and_modifiers();
     check_extension_numbers();
     check_sigpipe_blocked();
     check_buttons();
@@ -900,7 +1128,9 @@ int main(void)
     check_wakeup(d);
     check_async_serve(d);
     check_shared_store(d, w);
+    check_core_odds(d, root);
     check_keymap(d, w);
+    check_key_levels(d, w);
 
     XDestroyWindow(d, w);
     XCloseDisplay(d);

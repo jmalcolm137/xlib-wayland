@@ -313,6 +313,11 @@ if get_option('tests')
     include_directories: inc,
     link_with: libx11)
 
+  # The libXext/libXfixes/libXdamage facades through their public APIs.
+  test_ext = executable('test_ext', 'tests/test_ext.c',
+    include_directories: inc,
+    link_with: [libx11, libxext, libxfixes, libxdamage])
+
   # White-box tests of the event queue, window tree, keymap and wire helpers.
   test_internal = executable('test_internal', 'tests/test_internal.c',
     client_protos,
@@ -511,6 +516,7 @@ if get_option('tests')
     test('internal', with_compositor,
       args: [headless_compositor, test_internal])
     test('render', with_compositor, args: [headless_compositor, test_render])
+    test('ext', with_compositor, args: [headless_compositor, test_ext])
     test('broker', with_compositor, args: [headless_compositor, test_broker],
       timeout: 60)
   else
