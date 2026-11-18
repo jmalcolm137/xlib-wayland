@@ -630,6 +630,57 @@ static void check_latin1_text(Display *d, Window root)
     XFreePixmap(d, b);
 }
 
+/* Text under a raster op combines bits like any other drawing: GXxor text
+ * drawn twice leaves nothing (Xaw/Motif cursors and rubber-band labels),
+ * and its pixels are exactly fg ^ dst -- cairo's operators made them
+ * transparent or blended. */
+static void check_text_raster_op(Display *d, Window root)
+{
+    Pixmap pm = filled_pixmap(d, root, 40, 20, 0x123456);
+    GC gc = XCreateGC(d, pm, 0, NULL);
+    XFontStruct *fs = XLoadQueryFont(d, "fixed");
+    if (fs) XSetFont(d, gc, fs->fid);
+    XSetFunction(d, gc, GXxor);
+    XSetForeground(d, gc, 0xffffff);
+    XDrawString(d, pm, gc, 2, 15, "MW", 2);
+    XImage *im = XGetImage(d, pm, 0, 0, 40, 20, AllPlanes, ZPixmap);
+    int ink = 0, other = 0;
+    for (int y = 0; im && y < 20; y++)
+        for (int x = 0; x < 40; x++) {
+            unsigned long v = pix(im, x, y);
+            if (v == 0xedcba9) ink++;
+            else if (v != 0x123456) other++;
+        }
+    CHECK(ink > 0 && other == 0);
+    if (im) XDestroyImage(im);
+    XDrawString(d, pm, gc, 2, 15, "MW", 2);
+    im = XGetImage(d, pm, 0, 0, 40, 20, AllPlanes, ZPixmap);
+    int left = 0;
+    for (int y = 0; im && y < 20; y++)
+        for (int x = 0; x < 40; x++) left += pix(im, x, y) != 0x123456;
+    CHECK(left == 0);
+    if (im) XDestroyImage(im);
+
+    /* A plane mask limits text to its planes too. */
+    XSetFunction(d, gc, GXcopy);
+    XSetPlaneMask(d, gc, 0x0000ff);
+    XSetForeground(d, gc, 0xffffff);
+    XDrawString(d, pm, gc, 2, 15, "MW", 2);
+    im = XGetImage(d, pm, 0, 0, 40, 20, AllPlanes, ZPixmap);
+    ink = 0; other = 0;
+    for (int y = 0; im && y < 20; y++)
+        for (int x = 0; x < 40; x++) {
+            unsigned long v = pix(im, x, y);
+            if (v == 0x1234ff) ink++;
+            else if (v != 0x123456) other++;
+        }
+    CHECK(ink > 0 && other == 0);
+    if (im) XDestroyImage(im);
+    if (fs) XFreeFont(d, fs);
+    XFreeGC(d, gc);
+    XFreePixmap(d, pm);
+}
+
 /* Core font metrics, as Motif and Xaw lay text out with them. */
 static void check_font_metrics(Display *d)
 {
@@ -713,6 +764,7 @@ static void run_display_checks(Display *d)
     check_clipping(d, root);
     check_stipples(d, root);
     check_latin1_text(d, root);
+    check_text_raster_op(d, root);
     check_image_text(d, root);
     XDestroyWindow(d, win);
 }

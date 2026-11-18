@@ -146,6 +146,8 @@ int mw_font_text_width_utf8(const MwFont *f, const char *s, int len);
 
 void mw_set_font(MwCanvas *c, MwFont *f);
 /* Draw UTF-8 text at baseline (x,y). */
+/* The largest raster-op coverage mask allocated so far, in bytes (tests). */
+extern size_t mw_rop_mask_peak;
 void mw_show_utf8(MwCanvas *c, MwFont *f, const char *s, int len, int x, int y);
 
 /* Draw a run of FreeType glyph indices at explicit baselines.  `glyphs` are

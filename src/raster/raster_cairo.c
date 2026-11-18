@@ -172,6 +172,8 @@ static uint32_t rop_px(int gx, uint32_t s, uint32_t d)
     }
 }
 
+size_t mw_rop_mask_peak;
+
 static bool canvas_uses_rop(const MwCanvas *c)
 {
     return c->gx != GXcopy || (c->plane_mask & 0xffffff) != 0xffffff;
@@ -222,84 +224,114 @@ static void copy_clip(MwCanvas *c, cairo_t *to)
     cairo_clip(to);
 }
 
-/* Rasterise the current path (filled or stroked) as an A8 coverage mask over
- * the physical box [*px0,*px1) x [*py0,*py1).  Consumes the path. */
-static cairo_surface_t *path_coverage(MwCanvas *c, bool stroke,
-                                      int *px0, int *py0, int *px1, int *py1)
+/* Rows of coverage rasterised at a time.  A shape is covered band by band
+ * so the mask stays small however large the shape's box is: a diagonal
+ * rubber band across a HiDPI window used to allocate the whole box (tens of
+ * megabytes) for a one-pixel line. */
+#define ROP_BAND_ROWS 64
+
+/* Called for each band with its A8 coverage: rows [y0,y1), columns [x0,x1)
+ * in physical pixels; the mask's row 0 is y0. */
+typedef void (*rop_band_fn)(MwCanvas *c, void *ctx, const unsigned char *md,
+                            int ms, int x0, int y0, int x1, int y1);
+
+/* Rasterise the current path (filled or stroked) with the canvas's clip and
+ * line attributes, aliased, and hand each band of coverage to `fn`.
+ * Consumes the path. */
+static void path_coverage_bands(MwCanvas *c, bool stroke, rop_band_fn fn, void *ctx)
 {
     double x1, y1, x2, y2;
+    int px0, py0, px1, py1;
     if (stroke) cairo_stroke_extents(c->cr, &x1, &y1, &x2, &y2);
     else        cairo_fill_extents(c->cr, &x1, &y1, &x2, &y2);
-    if (!clip_bounds(c, x1, y1, x2, y2, px0, py0, px1, py1)) {
+    if (!clip_bounds(c, x1, y1, x2, y2, &px0, &py0, &px1, &py1)) {
         cairo_new_path(c->cr);
-        return NULL;
+        return;
     }
-    int sc = c->surface->scale;
-    cairo_surface_t *m = cairo_image_surface_create(CAIRO_FORMAT_A8,
-                                                    *px1 - *px0, *py1 - *py0);
-    cairo_surface_set_device_scale(m, sc, sc);
-    cairo_surface_set_device_offset(m, -*px0, -*py0);
-    cairo_t *mc = cairo_create(m);
-    cairo_set_antialias(mc, CAIRO_ANTIALIAS_NONE);
-    copy_clip(c, mc);
     cairo_path_t *path = cairo_copy_path(c->cr);
-    cairo_append_path(mc, path);
-    cairo_path_destroy(path);
     cairo_new_path(c->cr);
-    cairo_set_operator(mc, CAIRO_OPERATOR_SOURCE);
-    cairo_set_source_rgba(mc, 0, 0, 0, 1);
-    if (stroke) {
-        cairo_set_line_width(mc, cairo_get_line_width(c->cr));
-        cairo_set_line_cap(mc, cairo_get_line_cap(c->cr));
-        cairo_set_line_join(mc, cairo_get_line_join(c->cr));
-        cairo_set_miter_limit(mc, cairo_get_miter_limit(c->cr));
-        int nd = cairo_get_dash_count(c->cr);
-        if (nd > 0) {
-            double *dd = calloc((size_t)nd, sizeof *dd), off = 0;
-            if (dd) {
-                cairo_get_dash(c->cr, dd, &off);
-                cairo_set_dash(mc, dd, nd, off);
-                free(dd);
-            }
-        }
-        cairo_stroke(mc);
-    } else {
-        cairo_set_fill_rule(mc, cairo_get_fill_rule(c->cr));
-        cairo_fill(mc);
+    int sc = c->surface->scale;
+    int nd = stroke ? cairo_get_dash_count(c->cr) : 0;
+    double *dash = nd > 0 ? calloc((size_t)nd, sizeof *dash) : NULL, dash_off = 0;
+    if (dash) cairo_get_dash(c->cr, dash, &dash_off);
+    int bh_max = py1 - py0 < ROP_BAND_ROWS ? py1 - py0 : ROP_BAND_ROWS;
+    cairo_surface_t *m = cairo_image_surface_create(CAIRO_FORMAT_A8, px1 - px0, bh_max);
+    if (cairo_surface_status(m) != CAIRO_STATUS_SUCCESS) goto out;
+    {
+        size_t bytes = (size_t)cairo_image_surface_get_stride(m) * (size_t)bh_max;
+        if (bytes > mw_rop_mask_peak) mw_rop_mask_peak = bytes;
     }
-    cairo_destroy(mc);
-    cairo_surface_flush(m);
-    return m;
+    cairo_surface_set_device_scale(m, sc, sc);
+    for (int by = py0; by < py1; by += bh_max) {
+        int bh = py1 - by < bh_max ? py1 - by : bh_max;
+        cairo_surface_set_device_offset(m, -px0, -by);
+        cairo_t *mc = cairo_create(m);
+        cairo_set_operator(mc, CAIRO_OPERATOR_CLEAR);
+        cairo_paint(mc);
+        cairo_set_antialias(mc, CAIRO_ANTIALIAS_NONE);
+        copy_clip(c, mc);
+        cairo_append_path(mc, path);
+        cairo_set_operator(mc, CAIRO_OPERATOR_SOURCE);
+        cairo_set_source_rgba(mc, 0, 0, 0, 1);
+        if (stroke) {
+            cairo_set_line_width(mc, cairo_get_line_width(c->cr));
+            cairo_set_line_cap(mc, cairo_get_line_cap(c->cr));
+            cairo_set_line_join(mc, cairo_get_line_join(c->cr));
+            cairo_set_miter_limit(mc, cairo_get_miter_limit(c->cr));
+            if (dash) cairo_set_dash(mc, dash, nd, dash_off);
+            cairo_stroke(mc);
+        } else {
+            cairo_set_fill_rule(mc, cairo_get_fill_rule(c->cr));
+            cairo_fill(mc);
+        }
+        cairo_destroy(mc);
+        cairo_surface_flush(m);
+        fn(c, ctx, cairo_image_surface_get_data(m), cairo_image_surface_get_stride(m),
+           px0, by, px1, by + bh);
+    }
+out:
+    cairo_surface_destroy(m);
+    cairo_path_destroy(path);
+    free(dash);
+}
+
+/* The destination pixels, ready to be changed in place (NULL if there are
+ * none to change). */
+static uint32_t *rop_target(MwCanvas *c, int *stride)
+{
+    MwSurface *s = c->surface;
+    if (!s->data && !cairo_image_surface_get_data(s->cs)) return NULL;
+    cairo_surface_flush(s->cs);
+    *stride = cairo_image_surface_get_stride(s->cs) / 4;
+    return (uint32_t *)cairo_image_surface_get_data(s->cs);
+}
+
+typedef struct { uint32_t *px; int stride; uint32_t src; } RopSolid;
+
+static void rop_solid_band(MwCanvas *c, void *ctx, const unsigned char *md,
+                           int ms, int x0, int y0, int x1, int y1)
+{
+    RopSolid *r = ctx;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
+            if (md[(size_t)(y - y0) * ms + (x - x0)] < 0x80) continue;
+            uint32_t *p = &r->px[(size_t)y * r->stride + x];
+            *p = rop_apply_px(c, r->src, *p);
+        }
 }
 
 /* Apply the GC's raster op with a solid source over the covered pixels. */
 static void rop_solid(MwCanvas *c, bool stroke)
 {
-    MwSurface *s = c->surface;
-    if (!s->data && !cairo_image_surface_get_data(s->cs)) {
-        cairo_new_path(c->cr);
-        return;
-    }
-    int x0, y0, x1, y1;
-    cairo_surface_t *m = path_coverage(c, stroke, &x0, &y0, &x1, &y1);
-    if (!m) return;
-    double r, g, b, a;
-    cairo_pattern_get_rgba(cairo_get_source(c->cr), &r, &g, &b, &a);
-    uint32_t src = ((uint32_t)lround(r * 255) << 16) |
-                   ((uint32_t)lround(g * 255) << 8) | (uint32_t)lround(b * 255);
-    cairo_surface_flush(s->cs);
-    uint32_t *px = (uint32_t *)cairo_image_surface_get_data(s->cs);
-    int stride = cairo_image_surface_get_stride(s->cs) / 4;
-    const unsigned char *md = cairo_image_surface_get_data(m);
-    int ms = cairo_image_surface_get_stride(m);
-    for (int y = y0; y < y1; y++)
-        for (int x = x0; x < x1; x++) {
-            if (md[(size_t)(y - y0) * ms + (x - x0)] < 0x80) continue;
-            uint32_t *p = &px[(size_t)y * stride + x];
-            *p = rop_apply_px(c, src, *p);
-        }
-    cairo_surface_mark_dirty(s->cs);
-    cairo_surface_destroy(m);
+    RopSolid r;
+    r.px = rop_target(c, &r.stride);
+    if (!r.px) { cairo_new_path(c->cr); return; }
+    double cr, cg, cb, ca;
+    cairo_pattern_get_rgba(cairo_get_source(c->cr), &cr, &cg, &cb, &ca);
+    r.src = ((uint32_t)lround(cr * 255) << 16) |
+            ((uint32_t)lround(cg * 255) << 8) | (uint32_t)lround(cb * 255);
+    path_coverage_bands(c, stroke, rop_solid_band, &r);
+    cairo_surface_mark_dirty(c->surface->cs);
 }
 
 void mw_set_plane_mask(MwCanvas *c, unsigned long plane_mask)
@@ -472,6 +504,37 @@ void mw_stroke_path(MwCanvas *c)
     cairo_stroke(c->cr);
 }
 
+typedef struct {
+    uint32_t *px; int stride;
+    MwSurface *pat; int x_origin, y_origin, fill_style;
+    uint32_t fg, bg;
+} RopPattern;
+
+static void rop_pattern_band(MwCanvas *c, void *ctx, const unsigned char *md,
+                             int ms, int x0, int y0, int x1, int y1)
+{
+    RopPattern *r = ctx;
+    MwSurface *pat = r->pat;
+    int pw = pat->w, ph = pat->h, psc = pat->scale, sc = c->surface->scale;
+    const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(pat->cs);
+    int ss = cairo_image_surface_get_stride(pat->cs) / 4;
+    for (int y = y0; y < y1; y++) {
+        int py = ((y / sc - r->y_origin) % ph + ph) % ph;
+        for (int x = x0; x < x1; x++) {
+            if (md[(size_t)(y - y0) * ms + (x - x0)] < 0x80) continue;
+            int qx = ((x / sc - r->x_origin) % pw + pw) % pw;
+            uint32_t v = sp[(size_t)(py * psc) * ss + (size_t)(qx * psc)];
+            uint32_t src;
+            if (r->fill_style == FillTiled) src = v;
+            else if (v & 1u)                src = r->fg;
+            else if (r->fill_style == FillOpaqueStippled) src = r->bg;
+            else continue;
+            uint32_t *p = &r->px[(size_t)y * r->stride + x];
+            *p = rop_apply_px(c, src & 0xffffff, *p);
+        }
+    }
+}
+
 /* Fill the current path with a stipple or tile.  A stipple is a depth-1
  * pixmap whose logical value is bit 0 of each pixel (as for clip masks):
  * FillStippled paints the foreground through the set bits and leaves the
@@ -488,36 +551,12 @@ void mw_fill_pattern(MwCanvas *c, MwSurface *pat, int x_origin, int y_origin,
          * stippled GXxor highlights): per covered pixel, the pattern gives
          * the source -- the tile's pixel, or fg/bg by the stipple bit, with
          * a FillStippled hole leaving the pixel alone. */
-        MwSurface *s = c->surface;
-        int x0, y0, x1, y1;
-        cairo_surface_t *m = path_coverage(c, false, &x0, &y0, &x1, &y1);
-        if (!m) return;
+        RopPattern r = { NULL, 0, pat, x_origin, y_origin, fill_style, fg, bg };
+        r.px = rop_target(c, &r.stride);
+        if (!r.px) { cairo_new_path(c->cr); return; }
         cairo_surface_flush(pat->cs);
-        const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(pat->cs);
-        int ss = cairo_image_surface_get_stride(pat->cs) / 4;
-        cairo_surface_flush(s->cs);
-        uint32_t *px = (uint32_t *)cairo_image_surface_get_data(s->cs);
-        int stride = cairo_image_surface_get_stride(s->cs) / 4;
-        const unsigned char *md = cairo_image_surface_get_data(m);
-        int ms = cairo_image_surface_get_stride(m);
-        int sc = s->scale;
-        for (int y = y0; y < y1; y++) {
-            int py = ((y / sc - y_origin) % ph + ph) % ph;
-            for (int x = x0; x < x1; x++) {
-                if (md[(size_t)(y - y0) * ms + (x - x0)] < 0x80) continue;
-                int qx = ((x / sc - x_origin) % pw + pw) % pw;
-                uint32_t v = sp[(size_t)(py * psc) * ss + (size_t)(qx * psc)];
-                uint32_t src;
-                if (fill_style == FillTiled) src = v;
-                else if (v & 1u)             src = fg;
-                else if (fill_style == FillOpaqueStippled) src = bg;
-                else continue;
-                uint32_t *p = &px[(size_t)y * stride + x];
-                *p = rop_apply_px(c, src & 0xffffff, *p);
-            }
-        }
-        cairo_surface_mark_dirty(s->cs);
-        cairo_surface_destroy(m);
+        path_coverage_bands(c, false, rop_pattern_band, &r);
+        cairo_surface_mark_dirty(c->surface->cs);
         return;
     }
     cairo_surface_t *tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);
@@ -1109,6 +1148,22 @@ static int utf8_next(const char *s, int len, int i, unsigned int *cp)
     return n;
 }
 
+/* Draw positioned glyphs.  Under a raster op or a partial plane mask the
+ * glyphs' outlines become coverage and the op is applied to the covered
+ * pixels, as for any other shape (cairo's operators only approximate the
+ * bitwise ones and blend antialiased edges). */
+static void show_glyph_array(MwCanvas *c, cairo_glyph_t *g, int n)
+{
+    if (n <= 0) return;
+    if (!canvas_uses_rop(c)) { cairo_show_glyphs(c->cr, g, n); return; }
+    cairo_fill_rule_t fr = cairo_get_fill_rule(c->cr);
+    cairo_set_fill_rule(c->cr, CAIRO_FILL_RULE_WINDING);   /* outline rule */
+    cairo_new_path(c->cr);
+    cairo_glyph_path(c->cr, g, n);
+    rop_solid(c, false);
+    cairo_set_fill_rule(c->cr, fr);
+}
+
 void mw_show_utf8(MwCanvas *c, MwFont *f, const char *s, int len, int x, int y)
 {
     if (!c || !f || !s) return;
@@ -1151,7 +1206,7 @@ void mw_show_utf8(MwCanvas *c, MwFont *f, const char *s, int len, int x, int y)
         px += mw_font_char_width(f, cp);
         i += n;
     }
-    if (ng) cairo_show_glyphs(c->cr, glyphs, ng);
+    show_glyph_array(c, glyphs, ng);
     if (glyphs != stack_glyphs) free(glyphs);
 }
 
@@ -1176,6 +1231,6 @@ void mw_show_glyphs(MwCanvas *c, MwFont *f, const unsigned int *glyphs,
         g[ng].y = ys ? ys[i] : 0.0;
         ng++;
     }
-    if (ng) cairo_show_glyphs(c->cr, g, ng);
+    show_glyph_array(c, g, ng);
     if (g != stack_glyphs) free(g);
 }

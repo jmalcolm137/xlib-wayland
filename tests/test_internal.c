@@ -1017,6 +1017,45 @@ static void check_case_and_modifiers(void)
     unsetenv("XMODIFIERS");
 }
 
+/* A raster-op shape is rasterised a band at a time: a line across a huge
+ * (HiDPI) drawable used to allocate a coverage mask of its whole bounding
+ * box -- tens of megabytes for one rubber-band diagonal. */
+static void check_rop_bands(Display *d, Window root)
+{
+    Pixmap pm = XCreatePixmap(d, root, 3000, 2000, 24);
+    GC gc = XCreateGC(d, pm, 0, NULL);
+    XSetForeground(d, gc, 0x123456);
+    XFillRectangle(d, pm, gc, 0, 0, 3000, 2000);
+    XSetFunction(d, gc, GXxor);
+    XSetForeground(d, gc, 0xffffff);
+    mw_rop_mask_peak = 0;
+    XDrawLine(d, pm, gc, 0, 0, 2999, 1999);
+    CHECK(mw_rop_mask_peak > 0 && mw_rop_mask_peak <= 3000u * 128u);
+    /* Every row of the line is drawn (no gaps at band edges), and drawing
+     * it again restores everything.  (The final endpoint's row is left out:
+     * zero-width lines do not yet draw their last pixel.) */
+    XImage *im = XGetImage(d, pm, 0, 0, 3000, 2000, AllPlanes, ZPixmap);
+    int rows = 0;
+    for (int y = 0; im && y < 1999; y++) {
+        int hit = 0;
+        for (int x = 0; x < 3000 && !hit; x++)
+            hit = (XGetPixel(im, x, y) & 0xffffff) == 0xedcba9;
+        rows += hit;
+    }
+    CHECK(rows == 1999);
+    if (im) XDestroyImage(im);
+    XDrawLine(d, pm, gc, 0, 0, 2999, 1999);
+    im = XGetImage(d, pm, 0, 0, 3000, 2000, AllPlanes, ZPixmap);
+    int left = 0;
+    for (int y = 0; im && y < 2000; y++)
+        for (int x = 0; x < 3000; x++)
+            left += (XGetPixel(im, x, y) & 0xffffff) != 0x123456;
+    CHECK(left == 0);
+    if (im) XDestroyImage(im);
+    XFreeGC(d, gc);
+    XFreePixmap(d, pm);
+}
+
 static int last_error;
 static int on_error(Display *d, XErrorEvent *e) { (void)d; last_error = e->error_code; return 0; }
 
@@ -1129,6 +1168,7 @@ int main(void)
     check_async_serve(d);
     check_shared_store(d, w);
     check_core_odds(d, root);
+    check_rop_bands(d, root);
     check_keymap(d, w);
     check_key_levels(d, w);
 

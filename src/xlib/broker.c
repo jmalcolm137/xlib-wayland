@@ -120,7 +120,14 @@ typedef struct MwBroker {
         unsigned char *pdata;
         size_t         pnbytes;
         uint64_t       deadline_ms;
+        /* The reply, once built, goes out as the peer takes it: a peer that
+         * does not read must not block this client. */
+        bool           sending;
+        char          *out;
+        size_t         out_len, out_off;
+        bool           motif;  /* a Motif drag's icc conversion: tell dnd.c */
     } serve;
+    int      send_fd;        /* __atomic: the serve fd while sending, or -1 */
 } MwBroker;
 
 /* ------------------------------------------------------------------ utils */
@@ -287,14 +294,17 @@ static void *broker_thread(void *arg)
         /* A connection accepted but not yet fully read is watched too, or a
          * request arriving after the first read never woke the client. */
         int acc = armed ? __atomic_load_n(&b->accept_fd, __ATOMIC_SEQ_CST) : -1;
-        struct pollfd pfd[5] = {
+        /* A reply being sent: wake the client when the peer can take more. */
+        int snd = armed ? __atomic_load_n(&b->send_fd, __ATOMIC_SEQ_CST) : -1;
+        struct pollfd pfd[6] = {
             { armed_listen ? b->listen_fd : -1, POLLIN, 0 },
             { b->cmd_fd,    POLLIN, 0 },
             { b->stop_fd,   POLLIN, 0 },
             { conn,         POLLIN, 0 },
             { acc,          POLLIN, 0 },
+            { snd,          POLLOUT, 0 },
         };
-        int r = poll(pfd, 5, -1);
+        int r = poll(pfd, 6, -1);
         if (r < 0) {
             if (errno == EINTR) continue;
             break;
@@ -303,11 +313,11 @@ static void *broker_thread(void *arg)
         if (pfd[1].revents) {                            /* fd set changed */
             uint64_t v; ssize_t n = read(b->cmd_fd, &v, sizeof v); (void)n;
         }
-        if (pfd[0].revents || (conn >= 0 && pfd[3].revents) ||
-            (acc >= 0 && pfd[4].revents)) {
+        bool fd_ready = (conn >= 0 && pfd[3].revents) || (acc >= 0 && pfd[4].revents) ||
+                        (snd >= 0 && pfd[5].revents);
+        if (pfd[0].revents || fd_ready) {
             if (pfd[0].revents) __atomic_store_n(&b->armed_listen, 0, __ATOMIC_SEQ_CST);
-            if ((conn >= 0 && pfd[3].revents) || (acc >= 0 && pfd[4].revents))
-                __atomic_store_n(&b->armed, 0, __ATOMIC_SEQ_CST);
+            if (fd_ready) __atomic_store_n(&b->armed, 0, __ATOMIC_SEQ_CST);
             broker_wake(dp);
         }
     }
@@ -326,6 +336,7 @@ void mw_broker_init(Display *d)
     if (!b) return;
     b->listen_fd = b->xfer_fd = b->stop_fd = b->cmd_fd = -1;
     b->accept_fd = -1;
+    b->send_fd = -1;
     b->enabled = true;
     b->mypid = (int)getpid();
     b->armed = 1;
@@ -399,6 +410,7 @@ void mw_broker_fini(Display *d)
     if (b->stop_fd >= 0)   close(b->stop_fd);
     if (b->cmd_fd >= 0)    close(b->cmd_fd);
     free(b->serve.pdata);
+    free(b->serve.out);
     free(b->xfer.buf);
     while (b->xfer_queue) {
         MwXferReq *r = b->xfer_queue;
@@ -583,23 +595,68 @@ static void broker_rearm(MwBroker *b)
     }
 }
 
+/* The serve is over (sent, refused or abandoned): release it. */
+static void serve_close(Display *d)
+{
+    MwBroker *b = MWD(d)->broker;
+    bool motif = b->serve.motif;
+    __atomic_store_n(&b->send_fd, -1, __ATOMIC_SEQ_CST);
+    if (b->serve.fd >= 0) close(b->serve.fd);
+    b->serve.fd = -1;
+    b->serve.active = false;
+    b->serve.sending = false;
+    b->serve.got_prop = false;
+    b->serve.motif = false;
+    free(b->serve.pdata);
+    b->serve.pdata = NULL;
+    b->serve.pnbytes = b->serve.pnitems = 0;
+    free(b->serve.out);
+    b->serve.out = NULL;
+    b->serve.out_len = b->serve.out_off = 0;
+    if (motif) mw_dnd_serve_done(d);
+    broker_rearm(b);
+    mw_io_update_wake(d);
+}
+
+/* Write as much of the reply as the peer takes now; the rest goes when the
+ * socket is writable again (the broker thread wakes us).  Each bit of
+ * progress extends the deadline, so only a peer that stops reading
+ * altogether is given up on. */
+static void serve_send(Display *d)
+{
+    MwBroker *b = MWD(d)->broker;
+    if (!b->serve.sending) return;
+    while (b->serve.out_off < b->serve.out_len) {
+        ssize_t n = mw_write_some(b->serve.fd, b->serve.out + b->serve.out_off,
+                                  b->serve.out_len - b->serve.out_off);
+        if (n < 0) { serve_close(d); return; }       /* the peer went away */
+        if (n == 0) break;                            /* full: wait */
+        b->serve.out_off += (size_t)n;
+        b->serve.deadline_ms = now_ms() + MWB_DEADLINE_MS;
+    }
+    if (b->serve.out_off >= b->serve.out_len) {
+        TR("serve sent %zu bytes\n", b->serve.out_len);
+        serve_close(d);
+        return;
+    }
+    __atomic_store_n(&b->send_fd, b->serve.fd, __ATOMIC_SEQ_CST);
+    broker_rearm(b);
+    mw_io_update_wake(d);
+}
+
+/* Build the reply (the data, or a refusal) and start sending it. */
 static void serve_finish(Display *d, bool refuse)
 {
     XDisplayImpl *dp = MWD(d);
     MwBroker *b = dp->broker;
-    if (!b || !b->serve.active) return;
+    if (!b || !b->serve.active || b->serve.sending) return;
 
     /* A conversion for a Motif drag's icc handle: when it is done the
      * destination has the data, so the initiator's own drag can be ended (the
      * source shim defers that until the relay completes). */
-    bool motif = false;
     {
         const char *sn = XGetAtomName(d, b->serve.selection);
-        if (sn && strncmp(sn, "_MOTIF_ATOM_", 12) == 0) motif = true;
-        if (sn) XFree((char *)sn);
-    }
-    {
-        const char *sn = XGetAtomName(d, b->serve.selection);
+        if (sn && strncmp(sn, "_MOTIF_ATOM_", 12) == 0) b->serve.motif = true;
         const char *tn = XGetAtomName(d, b->serve.target);
         TR("serve finish fd=%d refuse=%d sel=%s tgt=%s bytes=%zu\n",
            b->serve.fd, refuse, sn ? sn : "?", tn ? tn : "?",
@@ -607,67 +664,54 @@ static void serve_finish(Display *d, bool refuse)
         if (sn) XFree((char *)sn);
         if (tn) XFree((char *)tn);
     }
+    if (b->serve.fd < 0) { serve_close(d); return; }
 
-    if (b->serve.fd >= 0) {
-        if (refuse || !b->serve.got_prop) {
-            char msg[1700];
-            const char *sn = XGetAtomName(d, b->serve.selection);
-            const char *tn = XGetAtomName(d, b->serve.target);
-            const char *pn = XGetAtomName(d, b->serve.property);
-            char hs[512], ht[512], hp[512];
-            hexenc(sn ? sn : "", hs, sizeof hs);
-            hexenc(tn ? tn : "", ht, sizeof ht);
-            hexenc(pn ? pn : "", hp, sizeof hp);
-            if (sn) XFree((char *)sn);
-            if (tn) XFree((char *)tn);
-            if (pn) XFree((char *)pn);
-            int l = snprintf(msg, sizeof msg, "R %u %s %s %s\n", b->serve.id,
-                             hs, ht, hp);
-            mw_write_all(b->serve.fd, msg, (size_t)l, 5000);
-        } else {
-            const char *sn = XGetAtomName(d, b->serve.selection);
-            const char *tn = XGetAtomName(d, b->serve.target);
-            const char *pn = XGetAtomName(d, b->serve.property);
-            const char *yn = XGetAtomName(d, b->serve.ptype);
-            char hs[512], ht[512], hp[512], hy[512];
-            hexenc(sn ? sn : "", hs, sizeof hs);
-            hexenc(tn ? tn : "", ht, sizeof ht);
-            hexenc(pn ? pn : "", hp, sizeof hp);
-            hexenc(yn ? yn : "", hy, sizeof hy);
-            if (sn) XFree((char *)sn);
-            if (tn) XFree((char *)tn);
-            if (pn) XFree((char *)pn);
-            if (yn) XFree((char *)yn);
-            char head[1700];
-            int hl = snprintf(head, sizeof head, "D %u %s %s %s %s %d %lu %zu\n",
-                              b->serve.id, hs, ht, hp, hy, b->serve.pformat,
-                              b->serve.pnitems, b->serve.pnbytes);
-            /* The socket is non-blocking: write it all, waiting for the
-             * peer as needed (a bare send() dropped what did not fit). */
-            int n1 = mw_write_all(b->serve.fd, head, (size_t)hl, 5000);
-            char *hex = malloc(b->serve.pnbytes * 2 + 2);
-            if (hex) {
-                static const char *hx = "0123456789abcdef";
-                for (size_t i = 0; i < b->serve.pnbytes; i++) {
-                    hex[i * 2] = hx[(b->serve.pdata[i] >> 4) & 0xf];
-                    hex[i * 2 + 1] = hx[b->serve.pdata[i] & 0xf];
-                }
-                hex[b->serve.pnbytes * 2] = '\n';
-                if (n1 == 0)
-                    mw_write_all(b->serve.fd, hex, b->serve.pnbytes * 2 + 1, 5000);
-                free(hex);
-            }
-        }
-        close(b->serve.fd);
+    const char *sn = XGetAtomName(d, b->serve.selection);
+    const char *tn = XGetAtomName(d, b->serve.target);
+    const char *pn = XGetAtomName(d, b->serve.property);
+    char hs[512], ht[512], hp[512], hy[512] = "";
+    hexenc(sn ? sn : "", hs, sizeof hs);
+    hexenc(tn ? tn : "", ht, sizeof ht);
+    hexenc(pn ? pn : "", hp, sizeof hp);
+    if (sn) XFree((char *)sn);
+    if (tn) XFree((char *)tn);
+    if (pn) XFree((char *)pn);
+
+    char head[1700];
+    int hl;
+    size_t body = 0;
+    if (refuse || !b->serve.got_prop) {
+        hl = snprintf(head, sizeof head, "R %u %s %s %s\n", b->serve.id, hs, ht, hp);
+    } else {
+        const char *yn = XGetAtomName(d, b->serve.ptype);
+        hexenc(yn ? yn : "", hy, sizeof hy);
+        if (yn) XFree((char *)yn);
+        hl = snprintf(head, sizeof head, "D %u %s %s %s %s %d %lu %zu\n",
+                      b->serve.id, hs, ht, hp, hy, b->serve.pformat,
+                      b->serve.pnitems, b->serve.pnbytes);
+        body = b->serve.pnbytes * 2 + 1;
     }
-    b->serve.fd = -1;
-    b->serve.active = false;
-    b->serve.got_prop = false;
-    free(b->serve.pdata);
+    if (hl < 0 || (size_t)hl >= sizeof head) { serve_close(d); return; }
+    char *out = malloc((size_t)hl + body);
+    if (!out) { serve_close(d); return; }
+    memcpy(out, head, (size_t)hl);
+    if (body) {
+        static const char *hx = "0123456789abcdef";
+        char *h = out + hl;
+        for (size_t i = 0; i < b->serve.pnbytes; i++) {
+            h[i * 2] = hx[(b->serve.pdata[i] >> 4) & 0xf];
+            h[i * 2 + 1] = hx[b->serve.pdata[i] & 0xf];
+        }
+        h[b->serve.pnbytes * 2] = '\n';
+    }
+    free(b->serve.pdata);              /* the reply holds it now */
     b->serve.pdata = NULL;
-    b->serve.pnbytes = b->serve.pnitems = 0;
-    if (motif) mw_dnd_serve_done(d);
-    broker_rearm(b);
+    b->serve.out = out;
+    b->serve.out_len = (size_t)hl + body;
+    b->serve.out_off = 0;
+    b->serve.sending = true;
+    b->serve.deadline_ms = now_ms() + MWB_DEADLINE_MS;
+    serve_send(d);
 }
 
 static void serve_read(Display *d);
@@ -791,7 +835,7 @@ bool mw_broker_capture_prop(Display *d, Window w, Atom property, Atom type,
                             unsigned long nitems)
 {
     MwBroker *b = MWD(d)->broker;
-    if (!b || !b->serve.active) return false;
+    if (!b || !b->serve.active || b->serve.sending) return false;
     if (w != b->serve.proxy_win || property != b->proxy_prop) return false;
     free(b->serve.pdata);
     b->serve.pdata = NULL;
@@ -815,7 +859,7 @@ bool mw_broker_capture_prop(Display *d, Window w, Atom property, Atom type,
 bool mw_broker_serve_notify(Display *d, XSelectionEvent *se)
 {
     MwBroker *b = MWD(d)->broker;
-    if (!b || !b->serve.active) return false;
+    if (!b || !b->serve.active || b->serve.sending) return false;
     if (se->requestor != b->serve.proxy_win) return false;
     bool refuse = (se->property == None);
     TR("serve notify refuse=%d\n", refuse);
@@ -1004,11 +1048,15 @@ void mw_broker_handle_ready(Display *d)
     if (!b) return;
     if (b->xfer.active) xfer_read(d);
     if (b->accept_fd >= 0) serve_read(d);
+    if (b->serve.sending) serve_send(d);
     /* Drop a stalled serve before accepting anything new: otherwise one
      * conversion whose owner never answers blocks every later request (the
-     * accept is refused and the client waits forever). */
-    if (b->serve.active && now_ms() >= b->serve.deadline_ms)
-        serve_finish(d, true);
+     * accept is refused and the client waits forever).  A reply the peer
+     * stopped reading is abandoned; one never produced is refused. */
+    if (b->serve.active && now_ms() >= b->serve.deadline_ms) {
+        if (b->serve.sending) serve_close(d);
+        else serve_finish(d, true);
+    }
     if (b->listen_fd >= 0) serve_accept(d);
     broker_rearm(b);
     mw_io_update_wake(d);
