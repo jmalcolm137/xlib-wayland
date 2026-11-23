@@ -51,9 +51,12 @@ static void check_xrm(void)
     XrmDestroyDatabase(db);
 
     /* #include "file", relative to the including file's directory. */
-    char dir[] = "/tmp/mw-xrm-XXXXXX";
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    char dir[256];
+    snprintf(dir, sizeof dir, "%s/mw-xrm-XXXXXX", tmp);
     if (mkdtemp(dir)) {
-        char a[64], b[64];
+        char a[300], b[300];
         snprintf(a, sizeof a, "%s/main", dir);
         snprintf(b, sizeof b, "%s/base", dir);
         write_file(b, "XTerm*scrollBar: true\n");
@@ -933,7 +936,10 @@ int main(void)
 
     /* XGetDefault reads the display's resources (RESOURCE_MANAGER, built
      * from $XENVIRONMENT among others). */
-    char envfile[] = "/tmp/mw-xenv-XXXXXX";
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    char envfile[256];
+    snprintf(envfile, sizeof envfile, "%s/mw-xenv-XXXXXX", tmp);
     int efd = mkstemp(envfile);
     if (efd >= 0) {
         /* A continued value spans lines (the loader used to add a newline
@@ -1056,6 +1062,80 @@ int main(void)
             CHECK(XGetGeometry(d, c2, &rr, &rx, &ry, &rw, &rh, &rb, &rd));
             CHECK(rx == 5 && ry == 6 && rw == 30 && rh == 40);
             XDestroyWindow(d, p);
+        }
+
+        /* Regression checks for review round 6:
+         * - XGetWMNormalHints returns flags bitmask in *supplied
+         * - XGetWindowProperty on empty property returns non-NULL 1-byte NUL
+         * - XUnionRectWithRegion with empty rect copies src to dest
+         * - XrmGetResource handles name_str longer than class_str safely
+         * - XParseGeometry accepts uppercase X and rejects double signs
+         * - XCreateBitmapFromData / CoordModePrevious drawing */
+        {
+            Window tw = XCreateSimpleWindow(d, root, 0, 0, 64, 64, 0, 0, 0);
+            XSizeHints sh;
+            memset(&sh, 0, sizeof sh);
+            sh.flags = PMinSize | PMaxSize;
+            sh.min_width = 10; sh.min_height = 20;
+            sh.max_width = 100; sh.max_height = 200;
+            XSetWMNormalHints(d, tw, &sh);
+            XSizeHints got; long sup = 0;
+            memset(&got, 0, sizeof got);
+            CHECK(XGetWMNormalHints(d, tw, &got, &sup) == 1);
+            CHECK(sup == (PMinSize | PMaxSize));
+
+            Atom empty_prop = XInternAtom(d, "MW_EMPTY_PROP_TEST", False);
+            XChangeProperty(d, tw, empty_prop, XA_STRING, 8, PropModeReplace,
+                            (const unsigned char *)"", 0);
+            Atom at; int af; unsigned long ni, ba; unsigned char *pd = NULL;
+            CHECK(XGetWindowProperty(d, tw, empty_prop, 0, 10, False,
+                                     XA_STRING, &at, &af, &ni, &ba, &pd) == Success);
+            CHECK(at == XA_STRING && af == 8 && ni == 0 && pd != NULL && pd[0] == 0);
+            XFree(pd);
+
+            Region r1 = XCreateRegion(), r2 = XCreateRegion();
+            XRectangle non_empty = { 10, 20, 30, 40 }, empty_r = { 0, 0, 0, 0 }, box;
+            XUnionRectWithRegion(&non_empty, r1, r1);
+            XUnionRectWithRegion(&empty_r, r1, r2);
+            XClipBox(r2, &box);
+            CHECK(box.x == 10 && box.y == 20 && box.width == 30 && box.height == 40);
+            XDestroyRegion(r1); XDestroyRegion(r2);
+
+            XrmDatabase rdb = XrmGetStringDatabase("a.b.c.d: ok\n");
+            char *rt = NULL; XrmValue rv;
+            CHECK(XrmGetResource(rdb, "a.b.c.d", "A", &rt, &rv) &&
+                  rv.addr && !strcmp((char *)rv.addr, "ok"));
+            XrmDestroyDatabase(rdb);
+
+            int gx = 0, gy = 0; unsigned int gw = 0, gh = 0;
+            CHECK((XParseGeometry("X100", &gx, &gy, &gw, &gh) & HeightValue) && gh == 100);
+            CHECK(XParseGeometry("+-10+20", &gx, &gy, &gw, &gh) == 0);
+            CHECK(XParseGeometry("--10+20", &gx, &gy, &gw, &gh) == 0);
+
+            /* Direct bitmap write + CoordModePrevious. */
+            static const char bits[2] = { 0x05, 0x02 }; /* row0: x=0,2; row1: x=1 */
+            Pixmap bm = XCreateBitmapFromData(d, tw, bits, 4, 2);
+            XImage *bi = XGetImage(d, bm, 0, 0, 4, 2, AllPlanes, ZPixmap);
+            CHECK(bi && XGetPixel(bi, 0, 0) == 1 && XGetPixel(bi, 1, 0) == 0 &&
+                  XGetPixel(bi, 2, 0) == 1 && XGetPixel(bi, 1, 1) == 1);
+            if (bi) XDestroyImage(bi);
+            XFreePixmap(d, bm);
+
+            Pixmap pm = XCreatePixmap(d, tw, 32, 32, 24);
+            GC gc = XCreateGC(d, pm, 0, NULL);
+            XSetForeground(d, gc, 0x000000);
+            XFillRectangle(d, pm, gc, 0, 0, 32, 32);
+            XSetForeground(d, gc, 0x00ff00);
+            XPoint pts[3] = { { 5, 5 }, { 10, 0 }, { 0, 10 } };
+            XDrawPoints(d, pm, gc, pts, 3, CoordModePrevious);
+            XImage *pi = XGetImage(d, pm, 0, 0, 32, 32, AllPlanes, ZPixmap);
+            CHECK(pi && (XGetPixel(pi, 5, 5) & 0xffffff) == 0x00ff00 &&
+                  (XGetPixel(pi, 15, 5) & 0xffffff) == 0x00ff00 &&
+                  (XGetPixel(pi, 15, 15) & 0xffffff) == 0x00ff00);
+            if (pi) XDestroyImage(pi);
+            XFreeGC(d, gc);
+            XFreePixmap(d, pm);
+            XDestroyWindow(d, tw);
         }
 
         run_display_checks(d);

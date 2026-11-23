@@ -191,36 +191,27 @@ XImage *XGetImage(Display *d, Drawable dr, int x, int y,
                   unsigned int width, unsigned int height,
                   unsigned long plane_mask, int format)
 {
-    (void)plane_mask;
-    /* Render requests are buffered until something reads the drawable: apply
-     * them before reading it back, or the image misses everything the client
-     * has just drawn through Render (rendercheck draws with Render and reads
-     * back with XGetImage). */
     mw_render_drain(d);
     int dw, dh, depth;
     MwSurface *s = mw_drawable_surface(d, dr, &dw, &dh, &depth);
     if (!s) return NULL;
-    XImage *img = mw_create_image_alloc(d, &MWD(d)->visual, (unsigned int)depth,
+    Visual *vis = depth >= 32 ? &MWD(d)->visual32 : &MWD(d)->visual;
+    XImage *img = mw_create_image_alloc(d, vis, (unsigned int)depth,
                                         format == XYPixmap ? ZPixmap : format,
                                         width, height, 32);
     if (!img) return NULL;
     uint32_t *tmp = calloc((size_t)width * height, 4);
+    if (!tmp) { XDestroyImage(img); return NULL; }
     mw_surface_get(s, x, y, (int)width, (int)height, tmp, (int)width);
     for (unsigned int j = 0; j < height; j++)
         for (unsigned int i = 0; i < width; i++) {
             uint32_t px = tmp[(size_t)j * width + i];
-            /* A depth-32 drawable carries alpha; masking it off lost the
-             * channel entirely (rendercheck reads ARGB destinations back to
-             * check alpha, and every gradient looked transparent).  A depth-8
-             * Render drawable (PictStandardA8) *is* alpha, stored in the
-             * surface's alpha channel here, so hand that back as the pixel.
-             * Shallower drawables have no alpha to keep. */
             unsigned long out;
             if (depth == 8)       out = (px >> 24) & 0xff;
             else if (depth >= 32) out = px;
             else if (depth == 1)  out = px & 1u;          /* bitmaps: bit values */
             else                  out = px & 0xffffffu;
-            img_put_pixel(img, (int)i, (int)j, out);
+            img_put_pixel(img, (int)i, (int)j, out & plane_mask);
         }
     free(tmp);
     return img;
@@ -278,9 +269,48 @@ int XPutImage(Display *d, Drawable dr, GC gc, XImage *img,
      * ARGB icons this way, and forcing alpha to 0xff made every transparent
      * icon pixel opaque black.  A 24-bit drawable has no alpha, so those stay
      * opaque. */
-    int ddepth = 0;
-    mw_drawable_surface(d, dr, NULL, NULL, &ddepth);
+    int dw = 0, dh = 0, ddepth = 0;
+    MwSurface *dsurf = mw_drawable_surface(d, dr, &dw, &dh, &ddepth);
+    if (!dsurf) return 0;
     int keep_alpha = (ddepth >= 32);
+    int alpha_only = (ddepth == 8);
+
+    /* Fast path: unclipped 32-bit ZPixmap GXcopy AllPlanes on a 1x surface
+     * writes straight into the destination surface without a temp allocation. */
+    if (!onebit && !alpha_only && img->format == ZPixmap &&
+        img->bits_per_pixel == 32 && img->data &&
+        mw_surface_scale(dsurf) == 1 && mw_surface_data(dsurf) &&
+        (!gc || (gc->function == GXcopy &&
+                 (gc->plane_mask & 0xfffffful) == 0xfffffful &&
+                 !gc->has_clip_rects && gc->clip_mask == None))) {
+        mw_render_drain(d);
+        int cx = dest_x, cy = dest_y, csx = src_x, csy = src_y;
+        int cw = (int)width, ch = (int)height;
+        if (cx < 0) { csx -= cx; cw += cx; cx = 0; }
+        if (cy < 0) { csy -= cy; ch += cy; cy = 0; }
+        if (cx + cw > dw) cw = dw - cx;
+        if (cy + ch > dh) ch = dh - cy;
+        if (cw > 0 && ch > 0) {
+            uint32_t *dst = (uint32_t *)mw_surface_data(dsurf);
+            int dstride = mw_surface_stride(dsurf) / 4;
+            for (int j = 0; j < ch; j++) {
+                const uint32_t *srow = (const uint32_t *)(img->data +
+                                        (size_t)(csy + j) * img->bytes_per_line) + csx;
+                uint32_t *drow = dst + (size_t)(cy + j) * dstride + cx;
+                if (keep_alpha) {
+                    memcpy(drow, srow, (size_t)cw * 4);
+                } else {
+                    for (int i = 0; i < cw; i++)
+                        drow[i] = 0xff000000u | (srow[i] & 0xffffffu);
+                }
+            }
+            mw_surface_mark_dirty(dsurf);
+        }
+        MwWindow *win = mw_window(d, dr);
+        if (win) mw_window_damage_rect(win, dest_x, dest_y, (int)width, (int)height);
+        return 1;
+    }
+
     MwSurface *tmp = mw_surface_create((int)width, (int)height);
     uint32_t *td = tmp ? (uint32_t *)mw_surface_data(tmp) : NULL;
     if (!td) { mw_surface_destroy(tmp); return 0; }
@@ -290,8 +320,9 @@ int XPutImage(Display *d, Drawable dr, GC gc, XImage *img,
             unsigned long px = img_get_pixel(img, src_x + (int)i, src_y + (int)j);
             td[(size_t)j * tstride + i] = onebit
                 ? (px ? fg : bg)
-                : (keep_alpha ? (uint32_t)px
-                              : (0xff000000u | ((uint32_t)px & 0xffffff)));
+                : (alpha_only ? (((uint32_t)px & 0xffu) << 24)
+                              : (keep_alpha ? (uint32_t)px
+                                            : (0xff000000u | ((uint32_t)px & 0xffffffu))));
         }
     mw_surface_mark_dirty(tmp);
     MwCanvas *c = mw_canvas_for_drawable(d, dr, gc, NULL, NULL);
@@ -301,7 +332,7 @@ int XPutImage(Display *d, Drawable dr, GC gc, XImage *img,
     }
     mw_surface_destroy(tmp);
     MwWindow *win = mw_window(d, dr);
-    if (win) mw_window_damage(win);
+    if (win) mw_window_damage_rect(win, dest_x, dest_y, (int)width, (int)height);
     return 1;
 }
 
@@ -312,14 +343,16 @@ Pixmap XCreatePixmap(Display *d, Drawable dr, unsigned int width,
 {
     (void)dr;
     MwPixmap *pm = calloc(1, sizeof *pm);
+    if (!pm) return None;
     pm->id = mw_alloc_id(d);
     pm->w = (int)width; pm->h = (int)height;
     pm->depth = (int)depth;
     pm->screen = MWSCR(d);
     pm->surface = mw_surface_create((int)width, (int)height);
+    if (!pm->surface) { free(pm); return None; }
     mw_surface_clear(pm->surface, 0x00000000);
     mw_register(d, pm->id, MW_OBJ_PIXMAP, pm);
-    if (getenv("MW_TRACE_RENDER"))
+    if (MW_TRACE_RENDER())
         fprintf(stderr, "MW: XCreatePixmap id=0x%lx %ux%u depth=%u lookup=%p\n",
                 (unsigned long)pm->id, width, height, depth,
                 (void *)mw_pixmap(d, pm->id));
@@ -346,25 +379,18 @@ Pixmap XCreateBitmapFromData(Display *d, Drawable dr, _Xconst char *data,
 {
     Pixmap p = XCreatePixmap(d, dr, width, height, 1);
     MwPixmap *pm = mw_pixmap(d, p);
-    if (!pm) return None;
+    if (!pm || !pm->surface) return None;
+    uint32_t *dst = (uint32_t *)mw_surface_data(pm->surface);
+    int dstride = mw_surface_stride(pm->surface) / 4;
+    if (!dst || !data) return p;
     int stride = (int)((width + 7) / 8);
-    uint32_t *px = malloc(sizeof(uint32_t) * width * height);
-    for (unsigned int y = 0; y < height; y++)
-        for (unsigned int x = 0; x < width; x++) {
-            unsigned char b = (unsigned char)data[y * stride + (x >> 3)];
-            int set = (b >> (x & 7)) & 1;
-            px[y * width + x] = set ? 0xffffffffu : 0x00000000u;
-        }
-    MwCanvas *c = mw_canvas_begin(pm->surface, NULL, 0, 0, 0);
-    for (unsigned int y = 0; y < height; y++)
-        for (unsigned int x = 0; x < width; x++) {
-            mw_set_source_argb(c, px[y * width + x]);
-            mw_set_operator(c, GXcopy);
-            mw_rect(c, x, y, 1, 1);
-            mw_fill_path(c);
-        }
-    mw_canvas_end(c);
-    free(px);
+    for (unsigned int y = 0; y < height; y++) {
+        uint32_t *row = dst + (size_t)y * dstride;
+        const unsigned char *src = (const unsigned char *)data + (size_t)y * stride;
+        for (unsigned int x = 0; x < width; x++)
+            row[x] = ((src[x >> 3] >> (x & 7)) & 1) ? 0xffffffffu : 0x00000000u;
+    }
+    mw_surface_mark_dirty(pm->surface);
     return p;
 }
 
@@ -375,19 +401,20 @@ Pixmap XCreatePixmapFromBitmapData(Display *d, Drawable dr, char *data,
 {
     Pixmap p = XCreatePixmap(d, dr, width, height, depth);
     MwPixmap *pm = mw_pixmap(d, p);
-    if (!pm) return None;
+    if (!pm || !pm->surface) return None;
+    uint32_t *dst = (uint32_t *)mw_surface_data(pm->surface);
+    int dstride = mw_surface_stride(pm->surface) / 4;
+    if (!dst || !data) return p;
+    uint32_t fgpx = 0xff000000u | (uint32_t)(fg & 0xffffffu);
+    uint32_t bgpx = 0xff000000u | (uint32_t)(bg & 0xffffffu);
     int stride = (int)((width + 7) / 8);
-    MwCanvas *c = mw_canvas_begin(pm->surface, NULL, 0, 0, 0);
-    for (unsigned int y = 0; y < height; y++)
-        for (unsigned int x = 0; x < width; x++) {
-            unsigned char b = (unsigned char)data[y * stride + (x >> 3)];
-            int set = (b >> (x & 7)) & 1;
-            mw_set_source_argb(c, 0xff000000u |
-                               (uint32_t)((set ? fg : bg) & 0xffffff));
-            mw_rect(c, x, y, 1, 1);
-            mw_fill_path(c);
-        }
-    mw_canvas_end(c);
+    for (unsigned int y = 0; y < height; y++) {
+        uint32_t *row = dst + (size_t)y * dstride;
+        const unsigned char *src = (const unsigned char *)data + (size_t)y * stride;
+        for (unsigned int x = 0; x < width; x++)
+            row[x] = ((src[x >> 3] >> (x & 7)) & 1) ? fgpx : bgpx;
+    }
+    mw_surface_mark_dirty(pm->surface);
     return p;
 }
 
@@ -432,7 +459,8 @@ static int parse_xbm(_Xconst char *data, int *w, int *h, char **bits_out)
     }
     if (bw <= 0 || bh <= 0) return -1;
     nbytes = (bw + 7) / 8 * bh;
-    char *bits = calloc(nbytes, 1);
+    char *bits = calloc((size_t)nbytes, 1);
+    if (!bits) return -1;
     /* collect hex bytes from the braces */
     int idx = 0;
     int in_braces = 0;
@@ -441,10 +469,11 @@ static int parse_xbm(_Xconst char *data, int *w, int *h, char **bits_out)
         if (*q == '}') { in_braces = 0; continue; }
         if (!in_braces) continue;
         if (q[0] == '0' && (q[1] == 'x' || q[1] == 'X')) {
-            unsigned int byte;
-            if (sscanf(q, "0x%2x", &byte) == 1 && idx < nbytes) {
-                bits[idx++] = (char)byte;
-                q += 3;
+            char *end = NULL;
+            unsigned long byte = strtoul(q, &end, 16);
+            if (end > q + 2 && idx < nbytes) {
+                bits[idx++] = (char)(byte & 0xffu);
+                q = end - 1;
             }
         }
     }
@@ -458,11 +487,13 @@ int XReadBitmapFileData(_Xconst char *filename, unsigned int *width,
 {
     FILE *f = fopen(filename, "rb");
     if (!f) return BitmapOpenFailed;
-    fseek(f, 0, SEEK_END);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return BitmapFileInvalid; }
     long sz = ftell(f);
+    if (sz < 0) { fclose(f); return BitmapFileInvalid; }
     fseek(f, 0, SEEK_SET);
-    char *buf = malloc(sz + 1);
-    size_t rd = fread(buf, 1, sz, f);
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return BitmapNoMemory; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
     buf[rd] = 0;
     fclose(f);
     int w = 0, h = 0; char *bits = NULL;

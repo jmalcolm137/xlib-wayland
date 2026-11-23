@@ -48,8 +48,8 @@ void XShapeCombineRectangles(Display *d, Window dest, int kind, int x_off,
     case ShapeSubtract: pixman_region32_subtract(&w->shape, &w->shape, &add); break;
     case ShapeInvert: {
         pixman_region32_t inv;
-        pixman_region32_init_rect(&inv, 0, 0, (unsigned)w->w, (unsigned)w->h);
-        pixman_region32_subtract(&inv, &inv, &add);
+        pixman_region32_init(&inv);
+        pixman_region32_subtract(&inv, &add, &w->shape);
         pixman_region32_copy(&w->shape, &inv);
         pixman_region32_fini(&inv);
         break;
@@ -74,11 +74,11 @@ void XShapeCombineMask(Display *d, Window dest, int kind, int x_off, int y_off,
 void XShapeCombineRegion(Display *d, Window dest, int kind, int x_off,
                          int y_off, Region r, int op)
 {
-    XRectangle box;
-    XClipBox(r, &box);
-    XRectangle rect = { (short)(box.x + x_off), (short)(box.y + y_off),
-                        box.width, box.height };
-    XShapeCombineRectangles(d, dest, kind, 0, 0, &rect, 1, op, 0);
+    XRectangle *rects = NULL;
+    int n = mw_region_rectangles(r, &rects);
+    if (n < 0) return;
+    XShapeCombineRectangles(d, dest, kind, x_off, y_off, rects, n, op, 0);
+    free(rects);
 }
 
 void XShapeCombineShape(Display *d, Window dest, int kind, int x_off, int y_off,
@@ -93,9 +93,12 @@ void XShapeCombineShape(Display *d, Window dest, int kind, int x_off, int y_off,
 
 void XShapeOffsetShape(Display *d, Window dest, int kind, int x_off, int y_off)
 {
-    (void)x_off; (void)y_off; (void)kind;
+    (void)kind;
     MwWindow *w = mw_window(d, dest);
-    if (w && w->has_shape) { mw_window_damage(w); mw_flush_damage(d); }
+    if (w && w->has_shape) {
+        pixman_region32_translate(&w->shape, x_off, y_off);
+        mw_window_damage(w);
+    }
 }
 
 Status XShapeQueryExtents(Display *d, Window w, Bool *bounding_shaped,
@@ -107,15 +110,23 @@ Status XShapeQueryExtents(Display *d, Window w, Bool *bounding_shaped,
     MwWindow *win = mw_window(d, w);
     if (!win) return 0;
     if (bounding_shaped) *bounding_shaped = win->has_shape;
-    if (xbs) *xbs = 0;
-    if (ybs) *ybs = 0;
-    if (wbs) *wbs = win->w;
-    if (hbs) *hbs = win->h;
+    if (win->has_shape) {
+        pixman_box32_t *e = pixman_region32_extents(&win->shape);
+        if (xbs) *xbs = e->x1;
+        if (ybs) *ybs = e->y1;
+        if (wbs) *wbs = (unsigned int)(e->x2 - e->x1);
+        if (hbs) *hbs = (unsigned int)(e->y2 - e->y1);
+    } else {
+        if (xbs) *xbs = 0;
+        if (ybs) *ybs = 0;
+        if (wbs) *wbs = (unsigned int)win->w;
+        if (hbs) *hbs = (unsigned int)win->h;
+    }
     if (clip_shaped) *clip_shaped = False;
     if (xcs) *xcs = 0;
     if (ycs) *ycs = 0;
-    if (wcs) *wcs = win->w;
-    if (hcs) *hcs = win->h;
+    if (wcs) *wcs = (unsigned int)win->w;
+    if (hcs) *hcs = (unsigned int)win->h;
     return 1;
 }
 

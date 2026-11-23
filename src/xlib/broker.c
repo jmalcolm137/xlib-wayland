@@ -368,14 +368,17 @@ void mw_broker_init(Display *d)
     struct sockaddr_un sa;
     memset(&sa, 0, sizeof sa);
     sa.sun_family = AF_UNIX;
-    snprintf(sa.sun_path, sizeof sa.sun_path, "%s", b->sock_path);
-    unlink(b->sock_path);
-    b->listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
-    if (b->listen_fd < 0 ||
-        bind(b->listen_fd, (struct sockaddr *)&sa, sizeof sa) != 0 ||
-        listen(b->listen_fd, 8) != 0) {
-        if (b->listen_fd >= 0) close(b->listen_fd);
-        b->listen_fd = -1;
+    size_t spl = strlen(b->sock_path);
+    if (spl < sizeof sa.sun_path) {
+        memcpy(sa.sun_path, b->sock_path, spl + 1);
+        unlink(b->sock_path);
+        b->listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        if (b->listen_fd < 0 ||
+            bind(b->listen_fd, (struct sockaddr *)&sa, sizeof sa) != 0 ||
+            listen(b->listen_fd, 8) != 0) {
+            if (b->listen_fd >= 0) close(b->listen_fd);
+            b->listen_fd = -1;
+        }
     }
 
     b->stop_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -405,8 +408,8 @@ void mw_broker_fini(Display *d)
     if (b->listen_fd >= 0) close(b->listen_fd);
     if (b->xfer_fd >= 0)   close(b->xfer_fd);
     if (b->accept_fd >= 0) close(b->accept_fd);
-    if (b->xfer.fd >= 0)   close(b->xfer.fd);
-    if (b->serve.fd >= 0)  close(b->serve.fd);
+    if (b->xfer.fd >= 0 && b->xfer.fd != b->xfer_fd) close(b->xfer.fd);
+    if (b->serve.fd >= 0 && b->serve.fd != b->accept_fd) close(b->serve.fd);
     if (b->stop_fd >= 0)   close(b->stop_fd);
     if (b->cmd_fd >= 0)    close(b->cmd_fd);
     free(b->serve.pdata);
@@ -465,13 +468,14 @@ static bool xfer_start(Display *d, Atom selection, Atom target, Atom property,
     if (owner_pid <= 0 || owner_pid == b->mypid) { XFree((char *)selname); return false; }
 
     char path[224];
-    snprintf(path, sizeof path, "%s/sel-%d.sock", b->dir, owner_pid);
+    int pl = snprintf(path, sizeof path, "%s/sel-%d.sock", b->dir, owner_pid);
+    struct sockaddr_un sa;
+    if (pl < 0 || (size_t)pl >= sizeof sa.sun_path) { XFree((char *)selname); return false; }
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) { XFree((char *)selname); return false; }
-    struct sockaddr_un sa;
     memset(&sa, 0, sizeof sa);
     sa.sun_family = AF_UNIX;
-    snprintf(sa.sun_path, sizeof sa.sun_path, "%s", path);
+    memcpy(sa.sun_path, path, (size_t)pl + 1);
     if (connect(fd, (struct sockaddr *)&sa, sizeof sa) != 0) {
         close(fd);
         XFree((char *)selname);
@@ -793,14 +797,14 @@ static void serve_read(Display *d)
     if (b->serve.proxy_win == None)
         b->serve.proxy_win = XCreateSimpleWindow(d, DefaultRootWindow(d),
                                                  0, 0, 1, 1, 0, 0, 0);
-    /* A unique property per serve: a delayed write from a previous conversion
-     * (another serve, or the colour server) landing on a fixed property name
-     * would otherwise be captured as this request's data. */
+    /* Rotate across a fixed ring of 8 property atoms so delayed writes from an
+     * earlier conversion cannot collide with the current one without leaking
+     * unbounded atoms into the shared atom file. */
     {
-        char pn[80];
-        snprintf(pn, sizeof pn, "_XLIB_WAYLAND_SEL_%d_%u", b->mypid,
-                 ++b->proxy_seq);
+        char pn[64];
+        snprintf(pn, sizeof pn, "_XLIB_WAYLAND_SEL_%u", (++b->proxy_seq) & 7u);
         b->proxy_prop = XInternAtom(d, pn, False);
+        XDeleteProperty(d, b->serve.proxy_win, b->proxy_prop);
     }
     b->serve.pdata = NULL;
     b->serve.pnbytes = 0;
@@ -849,6 +853,10 @@ bool mw_broker_capture_prop(Display *d, Window w, Atom property, Atom type,
     b->serve.pformat = format;
     b->serve.pnitems = nitems;
     b->serve.got_prop = true;
+    /* Delete the captured property from our proxy window immediately so large
+     * payloads do not accumulate in RAM until display close. */
+    MwWindow *pw = mw_window(d, w);
+    if (pw) mw_del_prop(d, pw, property);
     TR("captured prop w=0x%lx prop=%lu type=%lu fmt=%d n=%lu\n",
        (unsigned long)w, (unsigned long)property, (unsigned long)type, format,
        nitems);
@@ -912,14 +920,18 @@ static void xfer_read(Display *d)
          * Waiting out the deadline on a closed socket spun both threads --
          * it stays readable at EOF -- and delayed the answer by 5 s. */
         if (eof || now_ms() >= b->xfer.deadline_ms) {
-            /* give up */
-            close(b->xfer.fd);
+            /* Clear xfer_fd before closing so broker_thread cannot poll a
+             * reused descriptor. */
+            int dead_fd = b->xfer.fd;
             b->xfer_fd = -1; b->xfer.fd = -1; b->xfer.active = false;
-            XSelectionEvent se; memset(&se, 0, sizeof se);
-            se.type = SelectionNotify; se.display = d;
-            se.requestor = b->xfer.requestor; se.selection = b->xfer.selection;
-            se.target = b->xfer.target; se.property = None; se.time = b->xfer.time;
-            mw_put_event(d, (XEvent *)&se);
+            if (dead_fd >= 0) close(dead_fd);
+            mw_send_selection_notify(d, b->xfer.requestor, b->xfer.selection,
+                                     b->xfer.target, None, b->xfer.time);
+            if (b->xfer.cap > 65536) {
+                free(b->xfer.buf);
+                b->xfer.buf = NULL;
+                b->xfer.cap = 0;
+            }
             b->xfer.len = 0;
             xfer_next(d);
         }
@@ -935,13 +947,14 @@ static void xfer_read(Display *d)
      * for the one that matches. */
     {
         unsigned rid = 0;
-        if (sscanf(buf + 2, "%u", &rid) != 1 || rid != b->xfer.id) {
+        if (b->xfer.len < 2 || sscanf(buf + 2, "%u", &rid) != 1 || rid != b->xfer.id) {
             TR("xfer ignoring reply id=%u (want %u)\n", rid, b->xfer.id);
             b->xfer.len = 0;
             return;
         }
     }
 
+    bool ok = false;
     if (buf[0] == 'R') {
         /* refused */
     } else if (buf[0] == 'D') {
@@ -953,11 +966,11 @@ static void xfer_read(Display *d)
         char *p = buf + 2;
         /* D <id> <sel> <target> <prop> <type> <format> <nitems> <nbytes> <hex>\n */
         if (sscanf(p, "%u %511s %511s %511s %511s %d %lu %zu",
-                   &rid, hs, ht, hp, hy, &fmt, &nit, &nbytes) == 8) {
-            char *hx = strchr(nl, '\n');
-            (void)hx;
+                   &rid, hs, ht, hp, hy, &fmt, &nit, &nbytes) == 8 &&
+            nbytes <= (size_t)(128u << 20)) {
             char *hex = nl + 1;
-            unsigned char *data = malloc(nbytes ? nbytes : 1);
+            unsigned char *data = (fmt == 8 || fmt == 16 || fmt == 32)
+                                  ? malloc(nbytes ? nbytes : 1) : NULL;
             char tname[256] = "";
             hexdec(hy, (unsigned char *)tname, sizeof tname - 1);
             char tgname[256] = "";
@@ -968,7 +981,6 @@ static void xfer_read(Display *d)
             /* nitems and format come from the peer: they must describe no
              * more than the bytes that actually arrived. */
             size_t unit = fmt == 32 ? 4 : fmt == 16 ? 2 : 1;
-            if (data && (fmt != 8 && fmt != 16 && fmt != 32)) { free(data); data = NULL; }
             if (data) {
                 size_t got = hexdec(hex, data, nbytes);
                 if (nit > got / unit) nit = got / unit;
@@ -986,35 +998,33 @@ static void xfer_read(Display *d)
                         XChangeProperty(d, req, prop, type, 32, PropModeReplace,
                                         (const unsigned char *)l, (int)nit);
                         free(l);
+                        ok = true;
                     }
-                } else if (got > 0) {
+                } else {
                     XChangeProperty(d, req, prop, type, fmt, PropModeReplace,
                                     data, (int)nit);
+                    ok = true;
                 }
                 free(data);
             }
         }
     }
     /* post the SelectionNotify */
-    bool ok = (buf[0] == 'D');
-    XSelectionEvent se;
-    memset(&se, 0, sizeof se);
-    se.type = SelectionNotify;
-    se.display = d;
-    se.requestor = req;
-    se.selection = sel;
-    se.target = tgt;
-    se.property = ok ? prop : None;
-    se.time = t;
-    mw_put_event(d, (XEvent *)&se);
+    mw_send_selection_notify(d, req, sel, tgt, ok ? prop : None, t);
     TR("xfer posted notify req=%lu prop=%lu qcount=%d\n", req, prop, dp->qcount);
 
     TR("xfer reply %c ok=%d sel=%lu target=%lu\n", buf[0], ok,
        (unsigned long)sel, (unsigned long)tgt);
-    close(b->xfer.fd);
+    int dead_fd = b->xfer.fd;
     b->xfer_fd = -1;
     b->xfer.fd = -1;
     b->xfer.active = false;
+    if (dead_fd >= 0) close(dead_fd);
+    if (b->xfer.cap > 65536) {
+        free(b->xfer.buf);
+        b->xfer.buf = NULL;
+        b->xfer.cap = 0;
+    }
     b->xfer.len = 0;
     xfer_next(d);
 }

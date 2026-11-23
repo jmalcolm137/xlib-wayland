@@ -75,6 +75,15 @@ void mw_set_plane_mask(MwCanvas *c, unsigned long plane_mask);
 /* Clip management, in drawable coordinates. */
 void mw_clip_rects(MwCanvas *c, const XRectangle *r, int n, int x_org, int y_org);
 void mw_clip_mask(MwCanvas *c, MwSurface *mask, int x_org, int y_org);
+/* Save/restore canvas state and intersect additional clip rects (used by the
+ * window-tree compositor so a single canvas spans the whole frame). */
+void mw_canvas_save(MwCanvas *c);
+void mw_canvas_restore(MwCanvas *c);
+void mw_canvas_clip_rect(MwCanvas *c, int x, int y, int w, int h);
+void mw_canvas_clip_rects_intersect(MwCanvas *c, const XRectangle *r, int n,
+                                    int x_org, int y_org);
+void mw_canvas_blit_over(MwCanvas *dst, MwSurface *src, int dx, int dy,
+                         int w, int h);
 
 /* Paint the current clip region with the source. */
 void mw_paint(MwCanvas *c);
@@ -138,6 +147,9 @@ int mw_font_max_width(const MwFont *f);
 int mw_font_char_width(const MwFont *f, unsigned int ch); /* ch is a UCS-4 code */
 int mw_font_char_lbearing(const MwFont *f, unsigned int ch);
 int mw_font_char_rbearing(const MwFont *f, unsigned int ch);
+/* Fetch width, lbearing, and rbearing in a single FreeType glyph load. */
+void mw_font_char_metrics(const MwFont *f, unsigned int ch,
+                          int *width, int *lbearing, int *rbearing);
 /* FreeType glyph index for a UCS-4 code, and the underlying face (for Xft). */
 int mw_font_char_index(const MwFont *f, unsigned int ch);
 void *mw_font_ft_face(const MwFont *f);

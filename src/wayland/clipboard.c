@@ -509,11 +509,15 @@ static void source_handle_send(Display *d, void *proxy, const char *mime, int32_
     sv->fd = fd;
     sv->selection = s->selection;
     sv->property = mw_intern_atom(d, "MW_CLIP_DATA", False);
-    if (mime_rank(mime) >= 0 || mime_wants_utf8(mime)) {
-        /* A text request: pull X STRING (Latin-1) and convert to UTF-8 when the
-         * peer asked for UTF-8. */
+    if (mime_wants_utf8(mime)) {
+        /* Prefer UTF8_STRING so non-Latin-1 Unicode survives X -> Wayland;
+         * if the X owner refuses UTF8_STRING, mw_clipboard_serve_notify falls
+         * back to XA_STRING with Latin-1 -> UTF-8 conversion. */
+        sv->target = mw_intern_atom(d, "UTF8_STRING", False);
+        sv->to_utf8 = false;
+    } else if (mime_rank(mime) >= 0) {
         sv->target = XA_STRING;
-        sv->to_utf8 = mime_wants_utf8(mime);
+        sv->to_utf8 = false;
     } else {
         /* Non-text: convert the X target atom named by the MIME itself. */
         sv->target = mw_intern_atom(d, mime, False);
@@ -712,14 +716,18 @@ static void dd_enter(void *data, struct wl_data_device *dd, uint32_t serial,
     /* A drag (not a clipboard selection) entered one of our surfaces.  The
      * compositor sends data_offer first, so claim it from pending_offer. */
     MwWlOffer *o = NULL;
-    if (dp->pending_offer && dp->pending_offer->offer == offer) {
-        o = dp->pending_offer;
-        dp->pending_offer = NULL;
-    } else {
-        o = calloc(1, sizeof *o);
-        o->offer = offer;
-        o->d = d;
-        wl_data_offer_add_listener(offer, &offer_listener, o);
+    if (offer) {
+        if (dp->pending_offer && dp->pending_offer->offer == offer) {
+            o = dp->pending_offer;
+            dp->pending_offer = NULL;
+        } else {
+            o = calloc(1, sizeof *o);
+            if (o) {
+                o->offer = offer;
+                o->d = d;
+                wl_data_offer_add_listener(offer, &offer_listener, o);
+            }
+        }
     }
     offer_free(dp->drag_offer);
     dp->drag_offer = o;
@@ -929,6 +937,9 @@ void mw_clipboard_fini(Display *d)
         dp->clip_serve.active = false;
         dp->clip_serve.fd = -1;
     }
+    free(dp->clip_serve.pend);
+    dp->clip_serve.pend = NULL;
+    dp->clip_serve.pend_len = dp->clip_serve.pend_off = dp->clip_serve.pend_cap = 0;
     offer_free(dp->wayland_offer);
     offer_free(dp->pending_offer);
     offer_free(dp->drag_offer);
@@ -1037,7 +1048,7 @@ static void serve_end(XDisplayImpl *dp)
     sv->fd = -1;
     free(sv->pend);
     sv->pend = NULL;
-    sv->pend_len = sv->pend_off = 0;
+    sv->pend_len = sv->pend_off = sv->pend_cap = 0;
     sv->incr = false;
     sv->incr_prop = None;
     sv->active = false;
@@ -1047,13 +1058,21 @@ static void serve_end(XDisplayImpl *dp)
 static void serve_append(MwClipServe *sv, const unsigned char *b, size_t n)
 {
     if (!n) return;
-    if (sv->pend && sv->pend_off == sv->pend_len) {   /* all written: restart */
-        sv->pend_len = sv->pend_off = 0;
+    if (sv->pend && sv->pend_off > 0) {
+        size_t rem = sv->pend_len - sv->pend_off;
+        if (rem > 0) memmove(sv->pend, sv->pend + sv->pend_off, rem);
+        sv->pend_len = rem;
+        sv->pend_off = 0;
     }
-    unsigned char *nb = realloc(sv->pend, sv->pend_len + n);
-    if (!nb) return;
-    memcpy(nb + sv->pend_len, b, n);
-    sv->pend = nb;
+    if (sv->pend_len + n > sv->pend_cap) {
+        size_t ncap = sv->pend_cap ? sv->pend_cap * 2 : 4096;
+        while (ncap < sv->pend_len + n) ncap *= 2;
+        unsigned char *nb = realloc(sv->pend, ncap);
+        if (!nb) return;
+        sv->pend = nb;
+        sv->pend_cap = ncap;
+    }
+    memcpy(sv->pend + sv->pend_len, b, n);
     sv->pend_len += n;
 }
 
@@ -1107,7 +1126,8 @@ void mw_clipboard_handle_ready(Display *d)
      * answered, or the peer stopped reading) must not leak the pipe. */
     serve_flush(d);
     if (dp->clip_serve.active && now_ms() >= dp->clip_serve.deadline_ms)
-        serve_end(dp);    mw_io_update_wake(d);
+        serve_end(dp);
+    mw_io_update_wake(d);
 }
 
 /* ----------------------------------------------------- Wayland -> X serve */
@@ -1271,6 +1291,20 @@ bool mw_clipboard_serve_notify(Display *d, XSelectionEvent *se)
     MwClipServe *sv = &dp->clip_serve;
     if (!sv->active || dp->clip_window == None ||
         se->requestor != dp->clip_window) return false;
+
+    if (se->property == None) {
+        /* If the X owner refused UTF8_STRING (e.g. legacy Motif), fall back to
+         * XA_STRING and convert Latin-1 to UTF-8. */
+        Atom utf8 = mw_intern_atom(d, "UTF8_STRING", True);
+        if (utf8 != None && sv->target == utf8) {
+            sv->target = XA_STRING;
+            sv->to_utf8 = true;
+            sv->deadline_ms = now_ms() + CLIP_SERVE_TIMEOUT_MS;
+            XConvertSelection(d, sv->selection, XA_STRING, sv->property,
+                              mw_clip_window(d), CurrentTime);
+            return true;
+        }
+    }
 
     Atom type = None;
     int format = 0;

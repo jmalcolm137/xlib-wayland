@@ -73,26 +73,26 @@ static bool smp_interest(const char *name)
     const char *env = getenv("XLIB_WAYLAND_SHARE_PROPERTIES");
     if (!env || !*env || !name) return false;
     size_t len = strlen(name);
-    char  *list = strdup(env);
-    bool   ok = false;
-    if (!list) return false;
-    char *save_t = NULL;
-    for (char *t = strtok_r(list, ",", &save_t); t && !ok; t = strtok_r(NULL, ",", &save_t)) {
-        while (*t == ' ') t++;
-        size_t l = strlen(t);
-        if (l && len >= l && strncmp(name, t, l) == 0) ok = true;
+    const char *p = env;
+    while (*p) {
+        while (*p == ' ' || *p == ',') p++;
+        if (!*p) break;
+        const char *q = p;
+        while (*q && *q != ',') q++;
+        size_t l = (size_t)(q - p);
+        while (l > 0 && p[l - 1] == ' ') l--;
+        if (l > 0 && len >= l && strncmp(name, p, l) == 0) return true;
+        p = *q ? q + 1 : q;
     }
-    free(list);
-    return ok;
+    return false;
 }
 
 bool mw_smprop_is_shared(Display *d, Atom prop)
 {
-    const char *name = XGetAtomName(d, prop);
-    if (!name) return false;
-    bool ok = smp_interest(name);
-    XFree((char *)name);
-    return ok;
+    const char *env = getenv("XLIB_WAYLAND_SHARE_PROPERTIES");
+    if (!env || !*env) return false;
+    const char *name = mw_atom_name(d, prop);
+    return name ? smp_interest(name) : false;
 }
 
 static const char *hexc = "0123456789abcdef";
@@ -151,17 +151,19 @@ void mw_smprop_publish(Display *d, Atom prop, Atom type, int format,
         size_t cap = 0, len = 0;
         char   chunk[512];
         ssize_t n;
+        bool oom = false;
         while ((n = read(fd, chunk, sizeof chunk)) > 0) {
             if (len + (size_t)n + 1 > cap) {
                 cap = (len + (size_t)n + 1) * 2;
                 char *t = realloc(text, cap);
-                if (!t) break;
+                if (!t) { oom = true; break; }
                 text = t;
             }
             memcpy(text + len, chunk, (size_t)n);
             len += (size_t)n;
         }
-        if (!text) { text = malloc(1); }
+        if (oom) { free(text); text = NULL; }
+        else if (!text) { text = malloc(1); }
         if (text) {
             text[len] = 0;
             size_t pn = strlen(pname);

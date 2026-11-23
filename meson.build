@@ -81,7 +81,7 @@ xlib_sources = files(
   'src/xlib/xresources.c', 'src/xlib/xftbridge.c', 'src/xlib/render.c',
   'src/xlib/xshape.c', 'src/xlib/broker.c', 'src/xlib/smprops.c', 'src/xlib/dnd.c',
   'src/xlib/xsettings.c', 'src/xlib/fdio.c', 'src/xlib/xdnd.c', 'src/xlib/xfixes.c', 'src/xlib/xsync.c',
-  'src/xlib/xdamage.c', 'src/xlib/session.c', 'src/xlib/xinerama.c')
+  'src/xlib/xdamage.c', 'src/xlib/session.c', 'src/xlib/xinerama.c', 'src/xlib/util.c')
 
 # Installed as libX11.so.6 so that -lX11, dlopen("libX11.so.6") and the
 # transitive dependency of libXext/libXrender/libcairo all resolve to us.
@@ -90,6 +90,7 @@ libx11 = shared_library('X11',
   include_directories: inc,
   dependencies: [wl_dep, wcursor_dep, xkb_dep, cairo_dep, ft_dep, fc_dep,
                  pixman_dep, threads_dep, m_dep],
+  link_args: cc.get_supported_link_arguments(['-Wl,-Bsymbolic-functions']),
   version: '6.0.0',
   soversion: '6',
   install: true)

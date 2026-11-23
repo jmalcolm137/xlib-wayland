@@ -39,7 +39,9 @@ void mw_apply_gc(MwCanvas *c, Display *d, struct _XGC *gc)
     mw_set_operator(c, gc->function);
     mw_set_source_argb(c, 0xff000000u | (uint32_t)(gc->foreground & 0xffffff));
     mw_set_line(c, gc->line_width, gc->line_style, gc->cap_style, gc->join_style,
-                gc->dash_offset, &gc->dashes, 1);
+                gc->dash_offset,
+                gc->dash_list ? gc->dash_list : &gc->dashes,
+                gc->dash_list ? gc->ndash : 1);
     mw_set_fill(c, gc->fill_style, gc->fill_rule, gc->arc_mode);
     mw_set_plane_mask(c, gc->plane_mask);
     if (gc->xfont && gc->xfont->rfont)
@@ -190,6 +192,18 @@ int XCopyGC(Display *d, GC src, unsigned long mask, GC dest)
     CP(clip_x_origin, GCClipXOrigin); CP(clip_y_origin, GCClipYOrigin);
     CP(dash_offset, GCDashOffset); CP(dashes, GCDashList);
 #undef CP
+    if (mask & GCDashList) {
+        free(dest->dash_list);
+        dest->dash_list = NULL;
+        dest->ndash = 0;
+        if (src->dash_list && src->ndash > 0) {
+            dest->dash_list = malloc((size_t)src->ndash);
+            if (dest->dash_list) {
+                memcpy(dest->dash_list, src->dash_list, (size_t)src->ndash);
+                dest->ndash = src->ndash;
+            }
+        }
+    }
     if (mask & GCFont) mw_gc_set_xfont(d, dest, src->xfont);
 
     if (mask & GCClipMask) {
@@ -245,6 +259,7 @@ int XFreeGC(Display *d, GC gc)
 {
     if (!gc) return 0;
     free(gc->clip_rects);
+    free(gc->dash_list);
     if (gc->clip_region) XDestroyRegion(gc->clip_region);
     mw_gc_set_xfont(d, gc, NULL);
     mw_unregister(d, gc->gid);
@@ -270,7 +285,22 @@ int XSetTSOrigin(Display *d, GC gc, int x, int y) { (void)d; gc->ts_x_origin = x
 int XSetSubwindowMode(Display *d, GC gc, int m) { (void)d; gc->subwindow_mode = m; return 1; }
 int XSetGraphicsExposures(Display *d, GC gc, Bool b) { (void)d; gc->graphics_exposures = b; return 1; }
 int XSetDashes(Display *d, GC gc, int dash_offset, _Xconst char *dash_list, int n)
-{ (void)d; gc->dash_offset = dash_offset; gc->dashes = n ? dash_list[0] : 0; return 1; }
+{
+    (void)d;
+    gc->dash_offset = dash_offset;
+    gc->dashes = (n > 0 && dash_list) ? dash_list[0] : 0;
+    free(gc->dash_list);
+    gc->dash_list = NULL;
+    gc->ndash = 0;
+    if (n > 0 && dash_list) {
+        gc->dash_list = malloc((size_t)n);
+        if (gc->dash_list) {
+            memcpy(gc->dash_list, dash_list, (size_t)n);
+            gc->ndash = n;
+        }
+    }
+    return 1;
+}
 int XSetClipOrigin(Display *d, GC gc, int x, int y) { (void)d; gc->clip_x_origin = x; gc->clip_y_origin = y; return 1; }
 int XSetClipMask(Display *d, GC gc, Pixmap p)
 {
@@ -327,6 +357,12 @@ static void after_draw(Display *d, Drawable dr)
     if (win) mw_window_damage(win);
 }
 
+static void after_draw_rect(Display *d, Drawable dr, int x, int y, int w, int h)
+{
+    MwWindow *win = mw_window(d, dr);
+    if (win) mw_window_damage_rect(win, x, y, w, h);
+}
+
 int XDrawPoint(Display *d, Drawable dr, GC gc, int x, int y)
 {
     int w, h;
@@ -336,17 +372,21 @@ int XDrawPoint(Display *d, Drawable dr, GC gc, int x, int y)
     mw_rect(c, x, y, 1, 1);
     mw_fill_path(c);
     mw_canvas_end(c);
-    after_draw(d, dr);
+    after_draw_rect(d, dr, x, y, 1, 1);
     return 1;
 }
 
 int XDrawPoints(Display *d, Drawable dr, GC gc, XPoint *pts, int n, int mode)
 {
-    (void)mode;
     int w, h;
     MwCanvas *c = mw_canvas_for_drawable(d, dr, gc, &w, &h);
     if (!c) return 0;
-    for (int i = 0; i < n; i++) mw_rect(c, pts[i].x, pts[i].y, 1, 1);
+    int px = 0, py = 0;
+    for (int i = 0; i < n; i++) {
+        if (i == 0 || mode != CoordModePrevious) { px = pts[i].x; py = pts[i].y; }
+        else                                     { px += pts[i].x; py += pts[i].y; }
+        mw_rect(c, px, py, 1, 1);
+    }
     mw_set_fill(c, FillSolid, WindingRule, ArcPieSlice);
     mw_fill_path(c);
     mw_canvas_end(c);
@@ -374,11 +414,10 @@ int XDrawLines(Display *d, Drawable dr, GC gc, XPoint *pts, int n, int mode)
     MwCanvas *c = mw_canvas_for_drawable(d, dr, gc, &w, &h);
     if (!c) return 0;
     mw_set_snap(c, (gc->line_width <= 0 || (gc->line_width & 1)) ? 1 : 0);
-    mw_polygon(c, pts, n, 0, 0);
+    mw_polygon(c, pts, n, mode == CoordModePrevious ? 1 : 0, 0);
     mw_stroke_path(c);
     mw_canvas_end(c);
     after_draw(d, dr);
-    (void)mode;
     return 1;
 }
 
@@ -514,11 +553,11 @@ int XFillArcs(Display *d, Drawable dr, GC gc, XArc *arcs, int n)
 int XFillPolygon(Display *d, Drawable dr, GC gc, XPoint *pts, int n,
                  int shape, int mode)
 {
-    (void)shape; (void)mode;
+    (void)shape;
     int w, h;
     MwCanvas *c = mw_canvas_for_drawable(d, dr, gc, &w, &h);
     if (!c) return 0;
-    mw_polygon(c, pts, n, 0, 1);
+    mw_polygon(c, pts, n, mode == CoordModePrevious ? 1 : 0, 1);
     fill_path(c, gc, d);
     mw_canvas_end(c);
     after_draw(d, dr);
@@ -535,9 +574,23 @@ int XFillPolygon(Display *d, Drawable dr, GC gc, XPoint *pts, int n,
  * X_CopyArea/X_CopyPlane from Xproto.h. */
 #define MW_X_CopyArea   62
 #define MW_X_CopyPlane  63
-static void send_copy_exposures(Display *d, Drawable dst, GC gc, int major)
+static void send_copy_exposures(Display *d, Drawable dst, GC gc, int major,
+                                bool clipped, int dx, int dy, int w, int h)
 {
     if (!gc || !gc->graphics_exposures) return;
+    if (clipped && w > 0 && h > 0) {
+        XGraphicsExposeEvent ev;
+        memset(&ev, 0, sizeof ev);
+        ev.type = GraphicsExpose;
+        ev.display = d;
+        ev.drawable = dst;
+        ev.x = dx; ev.y = dy; ev.width = w; ev.height = h;
+        ev.count = 0;
+        ev.major_code = major;
+        ev.minor_code = 0;
+        mw_put_event(d, (XEvent *)&ev);
+        return;
+    }
     XNoExposeEvent ev;
     memset(&ev, 0, sizeof ev);
     ev.type = NoExpose;
@@ -552,12 +605,14 @@ static void send_copy_exposures(Display *d, Drawable dst, GC gc, int major)
  * destination with it: X leaves destination pixels whose source lies
  * outside the drawable untouched.  False when nothing is left. */
 static bool clip_to_source(int sw, int sh, int *sx, int *sy, int *w, int *h,
-                           int *dx, int *dy)
+                           int *dx, int *dy, bool *clipped)
 {
+    int ow = *w, oh = *h;
     if (*sx < 0) { *dx -= *sx; *w += *sx; *sx = 0; }
     if (*sy < 0) { *dy -= *sy; *h += *sy; *sy = 0; }
     if (*sx + *w > sw) *w = sw - *sx;
     if (*sy + *h > sh) *h = sh - *sy;
+    if (clipped) *clipped = (*w != ow || *h != oh);
     return *w > 0 && *h > 0;
 }
 
@@ -565,15 +620,18 @@ int XCopyArea(Display *d, Drawable src, Drawable dst, GC gc,
               int sx, int sy, unsigned int w, unsigned int h, int dx, int dy)
 {
 
-    if (getenv("MW_TRACE"))
+    if (MW_TRACE())
         fprintf(stderr, "MW: XCopyArea src=0x%lx dst=0x%lx (%d,%d)->(%d,%d) %ux%u%s\n",
                 src, dst, sx, sy, dx, dy, w, h, src == dst ? " SELF" : "");
     int sw, sh, dh2;
     mw_render_drain(d);
     MwSurface *ss = mw_drawable_surface(d, src, &sw, &sh, &dh2);
     int cw = (int)w, ch = (int)h;
-    if (!ss || !clip_to_source(sw, sh, &sx, &sy, &cw, &ch, &dx, &dy)) {
-        send_copy_exposures(d, dst, gc, MW_X_CopyArea);
+    int orig_dx = dx, orig_dy = dy;
+    bool clipped = false;
+    if (!ss || !clip_to_source(sw, sh, &sx, &sy, &cw, &ch, &dx, &dy, &clipped)) {
+        send_copy_exposures(d, dst, gc, MW_X_CopyArea, ss != NULL && clipped,
+                            orig_dx, orig_dy, (int)w, (int)h);
         return ss != NULL;
     }
     int dw, dhh;
@@ -581,8 +639,9 @@ int XCopyArea(Display *d, Drawable src, Drawable dst, GC gc,
     if (!c) return 0;
     mw_canvas_copy(c, ss, sx, sy, dx, dy, cw, ch);
     mw_canvas_end(c);
-    after_draw(d, dst);
-    send_copy_exposures(d, dst, gc, MW_X_CopyArea);
+    after_draw_rect(d, dst, dx, dy, cw, ch);
+    send_copy_exposures(d, dst, gc, MW_X_CopyArea, clipped,
+                        orig_dx, orig_dy, (int)w, (int)h);
     return 1;
 }
 
@@ -596,8 +655,11 @@ int XCopyPlane(Display *d, Drawable src, Drawable dst, GC gc,
     /* plane has exactly one bit set; its index selects the bit. */
     int bit = plane ? __builtin_ctzl(plane) : 0;
     int cw = (int)w, ch = (int)h;
-    if (!ss || !clip_to_source(sw, sh, &sx, &sy, &cw, &ch, &dx, &dy)) {
-        send_copy_exposures(d, dst, gc, MW_X_CopyPlane);
+    int orig_dx = dx, orig_dy = dy;
+    bool clipped = false;
+    if (!ss || !clip_to_source(sw, sh, &sx, &sy, &cw, &ch, &dx, &dy, &clipped)) {
+        send_copy_exposures(d, dst, gc, MW_X_CopyPlane, ss != NULL && clipped,
+                            orig_dx, orig_dy, (int)w, (int)h);
         return ss != NULL;
     }
     int dw, dhh;
@@ -606,7 +668,8 @@ int XCopyPlane(Display *d, Drawable src, Drawable dst, GC gc,
     mw_canvas_copy_plane(c, ss, sx, sy, dx, dy, cw, ch, bit,
                          (uint32_t)gc->foreground, (uint32_t)gc->background);
     mw_canvas_end(c);
-    after_draw(d, dst);
-    send_copy_exposures(d, dst, gc, MW_X_CopyPlane);
+    after_draw_rect(d, dst, dx, dy, cw, ch);
+    send_copy_exposures(d, dst, gc, MW_X_CopyPlane, clipped,
+                        orig_dx, orig_dy, (int)w, (int)h);
     return 1;
 }

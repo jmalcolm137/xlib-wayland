@@ -143,21 +143,33 @@ static void link_top(MwWindow *parent, MwWindow *win)
     parent->last_child = win;
 }
 
+void mw_window_damage_rect(MwWindow *win, int x, int y, int w, int h)
+{
+    if (!win || w <= 0 || h <= 0) return;
+    int ox = x, oy = y;
+    MwWindow *top = win;
+    while (top && !top->tl) {
+        ox += top->x;
+        oy += top->y;
+        top = top->parent;
+    }
+    if (top && top->tl)
+        mw_toplevel_damage_rect(top->tl, ox, oy + top->tl->tb_h, w, h);
+
+    if (win->d && MWD(win->d)->damages) {
+        int dx = x, dy = y;
+        for (MwWindow *n = win; n; n = n->parent) {
+            mw_xdamage_notify(win->d, n->id, dx, dy, w, h);
+            dx += n->x;
+            dy += n->y;
+        }
+    }
+}
+
 void mw_window_damage(MwWindow *win)
 {
-    MwWindow *w = win;
-    while (w && !w->tl) w = w->parent;
-    /* Go through mw_toplevel_damage() so the coalescing timestamp is updated;
-     * setting ->dirty directly bypassed it and the renderer then painted
-     * immediately, mid-repaint, showing half-drawn text. */
-    if (w && w->tl) mw_toplevel_damage(w->tl);
-
-    /* Tell any DAMAGE objects on this window or its ancestors: GDK creates one
-     * on the toplevel of a composited (RGBA) window and repaints from the
-     * notifications. */
-    if (MWD(win->d)->damages)
-        for (MwWindow *n = win; n; n = n->parent)
-            mw_xdamage_notify(win->d, n->id, 0, 0, n->w, n->h);
+    if (!win) return;
+    mw_window_damage_rect(win, 0, 0, win->w, win->h);
 }
 
 /* --------------------------------------------------- synthetic WM window */
@@ -371,14 +383,18 @@ MwWindow *mw_create_window(Display *d, Window parent, int x, int y, int w, int h
      * XCreateSimpleWindow (the common case), so readback kept only the low
      * byte of each pixel -- rendercheck saw blue but red=green=0 on all its
      * window destinations. */
-    if (depth == 0) {
-        MwWindow *par = mw_window(d, parent);
-        depth = par ? par->depth
-                    : (MWSCR(d)->root_depth ? MWSCR(d)->root_depth : 24);
-    }
-    win->depth = depth > 0 ? depth : 24;
     win->c_class = (int)c_class;
     win->input_only = (c_class == InputOnly);
+    if (win->input_only) {
+        win->depth = 0;
+    } else {
+        if (depth == 0) {
+            MwWindow *par = mw_window(d, parent);
+            depth = par ? par->depth
+                        : (MWSCR(d)->root_depth ? MWSCR(d)->root_depth : 24);
+        }
+        win->depth = depth > 0 ? depth : 24;
+    }
     win->created = true;
     win->mapped = false;
     win->map_state = IsUnmapped;
@@ -580,6 +596,7 @@ static void destroy_tree(Display *d, MwWindow *win, bool top)
     unlink_child(win);
     mw_xfixes_window_gone(d, win->id);
     if (MWD(d)->damages) mw_xdamage_drawable_gone(d, win->id);
+    if (MWD(d)->xi_selects) mw_xi2_window_gone(d, win->id);
     while (win->props) { MwProp *p = win->props; win->props = p->next;
                          free(p->data); free(p); }
     if (win->surface) mw_surface_destroy(win->surface);
@@ -758,11 +775,18 @@ MwWindow *mw_any_mapped_toplevel(Display *d, MwWindow *avoid)
 void mw_unmap_window(Display *d, MwWindow *win)
 {
     if (!win || !win->mapped) return;
-    if (getenv("MW_TRACE"))
+    if (MW_TRACE())
         fprintf(stderr, "MW: unmap 0x%lx override=%d toplevel=%d\n",
                 win->id, win->override_redirect, win->tl != NULL);
     win->mapped = false;
     win->map_state = IsUnmapped;
+    /* Release backing store for unmapped non-toplevel windows unless the client
+     * explicitly requested backing_store; they receive Expose on remap. */
+    if (win->surface && !win->tl && win->backing_store == NotUseful) {
+        mw_surface_destroy(win->surface);
+        win->surface = NULL;
+        win->surface_valid = false;
+    }
     /* A grab whose window (or an ancestor of it) is unmapped becomes
      * unviewable, and X releases it. */
     {
@@ -791,10 +815,20 @@ void mw_unmap_window(Display *d, MwWindow *win)
             ue.window = win->id; ue.from_configure = False;
             mw_put_event(d, (XEvent *)&ue);
         }
-        mw_window_damage(win->parent);
-        /* siblings below become exposed */
-        for (MwWindow *c = win->parent->children; c; c = c->next_sib)
-            if (c->mapped) mw_window_expose(c, 0, 0, c->w, c->h);
+        mw_window_damage_rect(win->parent, win->x - win->border_width,
+                              win->y - win->border_width,
+                              win->w + 2 * win->border_width,
+                              win->h + 2 * win->border_width);
+        /* Only mapped siblings stacked below win whose bounds intersect it
+         * become exposed. */
+        int wx0 = win->x, wy0 = win->y, wx1 = win->x + win->w, wy1 = win->y + win->h;
+        for (MwWindow *c = win->parent->children; c && c != win; c = c->next_sib) {
+            if (!c->mapped) continue;
+            int ix0 = MW_MAX(wx0, c->x), iy0 = MW_MAX(wy0, c->y);
+            int ix1 = MW_MIN(wx1, c->x + c->w), iy1 = MW_MIN(wy1, c->y + c->h);
+            if (ix1 > ix0 && iy1 > iy0)
+                mw_window_expose(c, ix0 - c->x, iy0 - c->y, ix1 - ix0, iy1 - iy0);
+        }
     }
     if (win->event_mask & StructureNotifyMask) {
         XUnmapEvent ue;
@@ -808,7 +842,7 @@ void mw_window_expose(MwWindow *win, int x, int y, int w, int h)
 {
     Display *d = win->d;
     if (!d) return;
-    if (getenv("MW_TRACE"))
+    if (MW_TRACE())
         fprintf(stderr, "MW: expose win=0x%lx %d,%d %dx%d\n", win->id, x, y, w, h);
     if (win->event_mask & ExposureMask) {
         XExposeEvent ee;
@@ -1224,13 +1258,12 @@ static void clear_win_rect(MwWindow *win, int x, int y, int w, int h)
 int XClearWindow(Display *d, Window w)
 {
     MwWindow *win = mw_window(d, w);
-    if (!win) return 0;
-    mw_window_ensure_surface(win);
-    clear_win_rect(win, 0, 0, win->w, win->h);
+    if (!win || win->input_only) return 0;
+    if (win->surface || win->background_pixmap != None) {
+        mw_window_ensure_surface(win);
+        clear_win_rect(win, 0, 0, win->w, win->h);
+    }
     mw_window_damage(win);
-    /* XClearWindow == XClearArea(..., exposures=False): it must NOT generate
-     * an Expose event.  Generating one makes clear-then-redraw clients (XV)
-     * loop forever. */
     return 1;
 }
 
@@ -1238,11 +1271,7 @@ int XClearArea(Display *d, Window w, int x, int y,
                unsigned int width, unsigned int height, Bool exposures)
 {
     MwWindow *win = mw_window(d, w);
-    if (!win) return 0;
-    mw_window_ensure_surface(win);
-    /* A zero width/height extends to the window's edge; the area is then
-     * clipped to the window (outside it there is nothing to clear or
-     * expose). */
+    if (!win || win->input_only) return 0;
     int cw = width ? (int)width : win->w - x;
     int ch = height ? (int)height : win->h - y;
     if (x < 0) { cw += x; x = 0; }
@@ -1250,11 +1279,14 @@ int XClearArea(Display *d, Window w, int x, int y,
     if (x + cw > win->w) cw = win->w - x;
     if (y + ch > win->h) ch = win->h - y;
     if (cw <= 0 || ch <= 0) return 1;
-    if (getenv("MW_TRACE"))
+    if (MW_TRACE())
         fprintf(stderr, "MW: XClearArea 0x%lx %d,%d %dx%d exposures=%d\n",
                 w, x, y, cw, ch, exposures);
-    clear_win_rect(win, x, y, cw, ch);
-    mw_window_damage(win);
+    if (win->surface || win->background_pixmap != None) {
+        mw_window_ensure_surface(win);
+        clear_win_rect(win, x, y, cw, ch);
+    }
+    mw_window_damage_rect(win, x, y, cw, ch);
     if (exposures) mw_window_expose(win, x, y, cw, ch);
     return 1;
 }
@@ -1298,7 +1330,7 @@ Status XGetWindowAttributes(Display *d, Window w, XWindowAttributes *attr)
     attr->width = win->w; attr->height = win->h;
     attr->border_width = win->border_width;
     attr->depth = win->depth;
-    attr->visual = &MWD(d)->visual;
+    attr->visual = win->depth >= 32 ? &MWD(d)->visual32 : &MWD(d)->visual;
     attr->root = MWSCR(d)->root;
     attr->class = win->c_class;
     attr->bit_gravity = win->bit_gravity;

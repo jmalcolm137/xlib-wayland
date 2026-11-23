@@ -98,9 +98,8 @@ static void fill_font_struct(Display *d, MwXFont *xf, XFontStruct *fs)
 
     XCharStruct *pc = fs->per_char;
     for (int c = 0; c < 256; c++) {
-        int w = mw_font_char_width(xf->rfont, (unsigned)c);
-        int lb = mw_font_char_lbearing(xf->rfont, (unsigned)c);
-        int rsb = mw_font_char_rbearing(xf->rfont, (unsigned)c); /* right side bearing */
+        int w = 0, lb = 0, rsb = 0;
+        mw_font_char_metrics(xf->rfont, (unsigned)c, &w, &lb, &rsb);
         pc[c].lbearing = (short)lb;
         /* X's rbearing is where the ink ends, measured from the origin:
          * the advance less the right side bearing. */
@@ -275,7 +274,7 @@ static int text_extents(XFontStruct *fs, const unsigned int *cs, int n, int *dir
 int XTextExtents(XFontStruct *fs, _Xconst char *s, int n, int *dir,
                  int *font_ascent, int *font_descent, XCharStruct *overall)
 {
-    if (n < 0) n = 0;
+    if (n <= 0 || !s) return text_extents(fs, NULL, 0, dir, font_ascent, font_descent, overall);
     unsigned int stackbuf[256], *cs = n <= 256 ? stackbuf : malloc(sizeof *cs * (size_t)n);
     if (!cs) return 0;
     for (int i = 0; i < n; i++) cs[i] = (unsigned char)s[i];
@@ -289,7 +288,7 @@ int XTextExtents(XFontStruct *fs, _Xconst char *s, int n, int *dir,
 int XTextExtents16(XFontStruct *fs, _Xconst XChar2b *s, int n, int *dir,
                    int *font_ascent, int *font_descent, XCharStruct *overall)
 {
-    if (n < 0) n = 0;
+    if (n <= 0 || !s) return text_extents(fs, NULL, 0, dir, font_ascent, font_descent, overall);
     unsigned int stackbuf[256], *cs = n <= 256 ? stackbuf : malloc(sizeof *cs * (size_t)n);
     if (!cs) return 0;
     for (int i = 0; i < n; i++)
@@ -411,46 +410,47 @@ int XDrawImageString(Display *d, Drawable dr, GC gc, int x, int y,
                      _Xconst char *s, int length)
 { return draw_latin1(d, dr, gc, x, y, s, length, 1); }
 
-int XDrawString16(Display *d, Drawable dr, GC gc, int x, int y,
-                  _Xconst XChar2b *s, int length)
+static int draw_string16_common(Display *d, Drawable dr, GC gc, int x, int y,
+                                _Xconst XChar2b *s, int length, int fill_bg)
 {
-    char *buf = calloc((size_t)length * 4 + 1, 1);
+    if (!s || length <= 0) return 0;
+    char stack_buf[256];
+    char *buf = (size_t)length * 4 + 1 <= sizeof stack_buf
+        ? stack_buf : malloc((size_t)length * 4 + 1);
+    if (!buf) return 0;
     int o = 0;
     for (int i = 0; i < length; i++) {
         unsigned int c = ((unsigned)s[i].byte1 << 8) | s[i].byte2;
         char tmp[8]; int n;
         char2b_to_utf8(c, tmp, &n);
-        memcpy(buf + o, tmp, n); o += n;
+        memcpy(buf + o, tmp, (size_t)n); o += n;
     }
-    int r = draw_glyphs(d, dr, gc, x, y, (unsigned char *)buf, o, 0);
-    free(buf);
+    buf[o] = 0;
+    int r = draw_glyphs(d, dr, gc, x, y, (unsigned char *)buf, o, fill_bg);
+    if (buf != stack_buf) free(buf);
     return r;
 }
 
+int XDrawString16(Display *d, Drawable dr, GC gc, int x, int y,
+                  _Xconst XChar2b *s, int length)
+{ return draw_string16_common(d, dr, gc, x, y, s, length, 0); }
+
 int XDrawImageString16(Display *d, Drawable dr, GC gc, int x, int y,
                        _Xconst XChar2b *s, int length)
-{
-    char *buf = calloc((size_t)length * 4 + 1, 1);
-    int o = 0;
-    for (int i = 0; i < length; i++) {
-        unsigned int c = ((unsigned)s[i].byte1 << 8) | s[i].byte2;
-        char tmp[8]; int n;
-        char2b_to_utf8(c, tmp, &n);
-        memcpy(buf + o, tmp, n); o += n;
-    }
-    int r = draw_glyphs(d, dr, gc, x, y, (unsigned char *)buf, o, 1);
-    free(buf);
-    return r;
-}
+{ return draw_string16_common(d, dr, gc, x, y, s, length, 1); }
 
 int XDrawText16(Display *d, Drawable dr, GC gc, int x, int y,
                 XTextItem16 *items, int nitems)
 {
+    if (!items || nitems <= 0) return 1;
     for (int i = 0; i < nitems; i++) {
-        if (items[i].nchars > 0)
+        if (items[i].font != None) XSetFont(d, gc, items[i].font);
+        x += items[i].delta;
+        if (items[i].nchars > 0) {
             XDrawString16(d, dr, gc, x, y, items[i].chars, items[i].nchars);
-        x += XTextWidth16(gc->xfont ? gc->xfont->fs : NULL,
-                          items[i].chars, items[i].nchars) + items[i].delta;
+            x += XTextWidth16(gc->xfont ? gc->xfont->fs : NULL,
+                              items[i].chars, items[i].nchars);
+        }
     }
     return 1;
 }

@@ -15,7 +15,9 @@ xcb_connection_t *XGetXCBConnection(Display *dpy)
     static int resolved;
     if (!resolved) {
         resolved = 1;
-        conn = xcb_connect(NULL, NULL);
+        /* Use a deliberately absent display name rather than NULL so libxcb
+         * never reads $DISPLAY and connects to a host XWayland server. */
+        conn = xcb_connect("mw-invalid:0", NULL);
     }
     return conn;
 }

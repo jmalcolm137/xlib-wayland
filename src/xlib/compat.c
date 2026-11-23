@@ -13,7 +13,7 @@ int XSelectInput(Display *d, Window w, long event_mask)
 {
     MwWindow *win = mw_window(d, w);
     if (!win) return 0;
-    if (getenv("MW_TRACE"))
+    if (MW_TRACE())
         fprintf(stderr, "MW: XSelectInput 0x%lx mask=0x%lx\n", w, event_mask);
     win->event_mask = event_mask;
     win->all_event_masks |= event_mask;
@@ -133,6 +133,13 @@ Status XTextPropertyToStringList(XTextProperty *tp, char ***list_rtrn,
     *count_rtrn = 0;
     if (!tp || tp->format != 8 || tp->encoding != XA_STRING || !tp->value)
         return 0;
+    if (tp->nitems == 0) {
+        char **v = calloc(1, sizeof(char *));
+        if (!v) return 0;
+        *list_rtrn = v;
+        *count_rtrn = 0;
+        return 1;
+    }
     /* NUL-separated; the last string need not end in a NUL (libX11 counts
      * NULs + 1, so "foo" from XStoreName is one string, not none). */
     int count = 1;
@@ -263,6 +270,16 @@ int XDeleteContext(Display *d, XID rid, XContext context)
     return XCNOENT;
 }
 
+void mw_contexts_fini(Display *d)
+{
+    XDisplayImpl *dp = MWD(d);
+    while (dp->contexts) {
+        struct MwContext *n = dp->contexts->next;
+        free(dp->contexts);
+        dp->contexts = n;
+    }
+}
+
 /* ----------------------------------------------------------- Xrm default */
 
 /* As in libX11: an Xrm lookup of "program.name" / "Program.Name" in the
@@ -301,26 +318,64 @@ Bool XQueryExtension(Display *d, _Xconst char *name, int *major_opcode,
                      int *first_event, int *first_error)
 {
     (void)d;
-    if (getenv("MW_TRACE"))
+    if (MW_TRACE())
         fprintf(stderr, "MW: XQueryExtension \"%s\"\n", name ? name : "(null)");
     if (mw_xi2_query_extension(name, major_opcode, first_event, first_error))
         return True;
     if (name && strcmp(name, "RENDER") == 0) {
-        /* Render is implemented in render.c and on by default.  Set
-         * MW_RENDER=0 to fall back to cairo's core-protocol path (useful for
-         * isolating Render bugs). */
-        const char *gate = getenv("MW_RENDER");
-        if (gate && (gate[0] == '0' || gate[0] == 'n' || gate[0] == 'N'))
+        if (mw_trace_flags() & MW_TF_NO_RENDER)
             return False;
         if (major_opcode) *major_opcode = mw_render_opcode();
+        if (first_event) *first_event = 0;
+        if (first_error) *first_error = 142;
+        return True;
+    }
+    if (name && strcmp(name, "SHAPE") == 0) {
+        if (major_opcode) *major_opcode = 139;
+        if (first_event) *first_event = 64;
+        if (first_error) *first_error = 64;
+        return True;
+    }
+    if (name && strcmp(name, "RANDR") == 0) {
+        if (major_opcode) *major_opcode = 140;
+        if (first_event) *first_event = 90;
+        if (first_error) *first_error = 90;
+        return True;
+    }
+    if (name && strcmp(name, "XFIXES") == 0) {
+        if (major_opcode) *major_opcode = 141;
+        if (first_event) *first_event = MW_XFIXES_EVENT_BASE;
+        if (first_error) *first_error = MW_XFIXES_ERROR_BASE;
+        return True;
+    }
+    if (name && strcmp(name, "DAMAGE") == 0) {
+        if (major_opcode) *major_opcode = 142;
+        if (first_event) *first_event = MW_XDAMAGE_EVENT_BASE;
+        if (first_error) *first_error = MW_XDAMAGE_ERROR_BASE;
+        return True;
+    }
+    if (name && strcmp(name, "MIT-SHM") == 0) {
+        if (major_opcode) *major_opcode = 143;
+        if (first_event) *first_event = MW_XSHM_EVENT_BASE;
+        if (first_error) *first_error = 128;
+        return True;
+    }
+    if (name && strcmp(name, "SYNC") == 0) {
+        if (major_opcode) *major_opcode = 144;
+        if (first_event) *first_event = MW_XSYNC_EVENT_BASE;
+        if (first_error) *first_error = MW_XSYNC_ERROR_BASE;
+        return True;
+    }
+    if (name && strcmp(name, "Composite") == 0) {
+        if (major_opcode) *major_opcode = 145;
         if (first_event) *first_event = 0;
         if (first_error) *first_error = 0;
         return True;
     }
-    if (name && (strcmp(name, "SHAPE") == 0 || strcmp(name, "RANDR") == 0)) {
-        if (major_opcode) *major_opcode = strcmp(name, "SHAPE") ? 140 : 139;
-        if (first_event) *first_event = strcmp(name, "SHAPE") ? 90 : 64;
-        if (first_error) *first_error = 64;
+    if (name && strcmp(name, "XINERAMA") == 0) {
+        if (major_opcode) *major_opcode = 146;
+        if (first_event) *first_event = 0;
+        if (first_error) *first_error = 0;
         return True;
     }
     if (major_opcode) *major_opcode = 0;
@@ -363,13 +418,17 @@ XExtCodes *XInitExtension(Display *d, _Xconst char *name)
 char **XListExtensions(Display *d, int *nextensions)
 {
     (void)d;
-    char **e = calloc(5, sizeof(char *));
-    e[0] = strdup("SHAPE");
-    e[1] = strdup("RANDR");
-    e[2] = strdup("RENDER");
-    e[3] = strdup(mw_xi2_extension_name());
-    e[4] = NULL;
-    if (nextensions) *nextensions = 4;
+    static const char *const base[] = {
+        "SHAPE", "RANDR", "RENDER", "XFIXES", "DAMAGE",
+        "MIT-SHM", "SYNC", "Composite", "XINERAMA"
+    };
+    int n = (int)(sizeof base / sizeof base[0]) + 1;
+    char **e = calloc((size_t)n + 1, sizeof(char *));
+    if (!e) { if (nextensions) *nextensions = 0; return NULL; }
+    for (int i = 0; i < n - 1; i++) e[i] = strdup(base[i]);
+    e[n - 1] = strdup(mw_xi2_extension_name());
+    e[n] = NULL;
+    if (nextensions) *nextensions = n;
     return e;
 }
 

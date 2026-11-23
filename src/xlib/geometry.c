@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdbool.h>
 
 /* libX11's ParseGeom.c.  Offsets come back signed: "-10" is x == -10 with
@@ -30,7 +31,8 @@ int XParseGeometry(_Xconst char *string, int *x, int *y,
     if (!string || !*string) return NoValue;
     if (*string == '=') string++;
     p = string;
-    if (*p != '+' && *p != '-' && *p != 'x') {
+    if (*p != '+' && *p != '-' && *p != 'x' && *p != 'X') {
+        if (!isdigit((unsigned char)*p)) return 0;
         tw = (unsigned int)read_integer(p, &next);
         if (p == next) return 0;
         p = next;
@@ -38,6 +40,7 @@ int XParseGeometry(_Xconst char *string, int *x, int *y,
     }
     if (*p == 'x' || *p == 'X') {
         p++;
+        if (!isdigit((unsigned char)*p)) return 0;
         th = (unsigned int)read_integer(p, &next);
         if (p == next) return 0;
         p = next;
@@ -47,6 +50,7 @@ int XParseGeometry(_Xconst char *string, int *x, int *y,
         if (*p == '-') mask |= XNegative;
         bool neg = *p == '-';
         p++;
+        if (!isdigit((unsigned char)*p)) return 0;
         tx = read_integer(p, &next);
         if (p == next) return 0;
         if (neg) tx = -tx;
@@ -56,6 +60,7 @@ int XParseGeometry(_Xconst char *string, int *x, int *y,
             if (*p == '-') mask |= YNegative;
             neg = *p == '-';
             p++;
+            if (!isdigit((unsigned char)*p)) return 0;
             ty = read_integer(p, &next);
             if (p == next) return 0;
             if (neg) ty = -ty;

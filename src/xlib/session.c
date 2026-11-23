@@ -60,7 +60,7 @@ void mw_session_init(Display *d)
     struct sockaddr_un sa;
     memset(&sa, 0, sizeof sa);
     sa.sun_family = AF_UNIX;
-    snprintf(sa.sun_path, sizeof sa.sun_path, "%s", dp->session_path);
+    memcpy(sa.sun_path, dp->session_path, (size_t)w + 1);
     if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0 ||
         listen(fd, 8) != 0) {
         close(fd);

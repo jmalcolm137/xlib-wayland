@@ -177,7 +177,7 @@ Bool XShmPutImage(Display *dpy, Drawable d, GC gc, XImage *image,
         ce.type = MW_XSHM_EVENT_BASE + ShmCompletion;
         ce.display = dpy;
         ce.drawable = d;
-        ce.major_code = 0;
+        ce.major_code = 143;                /* MIT-SHM major opcode */
         ce.minor_code = 3;                  /* X_ShmPutImage */
         XShmSegmentInfo *si = image ? (XShmSegmentInfo *)image->obdata : NULL;
         ce.shmseg = si ? si->shmseg : 0;
@@ -193,10 +193,12 @@ Bool XShmGetImage(Display *dpy, Drawable d, XImage *image, int x, int y,
     XImage *src = XGetImage(dpy, d, x, y, (unsigned)image->width,
                             (unsigned)image->height, plane_mask, ZPixmap);
     if (!src) return False;
+    size_t row_bytes = (size_t)(image->bytes_per_line < src->bytes_per_line
+                                ? image->bytes_per_line : src->bytes_per_line);
     for (int row = 0; row < image->height; row++)
         memcpy(image->data + (size_t)row * image->bytes_per_line,
                src->data + (size_t)row * src->bytes_per_line,
-               (size_t)image->bytes_per_line);
+               row_bytes);
     XDestroyImage(src);
     return True;
 }
@@ -371,8 +373,14 @@ Status XmbufGetVersion(Display *dpy, int *maj, int *min)
 { (void)dpy; if (maj) *maj = 0; if (min) *min = 0; return 0; }
 Status XmbufGetScreenInfo(Display *dpy, Drawable d, int *nmono, int *nstereo,
                           void **onmono, void **onstereo)
-{ (void)dpy; (void)d; if (nmono) *nmono = 0; if (nstereo) *nstereo = 0;
-  if (onmono) *onmono = NULL; if (onstereo) *onstereo = NULL; return 0; }
+{
+    (void)dpy; (void)d;
+    if (nmono) *nmono = 0;
+    if (nstereo) *nstereo = 0;
+    if (onmono) *onmono = NULL;
+    if (onstereo) *onstereo = NULL;
+    return 0;
+}
 
 /* MIT-SUNDRY-NONSTANDARD and XSecurity. */
 Bool   XMITMiscQueryExtension(Display *dpy, int *e, int *r)
@@ -388,8 +396,11 @@ Xauth *XSecurityGenerateAuthorization(Display *dpy, Xauth *auth,
                                       unsigned long mask,
                                       XSecurityAuthorizationAttributes *attributes,
                                       XSecurityAuthorization *auth_id_return)
-{ (void)dpy; (void)auth; (void)mask; (void)attributes;
-  if (auth_id_return) *auth_id_return = 0; return NULL; }
+{
+    (void)dpy; (void)auth; (void)mask; (void)attributes;
+    if (auth_id_return) *auth_id_return = 0;
+    return NULL;
+}
 
 /* Sync fences and priority are not backed; report failure. */
 XSyncFence XSyncCreateFence(Display *dpy, Drawable d, Bool initially_triggered)

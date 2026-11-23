@@ -202,6 +202,7 @@ static void build_device_info(Display *d, int filter, int *count, size_t *len)
     }
     *count = n;
     *len = b.len;
+    free(dp->xi2_data);
     dp->xi2_data = b.p;
     dp->xi2_data_len = b.len;
     dp->xi2_data_off = 0;
@@ -322,6 +323,21 @@ void mw_xi2_forget_request(Display *d)
 int mw_xi2_touch_device(Display *d)
 {
     return (MWD(d)->seat_caps & WL_SEAT_CAPABILITY_TOUCH) ? MW_XI_TOUCH_ID : 0;
+}
+
+void mw_xi2_window_gone(Display *d, Window w)
+{
+    XDisplayImpl *dp = MWD(d);
+    MwXiSelect **pp = &dp->xi_selects;
+    while (*pp) {
+        if ((*pp)->win == w) {
+            MwXiSelect *dead = *pp;
+            *pp = dead->next;
+            free(dead);
+            return;
+        }
+        pp = &(*pp)->next;
+    }
 }
 
 void mw_xi2_fini(Display *d)

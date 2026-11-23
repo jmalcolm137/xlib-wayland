@@ -135,14 +135,16 @@ static void mw_sync_rects(Region r)
         n = 0;
 
     if ((long)n > r->size) {
-        MwRegionBox *nr = realloc(r->rects, (size_t)n * sizeof *nr);
+        long nsz = r->size ? r->size * 2 : 16;
+        if (nsz < (long)n) nsz = (long)n;
+        MwRegionBox *nr = realloc(r->rects, (size_t)nsz * sizeof *nr);
 
         if (!nr) {
             r->numRects = 0;
             return;
         }
         r->rects = nr;
-        r->size = n;
+        r->size = nsz;
     }
 
     for (i = 0; i < n; i++) {
@@ -351,8 +353,11 @@ int XUnionRectWithRegion(XRectangle *rectangle, Region src_region,
 {
     pixman_region32_t res;
 
-    if (!rectangle->width || !rectangle->height)
-        return 0;
+    if (!rectangle->width || !rectangle->height) {
+        if (dest_region_return != src_region)
+            return XUnionRegion(src_region, src_region, dest_region_return);
+        return 1;
+    }
 
     pixman_region32_init(&res);
     if (!pixman_region32_union_rect(&res, &src_region->pix, rectangle->x,

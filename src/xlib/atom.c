@@ -145,13 +145,23 @@ void mw_init_atoms(Display *d)
     atom_file_load(d);
 }
 
+/* Local-only lookup: never hits the shared atom file on disk. */
+static Atom atom_find_local(Display *d, const char *name)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (!name || !dp->atom_names) return None;
+    for (int i = 1; i < dp->natoms; i++)
+        if (dp->atom_names[i] && strcmp(dp->atom_names[i], name) == 0)
+            return (Atom)i;
+    return None;
+}
+
 Atom mw_intern_atom(Display *d, const char *name, Bool only_if_exists)
 {
     XDisplayImpl *dp = MWD(d);
     if (!name) return None;
-    for (int i = 1; i < dp->natoms; i++)
-        if (dp->atom_names[i] && strcmp(dp->atom_names[i], name) == 0)
-            return (Atom)i;
+    Atom local = atom_find_local(d, name);
+    if (local != None) return local;
 
     /* Not known locally: consult the shared table so all clients agree. */
     {
@@ -159,16 +169,21 @@ Atom mw_intern_atom(Display *d, const char *name, Bool only_if_exists)
         if (!gid && !only_if_exists) gid = atom_file_add(name);
         if (gid) {
             atom_table_ensure(d, gid);
-            if (!dp->atom_names[gid]) dp->atom_names[gid] = strdup(name);
-            if (gid >= dp->natoms) dp->natoms = gid + 1;
-            return (Atom)gid;
+            if (dp->atom_names && gid < dp->atoms_cap) {
+                if (!dp->atom_names[gid]) dp->atom_names[gid] = strdup(name);
+                if (gid >= dp->natoms) dp->natoms = gid + 1;
+                return (Atom)gid;
+            }
         }
     }
     if (only_if_exists) return None;
     if (dp->natoms >= dp->atoms_cap) {
-        dp->atoms_cap *= 2;
-        dp->atom_names = realloc(dp->atom_names, dp->atoms_cap * sizeof(char *));
-        for (int i = dp->natoms; i < dp->atoms_cap; i++) dp->atom_names[i] = NULL;
+        int ncap = dp->atoms_cap ? dp->atoms_cap * 2 : 256;
+        char **na = realloc(dp->atom_names, (size_t)ncap * sizeof(char *));
+        if (!na) return None;
+        dp->atom_names = na;
+        for (int i = dp->natoms; i < ncap; i++) dp->atom_names[i] = NULL;
+        dp->atoms_cap = ncap;
     }
     int id = dp->natoms++;
     dp->atom_names[id] = strdup(name);
@@ -239,7 +254,10 @@ Status XGetAtomNames(Display *d, Atom *atoms, int count, char **names_return)
 {
     for (int i = 0; i < count; i++) {
         char *n = mw_atom_name(d, atoms[i]);
-        if (!n) return 0;
+        if (!n) {
+            for (int j = 0; j < i; j++) { free(names_return[j]); names_return[j] = NULL; }
+            return 0;
+        }
         names_return[i] = strdup(n);
     }
     return 1;
@@ -315,13 +333,20 @@ int XChangeProperty(Display *d, Window w, Atom property, Atom type, int format,
 {
     MwWindow *win = mw_window(d, w);
     if (!win) return 0;
+    if ((format != 8 && format != 16 && format != 32) || nelements < 0) {
+        mw_deliver_error(d, BadValue, 18 /* X_ChangeProperty */, 0, w, 0);
+        return 0;
+    }
 
     /* Appending or prepending with another type or format is BadMatch: the
      * server leaves the property alone (and the old data has a different
      * unit size, so merging would read past it). */
     if (mode == PropModePrepend || mode == PropModeAppend) {
         MwProp *old = mw_get_prop(d, win, property);
-        if (old && (old->type != type || old->format != format)) return 1;
+        if (old && (old->type != type || old->format != format)) {
+            mw_deliver_error(d, BadMatch, 18 /* X_ChangeProperty */, 0, w, 0);
+            return 1;
+        }
     }
 
     /* On a 64-bit server, format-32 property data is an array of longs: the
@@ -375,9 +400,10 @@ int XChangeProperty(Display *d, Window w, Atom property, Atom type, int format,
      * them (they have their own X servers). */
     mw_smprop_publish(d, property, type, format, val, nval);
     /* A Motif drag initiator writes _MOTIF_DRAG_INITIATOR_INFO (with the icc
-     * handle as the property name) when a drag starts; that is how the bridge
-     * learns a local drag is in progress. */
-    if (type == mw_intern_atom(d, "_MOTIF_DRAG_INITIATOR_INFO", True))
+     * handle as the property name) when a drag starts; check locally so non-
+     * Motif clients never hit the shared atom file on disk. */
+    Atom motif_init = atom_find_local(d, "_MOTIF_DRAG_INITIATOR_INFO");
+    if (motif_init != None && type == motif_init)
         mw_dnd_initiator_info(d, w, property, format, data, (unsigned long)nelements);
     free(packed);
     prop_notify(d, win, property, PropertyNewValue);
@@ -393,12 +419,10 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
 {
     MwWindow *win = mw_window(d, w);
     if (!win) return BadWindow;
-    /* The Workspace Manager's state does not live in this process: refresh the
-     * synthetic WM window's workspace properties from the WSM bridge's state
-     * file on every query, so a client that started earlier sees workspace
-     * changes too, instead of the snapshot taken when it connected. */
-    if (property == mw_intern_atom(d, "_DT_WORKSPACE_LIST", False) ||
-        property == mw_intern_atom(d, "_DT_WORKSPACE_CURRENT", False))
+    Atom ws_list = atom_find_local(d, "_DT_WORKSPACE_LIST");
+    Atom ws_cur  = atom_find_local(d, "_DT_WORKSPACE_CURRENT");
+    if ((ws_list != None && property == ws_list) ||
+        (ws_cur != None && property == ws_cur))
         mw_refresh_workspace_props(d, win);
     /* A shared session-manager property we do not hold locally (dtstyle reading
      * the manager dtsession published) is served from the shared store -- on
@@ -447,10 +471,7 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
     }
     size_t unit = p->format == 8 ? 1 : p->format == 16 ? 2 : 4;
     /* long_offset and long_length are in 32-bit units per the X protocol. */
-    long off_bytes = long_offset * 4;
-    /* An offset past the end is BadValue (and nothing is deleted); exactly
-     * at the end is a legal empty read. */
-    if (long_offset < 0 || off_bytes > (long)p->nbytes) {
+    if (long_offset < 0 || (unsigned long)long_offset > p->nbytes / 4 + 1) {
         if (actual_type_return) *actual_type_return = None;
         if (actual_format_return) *actual_format_return = 0;
         if (nitems_return) *nitems_return = 0;
@@ -458,38 +479,47 @@ int XGetWindowProperty(Display *d, Window w, Atom property, long long_offset,
         if (prop_return) *prop_return = NULL;
         rc = BadValue; goto done;
     }
-    unsigned long start = off_bytes >= (long)p->nbytes ? p->nitems
-                                                       : (unsigned long)(off_bytes / unit);
+    size_t off_bytes = (size_t)long_offset * 4;
+    if (off_bytes > p->nbytes) {
+        if (actual_type_return) *actual_type_return = None;
+        if (actual_format_return) *actual_format_return = 0;
+        if (nitems_return) *nitems_return = 0;
+        if (bytes_after_return) *bytes_after_return = 0;
+        if (prop_return) *prop_return = NULL;
+        rc = BadValue; goto done;
+    }
+    unsigned long start = off_bytes >= p->nbytes ? p->nitems
+                                                 : (unsigned long)(off_bytes / unit);
     unsigned long avail = p->nitems > start ? p->nitems - start : 0;
-    /* A zero length returns no data, only the size in bytes_after (the
-     * usual way to probe a property's size). */
-    unsigned long max_items = (long_length > 0)
-        ? (unsigned long)long_length * 4 / unit
-        : 0;
+    /* A zero length returns no data, only the size in bytes_after.  Avoid
+     * multiplying huge long_length (e.g. LONG_MAX) by 4. */
+    unsigned long max_items = 0;
+    if (long_length > 0) {
+        unsigned long ll = (unsigned long)long_length;
+        max_items = (ll >= avail) ? avail : (ll * 4 / unit);
+    }
     unsigned long nret = avail < max_items ? avail : max_items;
     unsigned char *out = NULL;
-    if (nret > 0 && prop_return) {
-        if (p->format == 32) {
-            /* Format-32 data is handed back as a long array, one long per
-             * 32-bit value, mirroring libX11 on a 64-bit server. */
-            long *lout = malloc((size_t)nret * sizeof(long));
-            if (!lout) { rc = BadAlloc; goto done; }
-            for (unsigned long i = 0; i < nret; i++) {
-                uint32_t v;
-                memcpy(&v, p->data + (start + i) * 4, 4);
-                lout[i] = (long)v;
+    if (prop_return) {
+        if (nret > 0) {
+            if (p->format == 32) {
+                long *lout = malloc((size_t)nret * sizeof(long));
+                if (!lout) { rc = BadAlloc; goto done; }
+                for (unsigned long i = 0; i < nret; i++) {
+                    uint32_t v;
+                    memcpy(&v, p->data + (start + i) * 4, 4);
+                    lout[i] = (long)v;
+                }
+                out = (unsigned char *)lout;
+            } else {
+                out = calloc(1, nret * unit + unit);
+                if (!out) { rc = BadAlloc; goto done; }
+                memcpy(out, p->data + start * unit, nret * unit);
             }
-            out = (unsigned char *)lout;
         } else {
-            /* libX11 zero-pads the returned buffer to a 4-byte boundary, and
-             * string properties are set with their trailing NUL included (a
-             * window manager's _MOTIF_BINDINGS, for instance).  Allocate one
-             * extra unit and zero it so a client that treats an 8-bit property
-             * as a C string (Motif's _XmVirtKeysInitialize) cannot read past
-             * the buffer. */
-            out = calloc(1, nret * unit + unit);
-            if (!out) { rc = BadAlloc; goto done; }
-            memcpy(out, p->data + start * unit, nret * unit);
+            /* Real libX11 allocates at least 1 NUL byte for an existing
+             * property even when 0 items are returned. */
+            out = calloc(1, 1);
         }
     }
     if (actual_type_return) *actual_type_return = p->type;
@@ -766,7 +796,7 @@ Status XGetWMNormalHints(Display *d, Window w, XSizeHints *hints,
                            &data) != Success || !data)
         return 0;
     longs_to_size_hints((const long *)data, ni, hints);
-    if (supplied) *supplied = (long)ni;
+    if (supplied) *supplied = hints->flags;
     free(data);
     return 1;
 }
@@ -888,7 +918,7 @@ Status XGetWMSizeHints(Display *d, Window w, XSizeHints *h, long *s, Atom a)
                            XA_WM_SIZE_HINTS, &at, &af, &ni, &ba, &data)
         != Success || !data) return 0;
     longs_to_size_hints((const long *)data, ni, h);
-    if (s) *s = (long)ni;
+    if (s) *s = h->flags;
     free(data);
     return 1;
 }

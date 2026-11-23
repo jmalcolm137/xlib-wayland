@@ -55,6 +55,8 @@ void mw_cursor_fini(Display *d)
     XDisplayImpl *dp = MWD(d);
     if (dp->cursor_theme) wl_cursor_theme_destroy(dp->cursor_theme);
     dp->cursor_theme = NULL;
+    free(dp->xcursor_theme);
+    dp->xcursor_theme = NULL;
 }
 
 Cursor XCreateFontCursor(Display *d, unsigned int shape)

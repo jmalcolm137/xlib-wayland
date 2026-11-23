@@ -190,8 +190,11 @@ static void xsetting_set(MwXSettings *x, const char *name, int type,
 
 static void xsettings_parse_line(MwXSettings *x, char *line)
 {
-    char *hash = strchr(line, '#');
-    if (hash) *hash = 0;
+    bool in_q = false;
+    for (char *s = line; *s; s++) {
+        if (*s == '"') in_q = !in_q;
+        else if (*s == '#' && !in_q) { *s = 0; break; }
+    }
 
     char *p = line;
     while (*p == ' ' || *p == '\t') p++;

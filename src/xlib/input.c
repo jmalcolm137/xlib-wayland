@@ -16,14 +16,10 @@ static bool is_ancestor(MwWindow *a, MwWindow *w);
 
 static MwWindow *window_for_surface(Display *d, struct wl_surface *s)
 {
-    XDisplayImpl *dp = MWD(d);
-    if (!dp->table) return NULL;
-    for (size_t i = 0; i < dp->table_cap; i++) {
-        if (dp->table[i].id && dp->table[i].kind == MW_OBJ_WINDOW) {
-            MwWindow *w = dp->table[i].obj;
-            if (w && w->tl && w->tl->surface == s) return w;
-        }
-    }
+    if (!s) return NULL;
+    MwWindow *w = wl_surface_get_user_data(s);
+    if (w && w->d == d && w->tl && w->tl->surface == s)
+        return w;
     return NULL;
 }
 
@@ -403,6 +399,10 @@ static const char *kbd_state_path(void)
 int mw_keyboard_autorepeat_mode(Display *d)
 {
     XDisplayImpl *dp = MWD(d);
+    uint64_t now = mw_now_ms();
+    if (dp->auto_repeat_check_ms && now - dp->auto_repeat_check_ms < 500)
+        return dp->auto_repeat;
+    dp->auto_repeat_check_ms = now ? now : 1;
     const char *path = kbd_state_path();
     int mode = AutoRepeatModeOn;   /* default when there is no shared state */
     if (path) {
@@ -425,6 +425,7 @@ void mw_keyboard_set_autorepeat(Display *d, int mode)
     if (mode == AutoRepeatModeDefault)
         mode = AutoRepeatModeOn;   /* there is no separate "server default" */
     dp->auto_repeat = mode;
+    dp->auto_repeat_check_ms = mw_now_ms();
 
     const char *path = kbd_state_path();
     if (!path) return;

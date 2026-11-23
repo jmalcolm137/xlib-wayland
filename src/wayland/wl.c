@@ -104,16 +104,13 @@ static void output_geometry(void *data, struct wl_output *o, int32_t x, int32_t 
 static void output_mode(void *data, struct wl_output *o, uint32_t flags,
                         int32_t width, int32_t height, int32_t refresh)
 {
-    (void)o; (void)refresh;
+    (void)o;
     Display *d = data;
     XDisplayImpl *dp = MWD(d);
     if (flags & WL_OUTPUT_MODE_CURRENT) {
-        /* The mode is in physical pixels; output_done() turns it into the
-         * logical size once scale has been seen.  Set the screen here too so
-         * that a compositor whose wl_output predates `done` still gets a
-         * usable size. */
         dp->output_mode_w = width;
         dp->output_mode_h = height;
+        if (refresh > 0) dp->output_refresh_mhz = refresh;
         dp->output_w = width;
         dp->output_h = height;
         if (dp->screens) {
@@ -240,7 +237,7 @@ void mw_block_for_events(Display *d)
      * more than once per display refresh -- the compositor's frame callback
      * re-renders anything that was deferred, so nothing is lost. */
     mw_flush_damage_deferred(d);
-    if (getenv("MW_TRACE")) fprintf(stderr, "MW: blocking for events\n");
+    if (MW_TRACE()) fprintf(stderr, "MW: blocking for events\n");
 
     /* A held key repeats on its own schedule: deliver any that is due, then
      * wait at most until the next one so it fires even with nothing else
@@ -282,9 +279,16 @@ void mw_block_for_events(Display *d)
     if (bfd >= 0) { pfd[np].fd = bfd; pfd[np].events = POLLIN; pfd[np].revents = 0; np++; }
     if (sfd >= 0) { pfd[np].fd = sfd; pfd[np].events = POLLIN; pfd[np].revents = 0; np++; }
 
-    int timeout = rtimeout >= 0 ? rtimeout : 100;
-    if (dtimeout >= 0 && dtimeout < timeout) timeout = dtimeout;
-    if ((cfd >= 0 || bfd >= 0 || sfd >= 0) && timeout > 100) timeout = 100;
+    int timeout = -1;
+    if (rtimeout >= 0) timeout = rtimeout;
+    if (dtimeout >= 0 && (timeout < 0 || dtimeout < timeout)) timeout = dtimeout;
+    if (cfd >= 0 && (timeout < 0 || timeout > 100)) timeout = 100;
+    uint64_t bdl = mw_broker_deadline(d);
+    if (bdl > 0) {
+        uint64_t now = mw_now_ms();
+        int rem = bdl > now ? (int)(bdl - now) : 0;
+        if (timeout < 0 || rem < timeout) timeout = rem;
+    }
     int r = poll(pfd, np, timeout);
     if (r > 0 && pfd[0].revents) {
         if (wl_display_read_events(dp->wl_display) < 0) {
@@ -333,11 +337,13 @@ void mw_process_events(Display *d, bool block)
     /* canonical non-blocking read */
     if (wl_display_prepare_read(dp->wl_display) == 0) {
         wl_display_flush(dp->wl_display);
-        struct pollfd pfd[3];
+        struct pollfd pfd[4];
         int n = 0;
         pfd[n].fd = dp->wl_fd; pfd[n].events = POLLIN; pfd[n].revents = 0; n++;
         int cfd = mw_clipboard_poll_fd(d);
         if (cfd >= 0) { pfd[n].fd = cfd; pfd[n].events = POLLIN; pfd[n].revents = 0; n++; }
+        int bfd = mw_broker_poll_fd(d);
+        if (bfd >= 0) { pfd[n].fd = bfd; pfd[n].events = POLLIN; pfd[n].revents = 0; n++; }
         int sfd = mw_session_poll_fd(d);
         if (sfd >= 0) { pfd[n].fd = sfd; pfd[n].events = POLLIN; pfd[n].revents = 0; n++; }
         int r = poll(pfd, n, 0);

@@ -17,6 +17,7 @@ static void table_grow(Display *d)
     XDisplayImpl *dp = MWD(d);
     size_t ncap = dp->table_cap ? dp->table_cap * 2 : 256;
     MwEntry *nt = calloc(ncap, sizeof *nt);
+    if (!nt) return;
     for (size_t i = 0; i < dp->table_cap; i++) {
         if (dp->table[i].id) {
             size_t j = hash_id(dp->table[i].id, ncap);
@@ -34,6 +35,7 @@ void mw_register(Display *d, XID id, MwObjKind kind, void *obj)
     XDisplayImpl *dp = MWD(d);
     if (!dp->table) table_grow(d);
     if ((dp->table_used + 1) * 4 >= dp->table_cap * 3) table_grow(d);
+    if (!dp->table) return;
     size_t j = hash_id(id, dp->table_cap);
     while (dp->table[j].id && dp->table[j].id != id) j = (j + 1) & (dp->table_cap - 1);
     if (!dp->table[j].id) dp->table_used++;
@@ -45,22 +47,32 @@ void mw_register(Display *d, XID id, MwObjKind kind, void *obj)
 void mw_unregister(Display *d, XID id)
 {
     XDisplayImpl *dp = MWD(d);
-    if (!dp->table) return;
+    if (!dp->table || id == 0) return;
     /* A buffered Render request may still reference this object (cairo creates
      * a pixmap, pictures it, and frees it -- all before the request reaches us),
      * so dispatch pending requests before the id disappears. */
     if (!dp->render_draining) mw_render_drain(d);
-    /* Rebuild the probe table without this id.  A cluster-shifting delete is
-     * error-prone (insertions can invalidate the scan and grow the table
-     * mid-iteration), so we rehash cleanly. */
-    MwEntry *old = dp->table;
-    size_t cap = dp->table_cap;
-    dp->table = calloc(cap, sizeof(MwEntry));
-    dp->table_used = 0;
-    for (size_t i = 0; i < cap; i++)
-        if (old[i].id && old[i].id != id)
-            mw_register(d, old[i].id, old[i].kind, old[i].obj);
-    free(old);
+    size_t mask = dp->table_cap - 1;
+    size_t j = hash_id(id, dp->table_cap);
+    while (dp->table[j].id && dp->table[j].id != id)
+        j = (j + 1) & mask;
+    if (dp->table[j].id != id) return;
+    dp->table_used--;
+    /* O(1) amortized backward-shift deletion: pull subsequent displaced entries
+     * back into the hole without allocating or rehashing the whole table. */
+    size_t hole = j;
+    size_t cur = (hole + 1) & mask;
+    while (dp->table[cur].id) {
+        size_t home = hash_id(dp->table[cur].id, dp->table_cap);
+        if (((hole - home) & mask) < ((cur - home) & mask)) {
+            dp->table[hole] = dp->table[cur];
+            hole = cur;
+        }
+        cur = (cur + 1) & mask;
+    }
+    dp->table[hole].id = 0;
+    dp->table[hole].kind = MW_OBJ_FREE;
+    dp->table[hole].obj = NULL;
 }
 
 void *mw_lookup(Display *d, XID id, MwObjKind kind)
@@ -148,6 +160,7 @@ Display *XOpenDisplay(_Xconst char *display_name)
     pthread_mutex_unlock(&display_list_lock);
 
     XDisplayImpl *dp = calloc(1, sizeof *dp);
+    if (!dp) return NULL;
     Display *d = (Display *)dp;
 
     /* -1, not 0: the wake thread must not poll stdin before the session socket
@@ -191,6 +204,7 @@ Display *XOpenDisplay(_Xconst char *display_name)
      * is no X server, so the name is informational only — we always connect
      * through WAYLAND_DISPLAY / the default Wayland socket. */
     if (mw_wl_connect(dp, NULL) != 0) {
+        free(dp->private12);
         free(dp->vendor);
         free(dp->display_name);
         free(dp);
@@ -199,6 +213,14 @@ Display *XOpenDisplay(_Xconst char *display_name)
 
     /* Screen + visual (single TrueColor 24-bit screen). */
     dp->screens = calloc(1, sizeof(Screen));
+    if (!dp->screens) {
+        mw_wl_disconnect(dp);
+        free(dp->private12);
+        free(dp->vendor);
+        free(dp->display_name);
+        free(dp);
+        return NULL;
+    }
     Screen *scr = &dp->screens[0];
     dp->screen = scr;
 
@@ -333,12 +355,17 @@ int XCloseDisplay(Display *d)
     XDisplayImpl *dp = MWD(d);
 
     /* Xlib semantics: closing a shared display just drops a reference.  The
-     * connection is only torn down once the last reference goes away. */
+     * connection is only torn down once the last reference goes away.  Unlink
+     * from open_displays while holding the lock so a concurrent XOpenDisplay
+     * cannot acquire a display that is being destroyed. */
     pthread_mutex_lock(&display_list_lock);
     if (dp->refcnt > 1) {
         dp->refcnt--;
         pthread_mutex_unlock(&display_list_lock);
         return 1;
+    }
+    for (XDisplayImpl **pp = &open_displays; *pp; pp = &(*pp)->open_next) {
+        if (*pp == dp) { *pp = dp->open_next; break; }
     }
     pthread_mutex_unlock(&display_list_lock);
 
@@ -370,19 +397,32 @@ int XCloseDisplay(Display *d)
             MwPixmap *p = e.obj;
             if (p) { if (p->surface) mw_surface_destroy(p->surface); free(p); }
             break; }
-        case MW_OBJ_GC: free(e.obj); break;
+        case MW_OBJ_GC: {
+            struct _XGC *gc = e.obj;
+            if (gc) {
+                free(gc->clip_rects);
+                free(gc->dash_list);
+                if (gc->clip_region) XDestroyRegion(gc->clip_region);
+                free(gc);
+            }
+            break; }
         case MW_OBJ_FONT: {
             MwXFont *f = e.obj;
             if (f) {
                 if (f->fs) { free(f->fs->per_char); free(f->fs); }
                 if (f->rfont) mw_font_destroy(f->rfont);
+                free(f->fs_base_name);
                 free(f);
             }
             break; }
         case MW_OBJ_COLORMAP: free(e.obj); break;
         case MW_OBJ_CURSOR: {
             MwCursor *c = e.obj;
-            if (c) { free(c->wl_name); free(c->img_pixels); free(c); }
+            if (c) {
+                if (c->img_buffer) wl_buffer_destroy(c->img_buffer);
+                if (c->surface && c->created_surface) wl_surface_destroy(c->surface);
+                free(c->wl_name); free(c->img_pixels); free(c);
+            }
             break; }
         default: break;
         }
@@ -392,13 +432,7 @@ int XCloseDisplay(Display *d)
     memset(dp->table, 0, dp->table_cap * sizeof *dp->table);
     dp->table_used = 0;
 
-    /* Last reference: take it out of the open-display list. */
-    pthread_mutex_lock(&display_list_lock);
-    for (XDisplayImpl **pp = &open_displays; *pp; pp = &(*pp)->open_next) {
-        if (*pp == dp) { *pp = dp->open_next; break; }
-    }
-    pthread_mutex_unlock(&display_list_lock);
-
+    mw_contexts_fini(d);
     mw_cursor_fini(d);
     mw_xdnd_fini(d);
     mw_xsettings_fini(d);
@@ -408,6 +442,7 @@ int XCloseDisplay(Display *d)
     mw_session_fini(d);
     mw_fini_selection(d);
     mw_keymap_fini(d);
+    if (dp->csd_font) { mw_font_destroy(dp->csd_font); dp->csd_font = NULL; }
     mw_wl_disconnect(dp);
 
     if (dp->atom_names) {
@@ -422,6 +457,9 @@ int XCloseDisplay(Display *d)
         if (e->type == GenericEvent) free(e->xcookie.data);
     }
     free(dp->errq);
+    free(dp->render_reply_data);
+    free(dp->xi2_data);
+    free(dp->scratch_buffer);
     free(dp->private12);                 /* Xlib output buffer */
     free(dp->atom_buf);
     free(dp->queue);
@@ -482,7 +520,7 @@ int XSync(Display *d, Bool discard)
     XDisplayImpl *dp = MWD(d);
     mw_render_drain(d);
     mw_dispatch_errors(d);
-    if (getenv("MW_TRACE")) fprintf(stderr, "MW: XSync\n");
+    if (MW_TRACE()) fprintf(stderr, "MW: XSync\n");
     if (dp->wl_display) {
         wl_display_flush(dp->wl_display);
         mw_flush_damage(d);
@@ -490,6 +528,7 @@ int XSync(Display *d, Bool discard)
         wl_display_roundtrip(dp->wl_display);
         mw_input_settle(d);
     }
+    dp->last_request_read = dp->request;
     /* discard: throw away everything queued (after the round trip, so
      * events it produced go too, as on X). */
     if (discard) {

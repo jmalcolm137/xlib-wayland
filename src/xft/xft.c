@@ -433,17 +433,34 @@ void XftDefaultSubstitute(Display *dpy, int screen, FcPattern *pattern)
     if (pattern) FcDefaultSubstitute(pattern);
 }
 
+static void draw_glyph_run(XftDraw *draw, _Xconst XftColor *color,
+                           XftFont *pub, const unsigned int *glyphs,
+                           const int *xs, const int *ys, int n);
+
 void XftDrawCharSpec(XftDraw *draw, _Xconst XftColor *color, XftFont *pub,
                      _Xconst XftCharSpec *chars, int len)
 {
-    if (!draw || !color || !pub || !chars) return;
-    for (int i = 0; i < len; i++) {
-        char u[8];
-        int n = utf8_put(chars[i].ucs4, u);
-        mw_xft_draw_utf8(draw->dpy, draw->drawable, ((MwXftFont *)pub)->raster,
-                         chars[i].x, chars[i].y, u, n, xft_argb(color),
-                         draw->clip, draw->nclip);
+    if (!draw || !color || !pub || !chars || len <= 0) return;
+    unsigned int sgl[64];
+    int sxs[64], sys[64];
+    unsigned int *gl = len <= 64 ? sgl : malloc((size_t)len * sizeof *gl);
+    int *xs = len <= 64 ? sxs : malloc((size_t)len * sizeof *xs);
+    int *ys = len <= 64 ? sys : malloc((size_t)len * sizeof *ys);
+    if (!gl || !xs || !ys) {
+        if (gl != sgl) free(gl);
+        if (xs != sxs) free(xs);
+        if (ys != sys) free(ys);
+        return;
     }
+    for (int i = 0; i < len; i++) {
+        gl[i] = XftCharIndex(draw->dpy, pub, chars[i].ucs4);
+        xs[i] = chars[i].x;
+        ys[i] = chars[i].y;
+    }
+    draw_glyph_run(draw, color, pub, gl, xs, ys, len);
+    if (gl != sgl) free(gl);
+    if (xs != sxs) free(xs);
+    if (ys != sys) free(ys);
 }
 
 /* The Render-level picture entry points.  Xft clients that draw through Render
@@ -591,11 +608,29 @@ void XftDrawGlyphFontSpec(XftDraw *draw, _Xconst XftColor *color,
                           _Xconst XftGlyphFontSpec *glyphs, int len)
 {
     if (!draw || !color || !glyphs || len <= 0) return;
-    for (int i = 0; i < len; i++) {
-        unsigned int g = glyphs[i].glyph;
-        int x = glyphs[i].x;
-        int y = glyphs[i].y;
-        draw_glyph_run(draw, color, glyphs[i].font, &g, &x, &y, 1);
+    unsigned int sgl[64];
+    int sxs[64], sys[64];
+    int i = 0;
+    while (i < len) {
+        XftFont *pub = glyphs[i].font;
+        int j = i + 1;
+        while (j < len && glyphs[j].font == pub) j++;
+        int n = j - i;
+        unsigned int *gl = n <= 64 ? sgl : malloc((size_t)n * sizeof *gl);
+        int *xs = n <= 64 ? sxs : malloc((size_t)n * sizeof *xs);
+        int *ys = n <= 64 ? sys : malloc((size_t)n * sizeof *ys);
+        if (gl && xs && ys) {
+            for (int k = 0; k < n; k++) {
+                gl[k] = glyphs[i + k].glyph;
+                xs[k] = glyphs[i + k].x;
+                ys[k] = glyphs[i + k].y;
+            }
+            draw_glyph_run(draw, color, pub, gl, xs, ys, n);
+        }
+        if (gl != sgl) free(gl);
+        if (xs != sxs) free(xs);
+        if (ys != sys) free(ys);
+        i = j;
     }
 }
 
@@ -603,12 +638,29 @@ void XftDrawCharFontSpec(XftDraw *draw, _Xconst XftColor *color,
                          _Xconst XftCharFontSpec *chars, int len)
 {
     if (!draw || !color || !chars || len <= 0) return;
-    for (int i = 0; i < len; i++) {
+    unsigned int sgl[64];
+    int sxs[64], sys[64];
+    int i = 0;
+    while (i < len) {
         XftFont *pub = chars[i].font;
-        unsigned int g = XftCharIndex(draw->dpy, pub, chars[i].ucs4);
-        int x = chars[i].x;
-        int y = chars[i].y;
-        draw_glyph_run(draw, color, pub, &g, &x, &y, 1);
+        int j = i + 1;
+        while (j < len && chars[j].font == pub) j++;
+        int n = j - i;
+        unsigned int *gl = n <= 64 ? sgl : malloc((size_t)n * sizeof *gl);
+        int *xs = n <= 64 ? sxs : malloc((size_t)n * sizeof *xs);
+        int *ys = n <= 64 ? sys : malloc((size_t)n * sizeof *ys);
+        if (gl && xs && ys) {
+            for (int k = 0; k < n; k++) {
+                gl[k] = XftCharIndex(draw->dpy, pub, chars[i + k].ucs4);
+                xs[k] = chars[i + k].x;
+                ys[k] = chars[i + k].y;
+            }
+            draw_glyph_run(draw, color, pub, gl, xs, ys, n);
+        }
+        if (gl != sgl) free(gl);
+        if (xs != sxs) free(xs);
+        if (ys != sys) free(ys);
+        i = j;
     }
 }
 

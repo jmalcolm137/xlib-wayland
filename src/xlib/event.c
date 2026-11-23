@@ -59,9 +59,8 @@ void mw_deliver_error(Display *d, int code, int request, int minor,
         XGetErrorText(d, code, text, sizeof text);
         fprintf(stderr, "X Error of failed request:  %s\n"
                         "  Major opcode of failed request:  %d\n"
-                        "  Resource id in failed request:  0x%lx\n",
-                text, request, (unsigned long)resource);
-        dp->errq_head = (dp->errq_head + 1) % dp->errq_cap;
+                        "  Resource id in failed request:  %d\n",
+                text, request, (int)resource);
         if (dp->errq_count) dp->errq_count--;
     }
 }
@@ -330,7 +329,7 @@ int XNextEvent(Display *d, XEvent *event)
             continue;
         }
         if (pop_event(d, event)) {
-            if (getenv("MW_TRACE"))
+            if (MW_TRACE())
                 fprintf(stderr, "MW: XNextEvent type=%d win=0x%lx send=%d (to GDK)\n",
                         event->xany.type, (unsigned long)event->xany.window,
                         event->xany.send_event);
@@ -345,12 +344,16 @@ int XNextEvent(Display *d, XEvent *event)
 int XPeekEvent(Display *d, XEvent *event)
 {
     XDisplayImpl *dp = MWD(d);
-    ensure_event(d);
-    XErrorEvent *ee = pop_error(d);
-    if (ee) { if (g_error_handler) { g_error_handler(d, ee); } }
-    if (dp->qcount > 0) { *event = dp->queue[dp->qhead]; return 1; }
-    memset(event, 0, sizeof *event);
-    return 0;
+    for (;;) {
+        ensure_event(d);
+        XErrorEvent *ee = pop_error(d);
+        if (ee) {
+            if (g_error_handler) g_error_handler(d, ee);
+            continue;
+        }
+        if (dp->qcount > 0) { *event = dp->queue[dp->qhead]; return 1; }
+        if (dp->closed) { memset(event, 0, sizeof *event); return 0; }
+    }
 }
 
 int XPutBackEvent(Display *d, XEvent *event)

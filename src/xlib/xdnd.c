@@ -429,8 +429,9 @@ bool mw_xdnd_notify(Display *d, XSelectionEvent *se)
 {
     MwXdnd *x = MWD(d)->xdnd;
     if (!x || !x->q_pending) return false;
-    if (se->selection != a_sel(d) || se->requestor != mw_clip_window(d) ||
-        se->property != x->q_prop)
+    if (se->selection != a_sel(d) || se->requestor != mw_clip_window(d))
+        return false;
+    if (se->property != x->q_prop && se->property != None)
         return false;
     x->q_pending = false;
     if (se->property == None) return true;

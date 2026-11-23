@@ -219,15 +219,26 @@ static const char *const core_mod_names[8] = {
     "Mod2", "Mod3", "Mod4", "Mod5"
 };
 
+static void ensure_mod_indices(XDisplayImpl *dp)
+{
+    if (dp->xkb_mod_keymap == dp->xkb_keymap) return;
+    for (int i = 0; i < 8; i++)
+        dp->xkb_mod_idx[i] = dp->xkb_keymap
+            ? xkb_keymap_mod_get_index(dp->xkb_keymap, core_mod_names[i])
+            : XKB_MOD_INVALID;
+    dp->xkb_mod_keymap = dp->xkb_keymap;
+}
+
 /* The core state (modifiers and group) of an xkb state. */
 unsigned int mw_core_state(Display *d, struct xkb_state *st)
 {
     XDisplayImpl *dp = MWD(d);
     if (!st || !dp->xkb_keymap) return 0;
+    ensure_mod_indices(dp);
     xkb_mod_mask_t eff = xkb_state_serialize_mods(st, XKB_STATE_MODS_EFFECTIVE);
     unsigned int m = 0;
     for (int i = 0; i < 8; i++) {
-        xkb_mod_index_t idx = xkb_keymap_mod_get_index(dp->xkb_keymap, core_mod_names[i]);
+        xkb_mod_index_t idx = dp->xkb_mod_idx[i];
         if (idx != XKB_MOD_INVALID && (eff & (1u << idx))) m |= 1u << i;
     }
     xkb_layout_index_t g = xkb_state_serialize_layout(st, XKB_STATE_LAYOUT_EFFECTIVE);
@@ -239,6 +250,7 @@ static struct xkb_state *lookup_state(Display *d, unsigned int state)
 {
     XDisplayImpl *dp = MWD(d);
     if (!dp->xkb_keymap) return NULL;
+    ensure_mod_indices(dp);
     if (dp->xkb_lookup_state && dp->xkb_lookup_keymap != dp->xkb_keymap) {
         xkb_state_unref(dp->xkb_lookup_state);
         dp->xkb_lookup_state = NULL;
@@ -251,7 +263,7 @@ static struct xkb_state *lookup_state(Display *d, unsigned int state)
     xkb_mod_mask_t mods = 0;
     for (int i = 0; i < 8; i++) {
         if (!(state & (1u << i))) continue;
-        xkb_mod_index_t idx = xkb_keymap_mod_get_index(dp->xkb_keymap, core_mod_names[i]);
+        xkb_mod_index_t idx = dp->xkb_mod_idx[i];
         if (idx != XKB_MOD_INVALID) mods |= 1u << idx;
     }
     xkb_state_update_mask(dp->xkb_lookup_state, mods, 0, 0, 0, 0,
@@ -276,7 +288,7 @@ static unsigned int consumed_core(Display *d, KeyCode kc, unsigned int state)
     if (!st) return 0;
     unsigned int m = 0;
     for (int i = 0; i < 8; i++) {
-        xkb_mod_index_t idx = xkb_keymap_mod_get_index(dp->xkb_keymap, core_mod_names[i]);
+        xkb_mod_index_t idx = dp->xkb_mod_idx[i];
         if (idx != XKB_MOD_INVALID &&
             xkb_state_mod_index_is_consumed(st, (xkb_keycode_t)kc, idx) == 1)
             m |= 1u << i;
@@ -489,25 +501,21 @@ int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
     (void)status;
     Display *d = event->display;
     XDisplayImpl *dp = MWD(d);
-    KeySym ks = mw_keysym_for_state(d, event->keycode, event->state);
+    struct xkb_state *st = lookup_state(d, event->state);
+    KeySym ks = st ? (KeySym)xkb_state_key_get_one_sym(st, (xkb_keycode_t)event->keycode)
+                   : NoSymbol;
     if (keysym) *keysym = ks;
 
-    /* Feed the keysym to the compose state: dead keys and multi-key sequences
-     * resolve here, so an intl. layout's dead_acute then e yields é.  Skip it
-     * while Ctrl/Alt is held (there the key means something else).  Only key
-     * presses are fed, and each only once: Xt looks releases up too, and
-     * clients look the same press up more than once (a dead key's release
-     * used to complete its own sequence).  The outcome for the press is
-     * remembered so a second lookup gets the same answer. */
     static __thread struct {
         Display *d; unsigned long serial; Time time; unsigned int keycode;
-        int status; char text[64]; int len;
+        int status; KeySym ks; char text[64]; int len;
     } fed;
     bool same = fed.d == d && fed.serial == event->serial &&
                 fed.time == event->time && fed.keycode == event->keycode;
     if (event->type == KeyPress && same && fed.status != XKB_COMPOSE_NOTHING) {
         if (fed.status == XKB_COMPOSE_COMPOSING) return 0;
         if (fed.status == XKB_COMPOSE_COMPOSED) {
+            if (keysym && fed.ks != XKB_KEY_NoSymbol) *keysym = fed.ks;
             int len = fed.len < nbytes ? fed.len : nbytes;
             if (len > 0) memcpy(buffer, fed.text, (size_t)len);
             return len;
@@ -517,50 +525,42 @@ int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
         !(event->state & ControlMask) && !(event->state & Mod1Mask)) {
         fed.d = d; fed.serial = event->serial; fed.time = event->time;
         fed.keycode = event->keycode; fed.status = XKB_COMPOSE_NOTHING;
-        /* feed() only says whether the keysym was accepted into a sequence;
-         * the outcome is read from get_status(). */
+        fed.ks = XKB_KEY_NoSymbol;
         xkb_compose_state_feed(dp->xkb_compose_state, ks);
         switch (xkb_compose_state_get_status(dp->xkb_compose_state)) {
         case XKB_COMPOSE_COMPOSING:
             fed.status = XKB_COMPOSE_COMPOSING;
-            if (getenv("MW_TRACE"))
+            if (MW_TRACE())
                 fprintf(stderr, "MW: composing ks=0x%lx\n", (unsigned long)ks);
-            return 0;                    /* part of a sequence: no bytes yet */
+            return 0;
         case XKB_COMPOSE_COMPOSED: {
             char cbuf[64];
             int r = xkb_compose_state_get_utf8(dp->xkb_compose_state,
                                                cbuf, sizeof cbuf);
             KeySym cks = (KeySym)xkb_compose_state_get_one_sym(dp->xkb_compose_state);
             xkb_compose_state_reset(dp->xkb_compose_state);
-            /* Unlike xkb_state_key_get_utf8(), this returns the byte count
-             * *without* the terminating NUL. */
             if (r > 0) {
                 if (r > (int)sizeof fed.text) r = (int)sizeof fed.text;
                 fed.status = XKB_COMPOSE_COMPOSED;
+                fed.ks = cks;
                 memcpy(fed.text, cbuf, (size_t)r);
                 fed.len = r;
-                /* The keysym reported is the composed one (é), not the last
-                 * key of the sequence. */
                 if (keysym && cks != XKB_KEY_NoSymbol) *keysym = cks;
                 int len = r < nbytes ? r : nbytes;
                 if (len > 0) memcpy(buffer, cbuf, (size_t)len);
-                if (getenv("MW_TRACE"))
+                if (MW_TRACE())
                     fprintf(stderr, "MW: composed '%.*s' n=%d\n", r, cbuf, len);
                 return len;
             }
             break;
         }
-        case XKB_COMPOSE_CANCELLED:      /* partial sequence dropped: fall through */
+        case XKB_COMPOSE_CANCELLED:
         case XKB_COMPOSE_NOTHING:
         default:
             break;
         }
     }
 
-    /* Non-printable keys still yield a byte: Xlib collapses them to their low
-     * seven bits, exactly as the reference _XkbHandleSpecialSym() does.  This
-     * is what makes Return deliver '\r' -- without it a terminal emulator
-     * receives no bytes for Enter and a command is never submitted. */
     int ch = -1;
     if ((ks >= XK_BackSpace && ks <= XK_Clear) ||
         ks == XK_Return || ks == XK_Escape ||
@@ -576,21 +576,19 @@ int XLookupString(XKeyEvent *event, char *buffer, int nbytes, KeySym *keysym,
     if (ch >= 0) {
         if (event->state & ControlMask) ch = mw_to_control(ch);
         if (nbytes > 0) { buffer[0] = (char)ch; n = 1; }
-    } else if (lookup_state(d, event->state)) {
-        /* A multi-byte character (composed or non-Latin-1); ask xkbcommon,
-         * under the event's state rather than the keyboard's live one. */
+    } else if (st) {
+        /* xkb_state_key_get_utf8() returns the byte length excluding NUL. */
         char buf[64];
-        int r = xkb_state_key_get_utf8(lookup_state(d, event->state),
-                                       (xkb_keycode_t)event->keycode,
+        int r = xkb_state_key_get_utf8(st, (xkb_keycode_t)event->keycode,
                                        buf, sizeof buf);
-        if (r > 1) {
-            int len = r - 1;
+        if (r > 0) {
+            int len = r < (int)sizeof buf - 1 ? r : (int)sizeof buf - 1;
             if (len > nbytes) len = nbytes;
-            memcpy(buffer, buf, len);
+            if (len > 0) memcpy(buffer, buf, (size_t)len);
             n = len;
         }
     }
-    if (getenv("MW_TRACE"))
+    if (MW_TRACE())
         fprintf(stderr, "MW: XLookupString kc=%u ks=0x%lx n=%d\n",
                 event->keycode, (unsigned long)ks, n);
     return n;

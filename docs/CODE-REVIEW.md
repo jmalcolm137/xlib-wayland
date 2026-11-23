@@ -261,6 +261,78 @@ And in the code the first pass covered least:
   mask no longer grows with its bounding box (a diagonal rubber band across
   a HiDPI window allocated tens of megabytes).
 
+### Sixth round: performance, memory, and Xorg correctness
+
+- **Performance**:
+  - `mw_unregister()` (`display.c`) and `glyph_remove()` (`render.c`) now use
+    $O(1)$ amortized backward-shift deletion instead of allocating and rehashing
+    the full table on every delete.
+  - **Partial-damage compositing** (`surface.c`, `window.c`, `raster_cairo.c`):
+    per-toplevel double-buffered `pixman_region32_t` damage tracking clips
+    compositing to dirty regions, shares one `MwCanvas` across the window tree,
+    caches `MwSurface` wrappers on `MwBuf`, and submits per-rect
+    `wl_surface_damage_buffer()` calls. Dynamic refresh rate is read from
+    `wl_output.mode` and frame pacing is per-toplevel.
+  - **XRender & Xft fast paths**: `do_composite_inner()` re-enables Cairo/pixman
+    SIMD `cairo_mask()` for standard non-CA Over/Add drawable masks,
+    `apply_poly_mask()` uses Cairo/pixman for standard Porter-Duff polygon ops,
+    `req_composite_glyphs()` eliminates double hash lookups, and
+    `XftDrawCharSpec`/`XftDrawGlyphFontSpec`/`XftDrawCharFontSpec` batch
+    contiguous runs.
+  - **Drawing & fonts**: `XCreateBitmapFromData`/`XCreatePixmapFromBitmapData`
+    write directly to surface pixels instead of per-pixel `cairo_fill` loops;
+    32-bit `ZPixmap` `XPutImage` and unclipped self-copy `XCopyArea` (scrolling)
+    use direct `memcpy`/`memmove` fast paths; `mw_surface_clear()` writes pixels
+    directly; `fill_font_struct()` fetches width/lbearing/rbearing in one
+    `FT_Load_Glyph` call (`mw_font_char_metrics`).
+  - **Hot-path I/O & lookups**: cached `mw_trace_flags()` (`util.c`) replaces
+    repeated `getenv()` calls; `window_for_surface()` is $O(1)$ via
+    `wl_surface_get_user_data()`; `mw_keyboard_autorepeat_mode()` is rate-limited
+    instead of `fopen()`ing on every key event; `XChangeProperty`/`XGetWindowProperty`
+    check local atoms without hitting disk; `smprops.c` avoids `strdup`/`strtok_r`
+    on every property write; XKB modifier indices are cached per keymap; Xrm
+    `best_match()` uses stack buffers and leaf-quark pre-filtering; idle `poll()`
+    no longer wakes at 10 Hz when session/broker sockets are idle; `libX11.so.6`
+    links with `-Wl,-Bsymbolic-functions`.
+- **Memory usage & leaks**:
+  - **Lazy backing stores & unmap release**: solid-background child windows
+    composite directly without allocating an `MwSurface` until drawn to, and
+    unmapped non-toplevel windows with `backing_store == NotUseful` release
+    their backing surfaces.
+  - `wl_shm` buffers shrink when used area drops below 25% of capacity.
+  - `copy_rop()` bands in 64-row chunks; `clipboard.c` INCR `serve_append()`
+    grows exponentially and compacts; `broker.c` reuses a fixed 8-atom ring,
+    deletes captured properties immediately, and shrinks `xfer.buf` after large
+    transfers.
+  - Fixed leaks in `XOpenDisplay` failure path, `XCloseDisplay` (GC clip/dash,
+    cursor buffer/surface, fontset name, contexts, scratch/reply buffers, CSD
+    font), `XGetIMValues` (single-allocation packing), `XkbGetUpdatedMap`,
+    `xi2_selects` (`mw_xi2_window_gone`), `XGetAtomNames` partial failure, and
+    `mw_broker_fini` double `close()`.
+- **Correctness vs. Xorg**:
+  - Implemented `_XDeqAsyncHandler()` (fixes stack UAF in `mw_render_dispatch_async`),
+    fixed `_XSend`/`_XData32` realloc `last_req`/`xi2_req` offsets, `_XRead32`/`_XReadPad`,
+    portable `_XData32`, per-display `_XAllocScratch`, and `dp->request` sequence
+    tracking (`render_pending_seq`).
+  - Fixed `XLookupString()` non-Latin-1 UTF-8 1-byte truncation and compose
+    cache keysym reporting; `XkbFreeKeyboard()` component mask & NULLing;
+    `xkb_build_map()` `group_info`; `XkbGetControls()` live repeat state.
+  - Fixed `x11xcb.c` connecting to host XWayland `$DISPLAY`; `XQueryExtension`/
+    `XListExtensions` coverage; `XGetWMNormalHints` `*supplied` flags bitmask;
+    `XGetWindowProperty` empty-property 1-byte NUL & offset overflow;
+    `XChangeProperty` validation; `XUnionRectWithRegion` empty-rect copy;
+    `XrmGetResource` mismatched name/class OOB read & `XrmEnumerateDatabase`
+    NULL `class_prefix`; `XParseGeometry` uppercase `'X'` & double signs;
+    `XDrawPoints`/`XDrawLines`/`XFillPolygon` `CoordModePrevious`;
+    `XDrawRectangles` pixel-grid snap; full `XSetDashes` lists; `mw_set_source_argb`
+    alpha=0 and `mw_surface_clear` double-premultiplication; depth-8 `XPutImage`/
+    `XGetImage`; `GraphicsExpose` on clipped copies; ancestor clipping, popup
+    exclusion, `XShape`, borders, and depth-32 `OVER` in compositing;
+    `XShapeCombineRegion`/`XShapeOffsetShape`/`ShapeInvert`/`XShapeQueryExtents`;
+    `clipboard.c` `UTF8_STRING` preference on X→Wayland copy and `dd_enter`
+    NULL offer guard; `xdnd.c` `TARGETS` refusal lockup; `XOpenDisplay`/
+    `XCloseDisplay` lock race; `XPeekEvent` error wakeup loop.
+
 ## Still open
 
 - Zero-width lines do not draw their final endpoint (X draws it for

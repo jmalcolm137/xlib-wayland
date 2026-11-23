@@ -305,24 +305,24 @@ static void set_source(Display *d, cairo_t *cr, MwRenderPicture *src,
             double off = frac(src->stops[i].pos);
             if (off < 0) off = 0;
             if (off > 1) off = 1;
-            cairo_pattern_add_color_stop_rgba(pat, off,
-                src->stops[i].color.red / 65535.0,
-                src->stops[i].color.green / 65535.0,
-                src->stops[i].color.blue / 65535.0,
-                src->stops[i].color.alpha / 65535.0);
+            double a = src->stops[i].color.alpha / 65535.0;
+            double r = src->stops[i].color.red   / 65535.0;
+            double g = src->stops[i].color.green / 65535.0;
+            double b = src->stops[i].color.blue  / 65535.0;
+            if (a > 0) { r /= a; g /= a; b /= a; }
+            cairo_pattern_add_color_stop_rgba(pat, off, r, g, b, a);
         }
         cairo_pattern_set_extend(pat, cairo_extend(src->repeat));
         cairo_pattern_set_filter(pat, picture_filter(src));
-        /* A gradient picture can carry a transform (cairo passes the CTM
-         * through); apply its inverse as the pattern matrix, as for drawable
-         * sources.  Without this the gradient is evaluated in the wrong
-         * coordinates (Effects' fade mask came out empty). */
+        cairo_matrix_t m;
+        cairo_matrix_init_translate(&m, xs - dx, ys - dy);
         if (src->have_transform) {
-            cairo_matrix_t t;
+            cairo_matrix_t t, r;
             xf_matrix(&t, &src->xf);
-            if (cairo_matrix_invert(&t) == CAIRO_STATUS_SUCCESS)
-                cairo_pattern_set_matrix(pat, &t);
+            cairo_matrix_multiply(&r, &m, &t);
+            m = r;
         }
+        cairo_pattern_set_matrix(pat, &m);
         cairo_set_source(cr, pat);
         cairo_pattern_destroy(pat);
         return;
@@ -930,18 +930,29 @@ static void do_composite_inner(Display *d, MwRenderPicture *dst, MwRenderPicture
     /* Rendering *to* a gradient/solid picture is a BadDrawable, as on a real
      * server; rendercheck checks for the error. */
     if (dst->kind != PK_DRAWABLE) {
-        mw_deliver_error(d, BadDrawable, MWD(d)->render_req_type,
+        mw_deliver_error(d, BadDrawable, mw_render_opcode(),
                          X_RenderComposite, dst->id, 0);
         return;
     }
-    if (getenv("MW_TRACE_RENDER"))
+    if (MW_TRACE_RENDER())
         fprintf(stderr, "MW: composite op=%d src=0x%lx(k%d drw=0x%lx fmt=%d) mask=0x%lx k%d op=%d "
                         "src=%d,%d mask=%d,%d dst=%d,%d %dx%d\n",
                 op, src ? src->id : 0, src ? src->kind : -1,
                 src ? (unsigned long)src->drawable : 0, src ? src->format : -1,
                 mask ? (unsigned long)mask->id : 0UL, mask ? mask->kind : -1,
                 op, xs, ys, xm, ym, xd, yd, w, h);
-    if (is_disjoint_op(op) || mask || dst->has_clip_mask ||
+    /* Cairo's cairo_mask() computes (src OP dst) LERP_mask dst, which is
+     * identical to Render's (src IN mask) OP dst for Over and Add on a plain
+     * non-CA, non-opaque, non-legacy drawable mask.  Everything else uses the
+     * exact manual path. */
+    bool mask_needs_manual = mask && (
+        mask->component_alpha ||
+        mask->kind != PK_DRAWABLE ||
+        mask->have_transform ||
+        fmt_legacy(mask->format) ||
+        fmt_is_opaque(mask->format) ||
+        (op != PictOpOver && op != PictOpAdd));
+    if (is_disjoint_op(op) || mask_needs_manual || dst->has_clip_mask ||
         (src && fmt_legacy(src->format)) || fmt_legacy(dst->format)) {
         if (dst->have_transform)
             composite_manual_xform(d, dst, src, mask, op, xs, ys, xm, ym,
@@ -998,7 +1009,7 @@ static void do_composite_inner(Display *d, MwRenderPicture *dst, MwRenderPicture
     if (fmt_is_opaque(dst->format)) force_opaque(ds, xd, yd, w, h);
     mw_surface_mark_dirty(ds);
     MwWindow *win = pic_window(d, dst);
-    if (win) mw_window_damage(win);
+    if (win) mw_window_damage_rect(win, xd, yd, w, h);
 }
 
 /* ---------------------------------------------------- picture construction */
@@ -1082,11 +1093,12 @@ static void free_picture(Display *d, MwRenderPicture *p)
 
 static void glyph_rehash(MwGlyphSet *gs, int ncap)
 {
+    MwGlyph *nt = calloc((size_t)ncap, sizeof *nt);
+    if (!nt) return;
     MwGlyph *old = gs->tab;
     int oldcap = gs->cap;
-    gs->tab = calloc(ncap, sizeof *gs->tab);
+    gs->tab = nt;
     gs->cap = ncap;
-    if (!gs->tab) return;
     int mask = ncap - 1;
     for (int i = 0; i < oldcap; i++) {
         if (!old[i].used) continue;
@@ -1125,12 +1137,26 @@ static MwGlyph *glyph_slot(MwGlyphSet *gs, CARD32 gid, int create)
 
 static void glyph_remove(MwGlyphSet *gs, CARD32 gid)
 {
-    MwGlyph *g = glyph_slot(gs, gid, 0);
-    if (!g) return;
-    if (g->surface) mw_surface_destroy(g->surface);
-    g->used = 0; g->surface = NULL;
+    if (!gs || !gs->tab || gs->cap == 0) return;
+    int mask = gs->cap - 1;
+    int j = (int)((gid * 2654435761u) & (unsigned)mask);
+    while (gs->tab[j].used && gs->tab[j].gid != gid)
+        j = (j + 1) & mask;
+    if (!gs->tab[j].used) return;
+    if (gs->tab[j].surface) mw_surface_destroy(gs->tab[j].surface);
     gs->used--;
-    glyph_rehash(gs, gs->cap);   /* keep the probe chains valid */
+    /* O(1) amortized backward-shift deletion. */
+    int hole = j;
+    int cur = (hole + 1) & mask;
+    while (gs->tab[cur].used) {
+        int home = (int)((gs->tab[cur].gid * 2654435761u) & (unsigned)mask);
+        if (((hole - home) & mask) < ((cur - home) & mask)) {
+            gs->tab[hole] = gs->tab[cur];
+            hole = cur;
+        }
+        cur = (cur + 1) & mask;
+    }
+    memset(&gs->tab[hole], 0, sizeof gs->tab[hole]);
 }
 
 /* Bytes per row of a glyph image, as the server lays it out: A1 rows are
@@ -1387,6 +1413,7 @@ static void req_free_glyphset(Display *d, const unsigned char *b)
 
 static void req_free_glyphs(Display *d, const unsigned char *b, size_t len)
 {
+    if (len < sz_xRenderFreeGlyphsReq) return;
     const xRenderFreeGlyphsReq *r = (const void *)b;
     MwGlyphSet *gs = glyphset(d, r->glyphset);
     if (!gs) return;
@@ -1478,28 +1505,11 @@ static void composite_coverage(Display *d, MwRenderPicture *dst,
     if (fmt_is_opaque(dst->format)) force_opaque(ds, bx, by, w, h);
     mw_surface_mark_dirty(ds);
     MwWindow *win = pic_window(d, dst);
-    if (win) mw_window_damage(win);
+    if (win) mw_window_damage_rect(win, bx, by, w, h);
 }
 
 /* One glyph of a run, placed: its bitmap's top-left is at (bx,by). */
 typedef struct { MwGlyph *g; int bx, by; } MwPlacedGlyph;
-
-/* The pen (x,y) is the glyph origin; the bitmap's top-left sits at the
- * glyph's stored bearing (xGlyphInfo.x/y), exactly as the X server
- * composites it (destination = pen - info). */
-static bool place_glyph(MwGlyphSet *gs, CARD32 gid, int x, int y, MwPlacedGlyph *out)
-{
-    MwGlyph *gp = glyph_slot(gs, gid, 0);
-    if (!gp || !gp->surface) {
-        if (getenv("MW_TRACE_RENDER"))
-            fprintf(stderr, "MW: drawglyph MISSING gid=%u\n", (unsigned)gid);
-        return false;
-    }
-    out->g = gp;
-    out->bx = x - gp->gox;
-    out->by = y - gp->goy;
-    return true;
-}
 
 /* Composite a run's glyphs.  Without a mask format each glyph is composited
  * in turn; with one, the server adds every glyph into a single mask the size
@@ -1579,8 +1589,9 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
     int total = 0;
     bool first = true;
     int xdst = 0, ydst = 0;                /* the first element's position */
-    MwPlacedGlyph *placed = NULL;
-    int nplaced = 0, cap = 0;
+    MwPlacedGlyph stack_placed[128];
+    MwPlacedGlyph *placed = stack_placed;
+    int nplaced = 0, cap = 128;
     while (p + sz_xGlyphElt <= end) {
         xGlyphElt elt;
         memcpy(&elt, p, sz_xGlyphElt);
@@ -1602,7 +1613,7 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
         int px = pen_x + elt.deltax;
         int py = pen_y + elt.deltay;
         if (first) { xdst = px; ydst = py; first = false; }
-        if (getenv("MW_TRACE_RENDER"))
+        if (MW_TRACE_RENDER())
             fprintf(stderr, "MW: glyph elt len=%d dx=%d dy=%d start=%d,%d\n",
                     count, (int)elt.deltax, (int)elt.deltay, px, py);
         for (int i = 0; i < count; i++) {
@@ -1610,18 +1621,28 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
             if (glyph_bytes == 1) gid = p[i];
             else if (glyph_bytes == 2) { CARD16 v; memcpy(&v, p + i*2, 2); gid = v; }
             else { memcpy(&gid, p + i*4, 4); }
-            if (nplaced == cap) {
-                int ncap = cap ? cap * 2 : 64;
-                MwPlacedGlyph *np = realloc(placed, (size_t)ncap * sizeof *np);
-                if (!np) break;
-                placed = np;
-                cap = ncap;
-            }
-            if (place_glyph(gs, gid, px, py, &placed[nplaced])) nplaced++;
-            /* The glyph's stored xOff/yOff is its advance (cairo/Xft); a
-             * zero-size glyph (space) has no surface but still advances. */
             MwGlyph *gp = glyph_slot(gs, gid, 0);
-            if (gp) { px += gp->gx; py += gp->gy; }
+            if (gp) {
+                if (gp->surface) {
+                    if (nplaced == cap) {
+                        int ncap = cap * 2;
+                        MwPlacedGlyph *np = (placed == stack_placed)
+                            ? malloc((size_t)ncap * sizeof *np)
+                            : realloc(placed, (size_t)ncap * sizeof *np);
+                        if (!np) break;
+                        if (placed == stack_placed)
+                            memcpy(np, stack_placed, (size_t)nplaced * sizeof *np);
+                        placed = np;
+                        cap = ncap;
+                    }
+                    placed[nplaced].g = gp;
+                    placed[nplaced].bx = px - gp->gox;
+                    placed[nplaced].by = py - gp->goy;
+                    nplaced++;
+                }
+                px += gp->gx;
+                py += gp->gy;
+            }
             total++;
         }
         pen_x = px;
@@ -1630,8 +1651,8 @@ static void req_composite_glyphs(Display *d, const unsigned char *b, size_t len,
     }
     draw_glyph_run(d, dst, src, r->op, r->maskFormat != None, placed, nplaced,
                    xdst, ydst, r->xSrc, r->ySrc);
-    free(placed);
-    if (getenv("MW_TRACE_RENDER"))
+    if (placed != stack_placed) free(placed);
+    if (MW_TRACE_RENDER())
         fprintf(stderr, "MW: glyph run total=%d op=%d end=%d,%d\n", total, r->op, pen_x, pen_y);
 }
 
@@ -1703,7 +1724,33 @@ static void apply_poly_mask(Display *d, MwRenderPicture *dst, MwRenderPicture *s
     if (y1 > mh) y1 = mh;
     int w = x1 - x0, h = y1 - y0;
     if (w <= 0 || h <= 0) return;
+
+    /* Fast path: standard Porter-Duff Over/Add without clip mask or legacy
+     * format can mask directly onto dst with zero intermediate surface. */
+    if ((op == PictOpOver || op == PictOpAdd) && !dst->has_clip_mask &&
+        !fmt_legacy(dst->format) && !(src && fmt_legacy(src->format)) &&
+        !dst->have_transform) {
+        if (fmt_is_opaque(dst->format)) force_opaque(ds, x0, y0, w, h);
+        cairo_t *cr = cairo_create(dcs);
+        cairo_rectangle(cr, x0, y0, w, h);
+        cairo_clip(cr);
+        apply_dst_clip(cr, dst);
+        cairo_set_operator(cr, cairo_op(op));
+        set_source(d, cr, src, xfirst, yfirst, xs, ys);
+        cairo_mask_surface(cr, mask, mbx, mby);
+        cairo_destroy(cr);
+        if (fmt_is_opaque(dst->format)) force_opaque(ds, x0, y0, w, h);
+        mw_surface_mark_dirty(ds);
+        MwWindow *win = pic_window(d, dst);
+        if (win) mw_window_damage_rect(win, x0, y0, w, h);
+        return;
+    }
+
     cairo_surface_t *tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    if (!tmp || cairo_surface_status(tmp) != CAIRO_STATUS_SUCCESS) {
+        if (tmp) cairo_surface_destroy(tmp);
+        return;
+    }
     cairo_t *tc = cairo_create(tmp);
     cairo_set_operator(tc, CAIRO_OPERATOR_SOURCE);
     set_source(d, tc, src, xfirst - x0, yfirst - y0, xs, ys);
@@ -1729,12 +1776,26 @@ static void apply_poly_mask(Display *d, MwRenderPicture *dst, MwRenderPicture *s
                 tp[(size_t)y * tst + x] = (a << 24) | (r << 16) | (g << 8) | bb;
             }
         cairo_surface_destroy(ctmp);
+        cairo_surface_mark_dirty(tmp);
     }
-    apply_disjoint(d, dst, op, tp, tst, x0, y0, w, h);
+    if (!is_disjoint_op(op) && !fmt_legacy(dst->format) && !dst->have_transform) {
+        if (fmt_is_opaque(dst->format)) force_opaque(ds, x0, y0, w, h);
+        cairo_t *cr = cairo_create(dcs);
+        cairo_rectangle(cr, x0, y0, w, h);
+        cairo_clip(cr);
+        apply_dst_clip(cr, dst);
+        cairo_set_operator(cr, cairo_op(op));
+        cairo_set_source_surface(cr, tmp, x0, y0);
+        cairo_paint(cr);
+        cairo_destroy(cr);
+        if (fmt_is_opaque(dst->format)) force_opaque(ds, x0, y0, w, h);
+    } else {
+        apply_disjoint(d, dst, op, tp, tst, x0, y0, w, h);
+    }
     cairo_surface_destroy(tmp);
     mw_surface_mark_dirty(ds);
     MwWindow *win = pic_window(d, dst);
-    if (win) mw_window_damage(win);
+    if (win) mw_window_damage_rect(win, x0, y0, w, h);
 }
 
 static void req_trapezoids(Display *d, const unsigned char *b, size_t len)
@@ -1995,11 +2056,12 @@ static void build_pict_formats(Display *d,
 
 /* ------------------------------------------------------------ dispatch */
 
-static void handle_request(Display *d, const unsigned char *b, size_t len)
+static void handle_request(Display *d, const unsigned char *b, size_t len,
+                           unsigned long req_seq)
 {
     if (len < 4) return;
     int minor = b[1];
-    if (getenv("MW_TRACE_RENDER") && minor == X_RenderCompositeGlyphs8) {
+    if (MW_TRACE_RENDER() && minor == X_RenderCompositeGlyphs8) {
         fprintf(stderr, "MW: compositeglyphs8 bytes:");
         for (size_t i = 0; i < len && i < 48; i++) fprintf(stderr, " %02x", b[i]);
         fprintf(stderr, "\n");
@@ -2016,11 +2078,14 @@ static void handle_request(Display *d, const unsigned char *b, size_t len)
         /* Queue, don't overwrite: several queries can be drained before their
          * replies are read, and _XReply must answer them in request order. */
         if (dp->render_npending < (int)(sizeof dp->render_pending /
-                                        sizeof dp->render_pending[0]))
-            dp->render_pending[dp->render_npending++] = minor;
-        if (getenv("MW_TRACE_RENDER"))
-            fprintf(stderr, "MW: query queued minor=%d (npending=%d)\n",
-                    minor, dp->render_npending);
+                                        sizeof dp->render_pending[0])) {
+            dp->render_pending[dp->render_npending] = minor;
+            dp->render_pending_seq[dp->render_npending] = req_seq;
+            dp->render_npending++;
+        }
+        if (MW_TRACE_RENDER())
+            fprintf(stderr, "MW: query queued minor=%d seq=%lu (npending=%d)\n",
+                    minor, req_seq, dp->render_npending);
         break;
     case X_RenderCreatePicture:       req_create_picture(d, b, len); break;
     case X_RenderChangePicture:       req_change_picture(d, b, len); break;
@@ -2063,10 +2128,11 @@ void mw_render_drain(Display *d)
     if (!buf) return;
     if (dp->render_draining) return;
     dp->render_draining = 1;
-    if (!ptr || ptr <= buf) { dp->private13 = buf; dp->render_draining = 0; return; }
+    if (!ptr || ptr <= buf) { dp->private13 = (char *)buf; dp->render_draining = 0; return; }
     unsigned char *p = buf;
     long n = 0;
-    if (getenv("MW_TRACE_RENDER")) {
+    unsigned long req_seq = dp->buf_first_req;
+    if (MW_TRACE_RENDER()) {
         fprintf(stderr, "MW: drain used=%ld first:", (long)(ptr - buf));
         for (long i = 0; i < 64 && buf + i < ptr; i++)
             fprintf(stderr, " %02x", buf[i]);
@@ -2075,27 +2141,28 @@ void mw_render_drain(Display *d)
     while (p + 4 <= ptr) {
         unsigned len = (unsigned)(p[2] | (p[3] << 8)) * 4;
         if (len < 4 || p + len > ptr) {
-            if (getenv("MW_TRACE_RENDER"))
+            if (MW_TRACE_RENDER())
                 fprintf(stderr, "MW: drain break @%ld len=%u\n",
                         (long)(p - buf), len);
             break;
         }
-        if (getenv("MW_TRACE_RENDER"))
+        if (MW_TRACE_RENDER())
             fprintf(stderr, "MW: drain req major=%d minor=%d len=%u\n",
                     p[0], p[1], len);
         if (p[0] == (unsigned char)mw_render_opcode()) {
-            handle_request(d, p, len);
+            handle_request(d, p, len, req_seq);
             n++;
         } else {
             /* No-reply XI requests (XISelectEvents) are processed as they
              * pass through; reply requests are answered in _XReply. */
             mw_xi2_request(d, p, len);
         }
+        req_seq++;
         p += len;
     }
-    if (getenv("MW_TRACE_RENDER") && n)
+    if (MW_TRACE_RENDER() && n)
         fprintf(stderr, "MW: render drained %ld requests\n", n);
-    dp->private13 = buf;   /* bufptr = buffer */
+    dp->private13 = (char *)buf;   /* bufptr = buffer */
     dp->render_draining = 0;
 }
 
@@ -2165,14 +2232,19 @@ int mw_render_reply(Display *d, void *rep)
     XDisplayImpl *dp = MWD(d);
     if (dp->render_npending <= 0) return 0;
     int minor = dp->render_pending[0];
+    unsigned long seq = dp->render_pending_seq[0];
     dp->render_npending--;
-    if (dp->render_npending > 0)
+    if (dp->render_npending > 0) {
         memmove(dp->render_pending, dp->render_pending + 1,
                 (size_t)dp->render_npending * sizeof dp->render_pending[0]);
+        memmove(dp->render_pending_seq, dp->render_pending_seq + 1,
+                (size_t)dp->render_npending * sizeof dp->render_pending_seq[0]);
+    }
+    dp->last_request_read = seq;
     mw_render_build(d, minor, rep);
-    if (getenv("MW_TRACE_RENDER"))
-        fprintf(stderr, "MW: render_reply minor=%d (pending now %d)\n",
-                minor, dp->render_npending);
+    if (MW_TRACE_RENDER())
+        fprintf(stderr, "MW: render_reply minor=%d seq=%lu (pending now %d)\n",
+                minor, seq, dp->render_npending);
     return 1;
 }
 
@@ -2194,20 +2266,24 @@ void mw_render_dispatch_async(Display *d)
     XDisplayImpl *dp = MWD(d);
     while (dp->render_npending > 1) {
         int minor = dp->render_pending[0];
+        unsigned long seq = dp->render_pending_seq[0];
         dp->render_npending--;
         memmove(dp->render_pending, dp->render_pending + 1,
                 (size_t)dp->render_npending * sizeof dp->render_pending[0]);
+        memmove(dp->render_pending_seq, dp->render_pending_seq + 1,
+                (size_t)dp->render_npending * sizeof dp->render_pending_seq[0]);
         unsigned char rep[32];
         mw_render_build(d, minor, rep);
         /* Xlib sets last_request_read to the sequence of the reply it is
          * handing over; the handler matches on it. */
-        dp->last_request_read = dp->request;
-        if (getenv("MW_TRACE_RENDER"))
+        dp->last_request_read = seq;
+        if (MW_TRACE_RENDER())
             fprintf(stderr, "MW: dispatch minor=%d (request=%lu last_read=%lu)\n",
                     minor, dp->request, dp->last_request_read);
-        for (MwAsyncHandler *h = dp->async_handlers; h; h = h->next) {
+        for (MwAsyncHandler *h = dp->async_handlers, *next; h; h = next) {
+            next = h->next;
             Bool took = h->handler(d, rep, NULL, 0, h->data);
-            if (getenv("MW_TRACE_RENDER"))
+            if (MW_TRACE_RENDER())
                 fprintf(stderr, "MW:   handler=%p took=%d\n", (void *)h->handler,
                         (int)took);
             if (took) break;

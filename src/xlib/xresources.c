@@ -68,18 +68,20 @@ static void append_dir(char **buf, size_t *len, size_t *cap, const char *dir)
     if (stat(dir, &st) != 0) return;
     if (S_ISREG(st.st_mode)) { append_file(buf, len, cap, dir); return; }
     if (!S_ISDIR(st.st_mode)) return;
-    DIR *d = opendir(dir);
-    if (!d) return;
-    struct dirent *e;
+    struct dirent **list = NULL;
+    int n = scandir(dir, &list, NULL, alphasort);
+    if (n < 0) return;
     char path[PATH_MAX];
-    while ((e = readdir(d)) != NULL) {
-        if (e->d_name[0] == '.') continue;
-        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
-        struct stat es;
-        if (stat(path, &es) == 0 && S_ISREG(es.st_mode))
-            append_file(buf, len, cap, path);
+    for (int i = 0; i < n; i++) {
+        if (list[i]->d_name[0] != '.') {
+            snprintf(path, sizeof path, "%s/%s", dir, list[i]->d_name);
+            struct stat es;
+            if (stat(path, &es) == 0 && S_ISREG(es.st_mode))
+                append_file(buf, len, cap, path);
+        }
+        free(list[i]);
     }
-    closedir(d);
+    free(list);
 }
 
 void mw_load_resources(Display *d)

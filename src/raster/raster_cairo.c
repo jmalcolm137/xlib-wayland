@@ -25,7 +25,6 @@ struct MwSurface {
     cairo_surface_t *cs;
     bool             owned;   /* cs was created with _create (owns memory) */
     void            *data;    /* for create_for_data */
-    cairo_t         *keep;    /* retained for wrapping data surfaces */
     int              w, h;    /* LOGICAL size (device-independent units) */
     int              stride;  /* PHYSICAL row pitch in bytes */
     int              scale;   /* device scale, >= 1 */
@@ -87,7 +86,6 @@ MwSurface *mw_surface_create_for_data_scaled(void *data, int w, int h,
 void mw_surface_destroy(MwSurface *s)
 {
     if (!s) return;
-    if (s->keep) cairo_destroy(s->keep);
     if (s->cs) cairo_surface_destroy(s->cs);
     free(s);
 }
@@ -100,17 +98,36 @@ int  mw_surface_scale(const MwSurface *s)  { return s ? s->scale : 1; }
 
 void mw_surface_clear(MwSurface *s, uint32_t argb)
 {
-    if (!s) return;
-    cairo_t *cr = cairo_create(s->cs);
-    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-    double a = ((argb >> 24) & 0xff) / 255.0;
-    double r = ((argb >> 16) & 0xff) / 255.0 * (a ? a : 0);
-    double g = ((argb >>  8) & 0xff) / 255.0 * (a ? a : 0);
-    double b = ((argb      ) & 0xff) / 255.0 * (a ? a : 0);
-    /* premultiplied source */
-    cairo_set_source_rgba(cr, r, g, b, a);
-    cairo_paint(cr);
-    cairo_destroy(cr);
+    if (!s || !s->data) return;
+    cairo_surface_flush(s->cs);
+    int pw = s->w * s->scale;
+    int ph = s->h * s->scale;
+    int stride_px = s->stride / 4;
+    uint32_t a = (argb >> 24) & 0xffu;
+    uint32_t px;
+    if (a == 0) {
+        px = 0;
+    } else if (a == 0xffu) {
+        px = argb;
+    } else {
+        uint32_t r = (((argb >> 16) & 0xffu) * a + 127u) / 255u;
+        uint32_t g = (((argb >>  8) & 0xffu) * a + 127u) / 255u;
+        uint32_t b = (( argb        & 0xffu) * a + 127u) / 255u;
+        px = (a << 24) | (r << 16) | (g << 8) | b;
+    }
+    uint32_t *dst = (uint32_t *)s->data;
+    if (px == 0 && stride_px == pw) {
+        memset(dst, 0, (size_t)pw * (size_t)ph * 4);
+    } else {
+        for (int y = 0; y < ph; y++) {
+            uint32_t *row = dst + (size_t)y * stride_px;
+            if (px == 0) {
+                memset(row, 0, (size_t)pw * 4);
+            } else {
+                for (int x = 0; x < pw; x++) row[x] = px;
+            }
+        }
+    }
     cairo_surface_mark_dirty(s->cs);
 }
 
@@ -139,6 +156,7 @@ struct MwCanvas {
     int        lw;              /* line width */
     double     snap;            /* 0 or 0.5 pixel-grid nudge for strokes */
     uint32_t   plane_mask;      /* X plane mask (RGB bits) */
+    bool       has_clip;        /* non-trivial clip installed */
 };
 
 /* ----------------------------------------------------- bitwise raster ops
@@ -365,7 +383,9 @@ static cairo_operator_t gx_to_operator(int gx)
 MwCanvas *mw_canvas_begin(MwSurface *s, const XRectangle *clip, int nclip,
                           int clip_x_origin, int clip_y_origin)
 {
+    if (!s) return NULL;
     MwCanvas *c = calloc(1, sizeof *c);
+    if (!c) return NULL;
     c->surface = s;
     c->cr = cairo_create(s->cs);
     c->clip_x_origin = clip_x_origin;
@@ -398,7 +418,7 @@ void mw_set_source_argb(MwCanvas *c, uint32_t argb)
     double r = ((argb >> 16) & 0xff) / 255.0;
     double g = ((argb >>  8) & 0xff) / 255.0;
     double b = ((argb      ) & 0xff) / 255.0;
-    cairo_set_source_rgba(c->cr, r, g, b, a ? a : 1.0);
+    cairo_set_source_rgba(c->cr, r, g, b, a);
 }
 
 void mw_set_line(MwCanvas *c, int width, int line_style, int cap, int join,
@@ -428,10 +448,13 @@ void mw_set_line(MwCanvas *c, int width, int line_style, int cap, int join,
     if ((line_style == LineOnOffDash /*2*/ || line_style == LineDoubleDash /*3*/)
         && dashes && ndash > 0) {
         int n = ndash;
-        double *d = calloc(n, sizeof(double));
-        for (int i = 0; i < n; i++) d[i] = (unsigned char)dashes[i];
-        cairo_set_dash(c->cr, d, n, dash_offset);
-        free(d);
+        double stack_d[16];
+        double *d = n <= 16 ? stack_d : calloc((size_t)n, sizeof(double));
+        if (d) {
+            for (int i = 0; i < n; i++) d[i] = (unsigned char)dashes[i];
+            cairo_set_dash(c->cr, d, n, dash_offset);
+            if (d != stack_d) free(d);
+        }
     } else {
         cairo_set_dash(c->cr, NULL, 0, 0);
     }
@@ -448,11 +471,55 @@ void mw_set_fill(MwCanvas *c, int fill_style, int fill_rule, int arc_mode)
 void mw_clip_rects(MwCanvas *c, const XRectangle *r, int n, int x_org, int y_org)
 {
     cairo_reset_clip(c->cr);
+    c->has_clip = (n > 0);
     if (n <= 0) return;
     for (int i = 0; i < n; i++) {
         cairo_rectangle(c->cr, r[i].x + x_org, r[i].y + y_org, r[i].width, r[i].height);
     }
     cairo_clip(c->cr);
+}
+
+void mw_canvas_save(MwCanvas *c)
+{
+    if (c) cairo_save(c->cr);
+}
+
+void mw_canvas_restore(MwCanvas *c)
+{
+    if (c) cairo_restore(c->cr);
+}
+
+void mw_canvas_clip_rect(MwCanvas *c, int x, int y, int w, int h)
+{
+    if (!c) return;
+    c->has_clip = true;
+    cairo_rectangle(c->cr, x, y, w, h);
+    cairo_clip(c->cr);
+}
+
+void mw_canvas_clip_rects_intersect(MwCanvas *c, const XRectangle *r, int n,
+                                    int x_org, int y_org)
+{
+    if (!c) return;
+    c->has_clip = true;
+    cairo_new_path(c->cr);
+    for (int i = 0; i < n; i++)
+        cairo_rectangle(c->cr, r[i].x + x_org, r[i].y + y_org,
+                        r[i].width, r[i].height);
+    cairo_clip(c->cr);
+}
+
+void mw_canvas_blit_over(MwCanvas *dst, MwSurface *src, int dx, int dy,
+                         int w, int h)
+{
+    if (!dst || !src || w <= 0 || h <= 0) return;
+    cairo_save(dst->cr);
+    cairo_rectangle(dst->cr, dx, dy, w, h);
+    cairo_clip(dst->cr);
+    cairo_set_source_surface(dst->cr, src->cs, dx, dy);
+    cairo_set_operator(dst->cr, CAIRO_OPERATOR_OVER);
+    cairo_paint(dst->cr);
+    cairo_restore(dst->cr);
 }
 
 void mw_clip_mask(MwCanvas *c, MwSurface *mask, int x_org, int y_org)
@@ -470,6 +537,7 @@ void mw_clip_mask(MwCanvas *c, MwSurface *mask, int x_org, int y_org)
      * bounding box was not), and honours the clip-origin alignment.  An empty
      * mask clips everything, as X does. */
     cairo_reset_clip(c->cr);
+    c->has_clip = true;
     cairo_new_path(c->cr);
     for (int y = 0; y < mh; y++) {
         const uint32_t *row = px + (size_t)y * stride;
@@ -684,9 +752,9 @@ void mw_segments(MwCanvas *c, const XSegment *seg, int n)
 
 void mw_rects(MwCanvas *c, const XRectangle *r, int n, int filled)
 {
+    double s = filled ? 0.0 : c->snap;
     for (int i = 0; i < n; i++)
-        cairo_rectangle(c->cr, r[i].x, r[i].y, r[i].width, r[i].height);
-    (void)filled;
+        cairo_rectangle(c->cr, r[i].x + s, r[i].y + s, r[i].width, r[i].height);
 }
 
 /* ------------------------------------------------------------- pixels */
@@ -702,44 +770,53 @@ static void copy_rop(MwCanvas *dst, MwSurface *src, int sx, int sy,
     if (!clip_bounds(dst, dx, dy, dx + w, dy + h, &x0, &y0, &x1, &y1)) return;
     int dsc = ds->scale, ssc = src->scale;
     int bw = x1 - x0, bh = y1 - y0;
-    uint32_t *snap = malloc((size_t)bw * bh * 4);
+    /* Snapshot source in full only on self-copy (overlapping regions);
+     * otherwise band in 64-row chunks so peak memory stays O(bw * 64). */
+    int band = (src == ds) ? bh : (bh < 64 ? bh : 64);
+    uint32_t *snap = malloc((size_t)bw * (size_t)band * 4);
     if (!snap) return;
     cairo_surface_flush(src->cs);
+    cairo_surface_flush(ds->cs);
     const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(src->cs);
     int sstr = cairo_image_surface_get_stride(src->cs) / 4;
     int spw = src->w * ssc, sph = src->h * ssc;
-    for (int y = 0; y < bh; y++)
-        for (int x = 0; x < bw; x++) {
-            /* destination physical -> source physical */
-            int lx = (x0 + x) - dx * dsc, ly = (y0 + y) - dy * dsc;
-            int qx = sx * ssc + lx * ssc / dsc, qy = sy * ssc + ly * ssc / dsc;
-            snap[(size_t)y * bw + x] =
-                (qx >= 0 && qy >= 0 && qx < spw && qy < sph)
-                ? sp[(size_t)qy * sstr + qx] : 0;
-        }
-    /* Coverage of the clip over the box. */
-    cairo_surface_t *m = cairo_image_surface_create(CAIRO_FORMAT_A8, bw, bh);
-    cairo_surface_set_device_scale(m, dsc, dsc);
-    cairo_surface_set_device_offset(m, -x0, -y0);
-    cairo_t *mc = cairo_create(m);
-    copy_clip(dst, mc);
-    cairo_set_source_rgba(mc, 0, 0, 0, 1);
-    cairo_paint(mc);
-    cairo_destroy(mc);
-    cairo_surface_flush(m);
-    const unsigned char *md = cairo_image_surface_get_data(m);
-    int ms = cairo_image_surface_get_stride(m);
-    cairo_surface_flush(ds->cs);
     uint32_t *dp = (uint32_t *)cairo_image_surface_get_data(ds->cs);
     int dstr = cairo_image_surface_get_stride(ds->cs) / 4;
-    for (int y = 0; y < bh; y++)
-        for (int x = 0; x < bw; x++) {
-            if (md[(size_t)y * ms + x] < 0x80) continue;
-            uint32_t *p = &dp[(size_t)(y0 + y) * dstr + (x0 + x)];
-            *p = rop_apply_px(dst, snap[(size_t)y * bw + x], *p);
+
+    for (int by = 0; by < bh; by += band) {
+        int cur_h = (bh - by < band) ? (bh - by) : band;
+        for (int y = 0; y < cur_h; y++)
+            for (int x = 0; x < bw; x++) {
+                int lx = (x0 + x) - dx * dsc, ly = (y0 + by + y) - dy * dsc;
+                int qx = sx * ssc + lx * ssc / dsc, qy = sy * ssc + ly * ssc / dsc;
+                snap[(size_t)y * bw + x] =
+                    (qx >= 0 && qy >= 0 && qx < spw && qy < sph)
+                    ? sp[(size_t)qy * sstr + qx] : 0;
+            }
+        cairo_surface_t *m = cairo_image_surface_create(CAIRO_FORMAT_A8, bw, cur_h);
+        if (!m || cairo_surface_status(m) != CAIRO_STATUS_SUCCESS) {
+            if (m) cairo_surface_destroy(m);
+            break;
         }
+        cairo_surface_set_device_scale(m, dsc, dsc);
+        cairo_surface_set_device_offset(m, -x0, -(y0 + by));
+        cairo_t *mc = cairo_create(m);
+        copy_clip(dst, mc);
+        cairo_set_source_rgba(mc, 0, 0, 0, 1);
+        cairo_paint(mc);
+        cairo_destroy(mc);
+        cairo_surface_flush(m);
+        const unsigned char *md = cairo_image_surface_get_data(m);
+        int ms = cairo_image_surface_get_stride(m);
+        for (int y = 0; y < cur_h; y++)
+            for (int x = 0; x < bw; x++) {
+                if (md[(size_t)y * ms + x] < 0x80) continue;
+                uint32_t *p = &dp[(size_t)(y0 + by + y) * dstr + (x0 + x)];
+                *p = rop_apply_px(dst, snap[(size_t)y * bw + x], *p);
+            }
+        cairo_surface_destroy(m);
+    }
     cairo_surface_mark_dirty(ds->cs);
-    cairo_surface_destroy(m);
     free(snap);
 }
 
@@ -750,15 +827,50 @@ void mw_canvas_copy(MwCanvas *dst, MwSurface *src, int sx, int sy,
     if (canvas_uses_rop(dst)) { copy_rop(dst, src, sx, sy, dx, dy, w, h); return; }
 
     /* Copying a surface onto itself (XCopyArea used for scrolling, which the
-     * Motif text widget does constantly) is undefined in cairo.  Snapshot the
-     * source region first. */
+     * Motif text widget does constantly) is undefined in cairo.  For an
+     * unclipped copy, perform an in-place row memmove with zero allocation. */
     if (src == dst->surface) {
-        /* The snapshot must be on the same device-scale grid as the source,
-         * otherwise cairo samples the (physical) source at logical pitch and
-         * silently downsamples it. */
         int ssc = src->scale > 0 ? src->scale : 1;
+        if (!dst->has_clip && src->data) {
+            int x0 = dx < 0 ? -dx : 0;
+            int y0 = dy < 0 ? -dy : 0;
+            if (sx + x0 < 0) x0 = -sx;
+            if (sy + y0 < 0) y0 = -sy;
+            int cw = w - x0, ch = h - y0;
+            if (dx + x0 + cw > src->w) cw = src->w - (dx + x0);
+            if (dy + y0 + ch > src->h) ch = src->h - (dy + y0);
+            if (sx + x0 + cw > src->w) cw = src->w - (sx + x0);
+            if (sy + y0 + ch > src->h) ch = src->h - (sy + y0);
+            if (cw > 0 && ch > 0) {
+                cairo_surface_flush(src->cs);
+                unsigned char *base = (unsigned char *)src->data;
+                int stride = src->stride;
+                int psx = (sx + x0) * ssc, psy = (sy + y0) * ssc;
+                int pdx = (dx + x0) * ssc, pdy = (dy + y0) * ssc;
+                int pcw = cw * ssc, pch = ch * ssc;
+                size_t row_bytes = (size_t)pcw * 4;
+                if (pdy > psy) {
+                    for (int row = pch - 1; row >= 0; row--)
+                        memmove(base + (size_t)(pdy + row) * stride + (size_t)pdx * 4,
+                                base + (size_t)(psy + row) * stride + (size_t)psx * 4,
+                                row_bytes);
+                } else {
+                    for (int row = 0; row < pch; row++)
+                        memmove(base + (size_t)(pdy + row) * stride + (size_t)pdx * 4,
+                                base + (size_t)(psy + row) * stride + (size_t)psx * 4,
+                                row_bytes);
+                }
+                cairo_surface_mark_dirty(src->cs);
+            }
+            return;
+        }
+        /* Clipped self-copy: snapshot the source region on the same scale grid. */
         cairo_surface_t *tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32,
                                                           w * ssc, h * ssc);
+        if (!tmp || cairo_surface_status(tmp) != CAIRO_STATUS_SUCCESS) {
+            if (tmp) cairo_surface_destroy(tmp);
+            return;
+        }
         if (ssc > 1) cairo_surface_set_device_scale(tmp, ssc, ssc);
         cairo_t *tc = cairo_create(tmp);
         cairo_set_operator(tc, CAIRO_OPERATOR_SOURCE);
@@ -1106,6 +1218,25 @@ int mw_font_char_rbearing(const MwFont *f, unsigned int ch)
     double bx  = m->ft_m->glyph->metrics.horiBearingX / 64.0;
     double bw  = m->ft_m->glyph->metrics.width / 64.0;
     return (int)ceil(adv - bx - bw);
+}
+
+void mw_font_char_metrics(const MwFont *f, unsigned int ch,
+                          int *width, int *lbearing, int *rbearing)
+{
+    MwFont *m = (MwFont *)f;
+    int adv = 0, lb = 0, rb = 0;
+    if (m && m->ft_m && ft_load_metrics(m, ch)) {
+        double dadv = m->ft_m->glyph->metrics.horiAdvance / 64.0;
+        double bx   = m->ft_m->glyph->metrics.horiBearingX / 64.0;
+        double bw   = m->ft_m->glyph->metrics.width / 64.0;
+        adv = (int)ceil(dadv);
+        lb  = (int)floor(bx);
+        rb  = (int)ceil(dadv - bx - bw);
+    }
+    if (ch < 256 && m) m->wcache[ch] = adv;
+    if (width)    *width = adv;
+    if (lbearing) *lbearing = lb;
+    if (rbearing) *rbearing = rb;
 }
 
 int mw_font_text_width_utf8(const MwFont *f, const char *s, int len)

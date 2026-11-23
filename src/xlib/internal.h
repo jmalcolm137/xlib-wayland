@@ -43,6 +43,22 @@
 #define MW_MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MW_MAX(a, b) ((a) > (b) ? (a) : (b))
 
+/* Cached environment trace flags (util.c) — avoids scanning environ on hot paths. */
+#define MW_TF_TRACE     (1u << 0)
+#define MW_TF_RENDER    (1u << 1)
+#define MW_TF_DUMP      (1u << 2)
+#define MW_TF_NO_RENDER (1u << 3)
+unsigned int mw_trace_flags(void);
+#define MW_TRACE()        ((mw_trace_flags() & MW_TF_TRACE) != 0)
+#define MW_TRACE_RENDER() ((mw_trace_flags() & MW_TF_RENDER) != 0)
+#define MW_TRACE_DUMP()   ((mw_trace_flags() & MW_TF_DUMP) != 0)
+
+uint64_t mw_now_ms(void);
+void     mw_hex_encode(const unsigned char *in, size_t n, char *out);
+int      mw_hex_decode(const char *hex, unsigned char *out, size_t max_bytes);
+void     mw_send_selection_notify(Display *d, Window requestor, Atom selection,
+                                  Atom target, Atom property, Time time);
+
 /* Default synthetic screen geometry when the compositor tells us nothing. */
 #define MW_DEFAULT_W 1280
 #define MW_DEFAULT_H 800
@@ -210,6 +226,8 @@ struct _XGC {
     Pixmap         clip_mask;
     int            dash_offset;
     char           dashes;
+    char          *dash_list;
+    int            ndash;
     /* resolved clip (drawable-relative) */
     bool           has_clip_rects;
     XRectangle    *clip_rects;
@@ -306,7 +324,7 @@ typedef struct MwClipServe {
      * transfer must not block the event loop (for a drag between two of our
      * own windows the reader is this very thread). */
     unsigned char *pend;
-    size_t   pend_len, pend_off;
+    size_t   pend_len, pend_off, pend_cap;
     /* ICCCM INCR: the owner sends the data in chunks on `incr_prop` of our
      * requestor window, each written when we delete the previous one. */
     bool     incr;
@@ -380,6 +398,7 @@ typedef struct MwBuf {
     size_t              size;
     int                 stride;
     MwSurface          *frame;
+    int                 frame_w, frame_h, frame_scale;
     bool                busy;   /* attached / awaiting release */
     int                 idx;
     struct MwToplevel  *tl;
@@ -396,19 +415,24 @@ struct MwToplevel {
     MwWindow              *parent_tl;
     uint32_t               reposition_token;
     MwBuf                  bufs[2];
-    /* Grow-only buffer allocation: with wp_viewporter the buffers stay at
+    /* Grow-and-shrink buffer allocation: with wp_viewporter the buffers stay at
      * `cap_*` and the used area is cropped per frame, so resizing does not
-     * create new buffers (and the compositor does not re-import them) on every
-     * step of an interactive resize. */
+     * create new buffers on every step, and shrinks when used area drops. */
     int                    cap_w, cap_h;
     int                    buf_scale;     /* output scale the buffers were made for */
     struct wp_viewport    *viewport;
-    MwSurface             *frame;            /* current draw target */
+    MwSurface             *frame;            /* current draw target (borrowed from bufs[idx]) */
     struct wl_callback    *frame_cb;         /* compositor frame pacing */
     struct MwToplevel     *dirty_next;       /* display dirty list */
     bool                   in_dirty_list;
     int                    last_idx;         /* buffer most recently attached */
     uint64_t               last_commit_ms;   /* for the no-release fallback */
+    uint64_t               last_flush_ms;    /* per-toplevel frame pacing */
+    /* Per-frame damage (sent to compositor) and per-buffer accumulated damage
+     * (so double-buffered partial repaints stay pixel-exact). */
+    pixman_region32_t      damage;
+    pixman_region32_t      buf_damage[2];
+    bool                   damage_full;
     struct zxdg_toplevel_decoration_v1 *deco; /* may be NULL */
     int                    width, height;    /* configured (surface) size */
     int                    req_w, req_h;     /* requested */
@@ -418,10 +442,6 @@ struct MwToplevel {
     bool                   popup_dismissed;   /* compositor dismissed the popup; rebuild before re-map */
     bool                   mapped;
     bool                   dirty;
-    bool                   pending_ack;
-    bool                   use_ssd;          /* server-side decoration */
-    bool                   decorated;
-    bool                   closed;
     bool                   csd;              /* draw client-side decorations */
     int                    tb_h;             /* titlebar height when csd */
     bool                   fullscreen;       /* we (as WM) put it fullscreen */
@@ -573,8 +593,10 @@ typedef struct _XDisplayImpl {
     int                         output_w, output_h;   /* logical size, pixels */
     int                         output_pw, output_ph; /* physical size, mm */
     int                         output_mode_w, output_mode_h; /* mode, physical px */
+    int                         output_refresh_mhz;   /* wl_output.mode refresh, mHz */
     int                         output_scale;         /* wl_output.scale, >= 1 */
     int                         seat_caps;
+    MwFont                     *csd_font;             /* owned by display */
 
     /* XInput2 emulation: the last request built through _XGetRequest (so
      * _XReply can answer it) and any variable-length reply payload waiting to
@@ -591,13 +613,11 @@ typedef struct _XDisplayImpl {
     Depth                       depths[2];
     ScreenFormat                formats[2];
 
-    /* Render extension: the request built through _XGetRequest is dispatched
-     * when the next request is built, when a reply is awaited, or on flush. */
-    int                         render_req_pending;
-    int                         render_req_type;
-    size_t                      render_req_len;
-    unsigned char              *render_req;
-    int                         render_pending[8];  /* Render query replies, in */
+    /* Render extension: requests buffered in the Xlib output buffer are
+     * dispatched on drain/flush/reply. */
+    unsigned long               buf_first_req;     /* seq of first req in output buffer */
+    int                         render_pending[8]; /* Render query replies, in */
+    unsigned long               render_pending_seq[8];
     int                         render_npending;   /* request order (FIFO)      */
     unsigned char              *render_reply_data;
     size_t                      render_reply_len;
@@ -646,6 +666,8 @@ typedef struct _XDisplayImpl {
     struct xkb_state           *xkb_state;
     struct xkb_state           *xkb_lookup_state;  /* scratch: key under a given state */
     struct xkb_keymap          *xkb_lookup_keymap; /* the keymap it was made for */
+    xkb_mod_index_t             xkb_mod_idx[8];    /* cached core modifier indices */
+    struct xkb_keymap          *xkb_mod_keymap;    /* keymap xkb_mod_idx was built for */
     /* Dead-key / compose sequences (e.g. dead_acute + e -> é). */
     struct xkb_compose_table   *xkb_compose_table;
     struct xkb_compose_state   *xkb_compose_state;
@@ -722,6 +744,7 @@ typedef struct _XDisplayImpl {
     uint64_t                    repeat_next_ms;   /* when the next repeat is due */
     int                         auto_repeat;      /* AutoRepeatModeOn/Off, shared
                                                    * with dtstyle's Keyboard panel */
+    uint64_t                    auto_repeat_check_ms;
 
     /* Wakeup plumbing (see src/wayland/wakeup.c).  libXt waits in select() on
      * the fd XConnectionNumber returns; if that is the Wayland socket the
@@ -842,6 +865,7 @@ MwWindow *mw_create_window(Display *d, Window parent, int x, int y, int w, int h
                            XSetWindowAttributes *attr);
 void      mw_destroy_window(Display *d, MwWindow *win);
 void      mw_extensions_close(Display *d);
+void      mw_contexts_fini(Display *d);
 void      mw_map_window(Display *d, MwWindow *win, bool raised);
 void      mw_unmap_window(Display *d, MwWindow *win);
 void      mw_set_focus(Display *d, MwWindow *win);
@@ -861,6 +885,7 @@ void      mw_window_wm_resize(MwWindow *win, int w, int h);
 void      mw_window_ensure_surface(MwWindow *win);
 MwWindow *mw_any_mapped_toplevel(Display *d, MwWindow *avoid);
 void      mw_window_damage(MwWindow *win);
+void      mw_window_damage_rect(MwWindow *win, int x, int y, int w, int h);
 void      mw_window_expose(MwWindow *win, int x, int y, int w, int h);
 void      mw_window_flush(MwWindow *win);
 void      mw_configure_notify(Display *d, MwWindow *win);
@@ -894,6 +919,7 @@ void       mw_xi2_crossing(Display *d, Window win, int evtype, int mode,
                            double x, double y, Time time);
 /* The id of the touch device, or 0 when the seat has no touch. */
 int        mw_xi2_touch_device(Display *d);
+void       mw_xi2_window_gone(Display *d, Window w);
 void       mw_xi2_fini(Display *d);
 
 /* X11 session protocol (session.c): deliver WM_SAVE_YOURSELF / WM_DELETE_WINDOW
@@ -923,6 +949,7 @@ void        mw_toplevel_unmap(MwToplevel *tl);
 void        mw_toplevel_set_size(MwToplevel *tl, int w, int h);
 void        mw_toplevel_commit(MwToplevel *tl);
 void        mw_toplevel_damage(MwToplevel *tl);
+void        mw_toplevel_damage_rect(MwToplevel *tl, int x, int y, int w, int h);
 void        mw_toplevel_render(MwToplevel *tl);
 void        mw_composite_window(MwToplevel *tl, MwWindow *win, int ox, int oy);
 void        mw_toplevel_close(MwToplevel *tl);

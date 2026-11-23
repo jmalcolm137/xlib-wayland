@@ -23,6 +23,7 @@
  * the compositor routes them to the IME and only forwards what it declines.
  */
 #include "internal.h"
+#include <locale.h>
 
 #include <X11/keysym.h>
 
@@ -644,28 +645,26 @@ Status XCloseIM(XIM im)
  * directly (via Xt), so its absence was a hard undefined-symbol failure for
  * every libXaw client -- xterm included. */
 Display *XDisplayOfIM(XIM im) { return im ? im->display : NULL; }
-char *XLocaleOfIM(XIM im) { (void)im; return NULL; }
+char *XLocaleOfIM(XIM im)
+{
+    (void)im;
+    const char *loc = setlocale(LC_CTYPE, NULL);
+    return (char *)(loc ? loc : "C");
+}
 
-/* XNQueryInputStyle hands ownership to the caller: the XIM spec says the
- * client frees the returned XIMStyles with XFree(), and that is exactly what
- * libXaw's text code does.  Allocate a fresh copy per call, with the style
- * array in its own allocation.
- *
- * Order matters: Motif's XmIm picks the first entry that matches XmNpreeditType
- * (default OverTheSpot) and wants XIMPreeditPosition; GTK2 filters out Position
- * (its ALLOWED_MASK) and takes the Callbacks entry. */
+/* Pack XIMStyles and its array into a single allocation so the caller's
+ * single XFree() frees everything without leaking. */
 static XIMStyles *query_styles(void)
 {
-    XIMStyle *list = malloc(4 * sizeof *list);
-    XIMStyles *styles = malloc(sizeof *styles);
-    if (!list || !styles) { free(list); free(styles); return NULL; }
-    list[0] = XIMPreeditPosition  | XIMStatusNothing;
-    list[1] = XIMPreeditCallbacks | XIMStatusCallbacks;
-    list[2] = XIMPreeditNothing   | XIMStatusNothing;
-    list[3] = XIMPreeditNone      | XIMStatusNone;
-    styles->count_styles = 4;
-    styles->supported_styles = list;
-    return styles;
+    struct { XIMStyles s; XIMStyle list[4]; } *buf = malloc(sizeof *buf);
+    if (!buf) return NULL;
+    buf->list[0] = XIMPreeditPosition  | XIMStatusNothing;
+    buf->list[1] = XIMPreeditCallbacks | XIMStatusCallbacks;
+    buf->list[2] = XIMPreeditNothing   | XIMStatusNothing;
+    buf->list[3] = XIMPreeditNone      | XIMStatusNone;
+    buf->s.count_styles = 4;
+    buf->s.supported_styles = buf->list;
+    return &buf->s;
 }
 
 static XIMValuesList *query_values_list(void)
@@ -676,14 +675,13 @@ static XIMValuesList *query_values_list(void)
         XNFontSet, XNForeground, XNBackground, XNLineSpace,
         XNPreeditState, XNResetState,
     };
-    int n = (int)(sizeof names / sizeof names[0]);
-    char **vals = malloc((size_t)n * sizeof(char *));
-    XIMValuesList *vl = malloc(sizeof *vl);
-    if (!vals || !vl) { free(vals); free(vl); return NULL; }
-    for (int i = 0; i < n; i++) vals[i] = (char *)names[i];
-    vl->count_values = (unsigned short)n;
-    vl->supported_values = vals;
-    return vl;
+    enum { N = (int)(sizeof names / sizeof names[0]) };
+    struct { XIMValuesList vl; char *vals[N]; } *buf = malloc(sizeof *buf);
+    if (!buf) return NULL;
+    for (int i = 0; i < N; i++) buf->vals[i] = (char *)names[i];
+    buf->vl.count_values = (unsigned short)N;
+    buf->vl.supported_values = buf->vals;
+    return &buf->vl;
 }
 
 char *XGetIMValues(XIM im, ...)
@@ -1101,7 +1099,12 @@ char *Xutf8ResetIC(XIC ic) { return XmbResetIC(ic); }
 wchar_t *XwcResetIC(XIC ic)
 {
     char *mb = XmbResetIC(ic);
+    if (!mb) return NULL;
     size_t n = mbstowcs(NULL, mb, 0);
+    if (n == (size_t)-1) {
+        free(mb);
+        return calloc(1, sizeof(wchar_t));
+    }
     wchar_t *w = calloc(n + 1, sizeof *w);
     if (w) mbstowcs(w, mb, n + 1);
     free(mb);
@@ -1146,9 +1149,8 @@ void mw_xim_overlay(Display *d, MwToplevel *tl)
         f = xf->rfont;
     }
     if (!f) {
-        static MwFont *fallback;
-        if (!fallback) fallback = mw_font_create(NULL, 0);
-        f = fallback;
+        MwXFont *df = mw_default_font(d);
+        f = df ? df->rfont : NULL;
     }
     if (!f) return;
 

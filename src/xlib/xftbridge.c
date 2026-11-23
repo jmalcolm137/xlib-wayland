@@ -41,7 +41,7 @@ void mw_xft_draw_utf8(Display *dpy, Drawable dr, void *font, int x, int y,
                       const char *utf8, int len, unsigned int argb,
                       const XRectangle *clip, int nclip)
 {
-    if (getenv("MW_TRACE"))
+    if (MW_TRACE())
         fprintf(stderr, "MW: xft-draw %d bytes '%.*s'\n",
                 len, len > 12 ? 12 : len, utf8);
     MwCanvas *c = xft_canvas(dpy, dr, clip, nclip);
@@ -63,7 +63,8 @@ void mw_xft_fill_rect(Display *dpy, Drawable dr, int x, int y,
     mw_rect(c, x, y, w, h);
     mw_fill_path(c);
     mw_canvas_end(c);
-    xft_damage(dpy, dr);
+    MwWindow *win = mw_window(dpy, dr);
+    if (win) mw_window_damage_rect(win, x, y, (int)w, (int)h);
 }
 
 void mw_xft_draw_glyphs(Display *dpy, Drawable dr, void *font,
@@ -71,7 +72,7 @@ void mw_xft_draw_glyphs(Display *dpy, Drawable dr, void *font,
                         const int *ys, int n, unsigned int argb,
                         const XRectangle *clip, int nclip)
 {
-    if (getenv("MW_TRACE"))
+    if (MW_TRACE())
         fprintf(stderr, "MW: xft-draw-glyphs n=%d\n", n);
     MwCanvas *c = xft_canvas(dpy, dr, clip, nclip);
     if (!c) return;

@@ -106,7 +106,15 @@ static void send_notify(Display *d, MwDamage *dm, XRectangle area)
         ev.geometry.width = (unsigned short)win->w;
         ev.geometry.height = (unsigned short)win->h;
     } else {
-        ev.geometry = area;
+        MwPixmap *pm = mw_pixmap(d, dm->drawable);
+        if (pm) {
+            ev.geometry.x = 0;
+            ev.geometry.y = 0;
+            ev.geometry.width = (unsigned short)pm->w;
+            ev.geometry.height = (unsigned short)pm->h;
+        } else {
+            ev.geometry = area;
+        }
     }
     mw_put_event(d, (XEvent *)&ev);
 }

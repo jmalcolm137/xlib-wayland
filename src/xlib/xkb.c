@@ -314,6 +314,7 @@ static Status xkb_build_map(Display *dpy, XkbDescPtr xkb, unsigned int deviceSpe
      * entry (no groups, no symbols) and are skipped. */
     int nkeys = 256;
 
+    if (xkb->map) XkbFreeKeyboard(xkb, XkbClientMapMask, False);
     XkbClientMapRec *map = calloc(1, sizeof *map);
     if (!map) return BadAlloc;
     xkb->map = map;
@@ -385,8 +386,8 @@ static Status xkb_build_map(Display *dpy, XkbDescPtr xkb, unsigned int deviceSpe
         if (width > 4) width = 4;
 
         map->key_sym_map[k].width = (unsigned char)width;
-        map->key_sym_map[k].group_info =
-            (unsigned char)(((width & 0x03) << 4) | (ng & 0x0f));
+        /* Low 4 bits = number of groups; bits 4-5 = out-of-range group (0=wrap). */
+        map->key_sym_map[k].group_info = (unsigned char)(ng & 0x0f);
         map->key_sym_map[k].offset = (unsigned short)off;
         for (int g = 0; g < XkbNumKbdGroups; g++)
             map->key_sym_map[k].kt_index[g] = (width >= 2) ? 1 : 0;
@@ -549,10 +550,13 @@ Status XkbGetControls(Display *dpy, unsigned long which, XkbDescPtr desc)
      * KeyRelease events on the repeat deadline and already honours the CDE
      * Style Manager's toggle).  Report it enabled so GDK does not install a
      * competing repeat timer. */
-    desc->ctrls->enabled_ctrls   = XkbRepeatKeysMask;
-    desc->ctrls->repeat_delay    = 660;
-    desc->ctrls->repeat_interval = 25;
-    desc->ctrls->num_groups      = 1;
+    XDisplayImpl *dp = dpy ? MWD(dpy) : NULL;
+    bool rep_on = dp ? mw_autorepeat_enabled(dpy) : true;
+    desc->ctrls->enabled_ctrls   = rep_on ? XkbRepeatKeysMask : 0;
+    desc->ctrls->repeat_delay    = (dp && dp->repeat_delay > 0) ? (unsigned short)dp->repeat_delay : 660;
+    desc->ctrls->repeat_interval = (dp && dp->repeat_rate > 0) ? (unsigned short)(1000 / dp->repeat_rate) : 25;
+    unsigned ng = (dp && dp->xkb_keymap) ? xkb_keymap_num_layouts(dp->xkb_keymap) : 1;
+    desc->ctrls->num_groups      = (unsigned char)(ng > 0 ? ng : 1);
     return Success;
 }
 
@@ -585,9 +589,9 @@ Bool XkbSetDetectableAutoRepeat(Display *dpy, Bool detectable,
 
 void XkbFreeKeyboard(XkbDescPtr xkb, unsigned int which, Bool freeDesc)
 {
-    (void)which;
     if (!xkb) return;
-    if (xkb->map) {
+    if (freeDesc) which = XkbAllComponentsMask;
+    if ((which & XkbClientMapMask) && xkb->map) {
         if (xkb->map->types)
             for (int i = 0; i < xkb->map->num_types; i++) {
                 free(xkb->map->types[i].map);
@@ -598,25 +602,28 @@ void XkbFreeKeyboard(XkbDescPtr xkb, unsigned int which, Bool freeDesc)
         free(xkb->map->key_sym_map);
         free(xkb->map->modmap);
         free(xkb->map);
+        xkb->map = NULL;
     }
-    if (xkb->server) {
+    if ((which & XkbServerMapMask) && xkb->server) {
         free(xkb->server->acts);
         free(xkb->server->behaviors);
         free(xkb->server->key_acts);
         free(xkb->server->explicit);
         free(xkb->server->vmodmap);
         free(xkb->server);
+        xkb->server = NULL;
     }
-    if (xkb->names) {
+    if ((which & XkbNamesMask) && xkb->names) {
         free(xkb->names->keys);
         free(xkb->names->key_aliases);
         free(xkb->names->radio_groups);
         free(xkb->names);
+        xkb->names = NULL;
     }
-    free(xkb->compat);
-    free(xkb->indicators);
-    free(xkb->ctrls);
-    free(xkb->geom);
+    if (which & XkbCompatMapMask) { free(xkb->compat); xkb->compat = NULL; }
+    if (which & XkbIndicatorMapMask) { free(xkb->indicators); xkb->indicators = NULL; }
+    if (which & XkbControlsMask) { free(xkb->ctrls); xkb->ctrls = NULL; }
+    if (which & XkbGeometryMask) { free(xkb->geom); xkb->geom = NULL; }
     if (freeDesc) free(xkb);
 }
 

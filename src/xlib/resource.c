@@ -496,25 +496,29 @@ static RmEntry *
 best_match(XrmDatabase db, XrmQuarkList names, XrmQuarkList classes, int m)
 {
     RmEntry *best = NULL;
-    int *ranks;
-    int *best_ranks;
+    int stack_ranks[32], stack_best[32];
+    int *ranks = m <= 32 ? stack_ranks : (int *)malloc((size_t)m * sizeof(int));
+    int *best_ranks = m <= 32 ? stack_best : (int *)malloc((size_t)m * sizeof(int));
     RmEntry *e;
 
     xrm_init_once();
-    if (!db || m <= 0)
-        return NULL;
-
-    ranks = (int *)malloc((size_t)m * sizeof(int));
-    best_ranks = (int *)malloc((size_t)m * sizeof(int));
-    if (!ranks || !best_ranks) {
-        free(ranks);
-        free(best_ranks);
+    if (!db || m <= 0 || !ranks || !best_ranks) {
+        if (ranks != stack_ranks) free(ranks);
+        if (best_ranks != stack_best) free(best_ranks);
         return NULL;
     }
+
+    XrmQuark last_n = names[m - 1];
+    XrmQuark last_c = classes ? classes[m - 1] : NULLQUARK;
 
     for (e = db->entries; e; e = e->next) {
         int i;
         if (e->n < 1)
+            continue;
+        /* Fast reject on the leaf quark: in Xrm the final component of a rule
+         * must match the final component of the query (name, class, or '?'). */
+        XrmQuark eq = e->quarks[e->n - 1];
+        if (eq != last_n && eq != last_c && eq != quark_ANY)
             continue;
         for (i = 0; i < m; i++)
             ranks[i] = RANK_SKIP;
@@ -526,8 +530,8 @@ best_match(XrmDatabase db, XrmQuarkList names, XrmQuarkList classes, int m)
         }
     }
 
-    free(ranks);
-    free(best_ranks);
+    if (ranks != stack_ranks) free(ranks);
+    if (best_ranks != stack_best) free(best_ranks);
     return best;
 }
 
@@ -1112,10 +1116,11 @@ XrmGetResource(XrmDatabase db, const char *name_str, const char *class_str,
 
     xrm_init_once();
 
-    names = (XrmQuark *)calloc(strlen(name_str ? name_str : "") + 2,
-                               sizeof(XrmQuark));
-    classes = (XrmQuark *)calloc(strlen(class_str ? class_str : "") + 2,
-                                 sizeof(XrmQuark));
+    size_t nlen = strlen(name_str ? name_str : "");
+    size_t clen = strlen(class_str ? class_str : "");
+    size_t qcap = (nlen > clen ? nlen : clen) + 2;
+    names = (XrmQuark *)calloc(qcap, sizeof(XrmQuark));
+    classes = (XrmQuark *)calloc(qcap, sizeof(XrmQuark));
     if (!names || !classes) {
         free(names);
         free(classes);
@@ -1266,6 +1271,7 @@ XrmEnumerateDatabase(XrmDatabase db, XrmNameList name_prefix,
     xrm_init_once();
 
     m = quark_list_len(name_prefix);
+    if (!class_prefix && m > 0) class_prefix = name_prefix;
     for (e = db->entries; e; e = e->next) {
         int remaining = 0;
         XrmBinding *bindings;

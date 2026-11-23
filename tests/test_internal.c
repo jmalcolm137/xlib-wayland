@@ -1133,6 +1133,48 @@ static void check_core_odds(Display *d, Window root)
     drain(d);
 }
 
+static void check_round6(Display *d)
+{
+    /* O(1) backward-shift mw_unregister stress test. */
+    enum { N = 1024 };
+    XID ids[N];
+    int dummy[N];
+    for (int i = 0; i < N; i++) {
+        ids[i] = mw_alloc_id(d);
+        dummy[i] = i;
+        mw_register(d, ids[i], MW_OBJ_COLORMAP, &dummy[i]);
+    }
+    for (int i = 0; i < N; i += 2)
+        mw_unregister(d, ids[i]);
+    for (int i = 0; i < N; i++) {
+        void *p = mw_lookup(d, ids[i], MW_OBJ_COLORMAP);
+        if ((i & 1) == 0) CHECK(p == NULL);
+        else              CHECK(p == &dummy[i]);
+    }
+    for (int i = 1; i < N; i += 2)
+        mw_unregister(d, ids[i]);
+
+    /* _XDeqAsyncHandler must unlink the node (prevents stack UAF). */
+    extern int _XDeqAsyncHandler(Display *, void *);
+    struct { void *next; void *fn; void *data; } h1 = { NULL, NULL, NULL };
+    struct { void *next; void *fn; void *data; } h2 = { &h1, NULL, NULL };
+    MWD(d)->async_handlers = &h2;
+    CHECK(_XDeqAsyncHandler(d, &h1) == 1);
+    CHECK(MWD(d)->async_handlers == &h2 && h2.next == NULL);
+    CHECK(_XDeqAsyncHandler(d, &h2) == 1);
+    CHECK(MWD(d)->async_handlers == NULL);
+
+    /* XGetIMValues single-allocation packing (verified by LSan). */
+    XIM im = XOpenIM(d, NULL, NULL, NULL);
+    if (im) {
+        XIMStyles *st = NULL;
+        CHECK(XGetIMValues(im, XNQueryInputStyle, &st, NULL) == NULL && st != NULL);
+        XFree(st);
+        CHECK(XLocaleOfIM(im) != NULL);
+        XCloseIM(im);
+    }
+}
+
 int main(void)
 {
     check_write_all();
@@ -1171,6 +1213,7 @@ int main(void)
     check_rop_bands(d, root);
     check_keymap(d, w);
     check_key_levels(d, w);
+    check_round6(d);
 
     XDestroyWindow(d, w);
     XCloseDisplay(d);

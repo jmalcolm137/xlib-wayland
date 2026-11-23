@@ -301,8 +301,7 @@ int XLookupColor(Display *d, Colormap cmap, _Xconst char *spec, XColor *exact,
 int XAllocNamedColor(Display *d, Colormap cmap, _Xconst char *spec,
                      XColor *screen, XColor *exact)
 {
-    if (!XParseColor(d, cmap, spec, exact)) return 0;
-    XLookupColor(d, cmap, spec, exact, screen);
+    if (!XLookupColor(d, cmap, spec, exact, screen)) return 0;
     exact->pixel = screen->pixel;         /* libX11 sets it in both */
     return 1;
 }
@@ -322,9 +321,21 @@ XVisualInfo *XGetVisualInfo(Display *d, long vinfo_mask, XVisualInfo *vinfo,
         Visual *v = vs[i];
         if ((vinfo_mask & VisualIDMask) && vinfo->visualid != v->visualid)
             continue;
+        if ((vinfo_mask & VisualScreenMask) && vinfo->screen != 0)
+            continue;
         if ((vinfo_mask & VisualDepthMask) && vinfo->depth != vdepths[i])
             continue;
         if ((vinfo_mask & VisualClassMask) && vinfo->class != v->class)
+            continue;
+        if ((vinfo_mask & VisualRedMaskMask) && vinfo->red_mask != v->red_mask)
+            continue;
+        if ((vinfo_mask & VisualGreenMaskMask) && vinfo->green_mask != v->green_mask)
+            continue;
+        if ((vinfo_mask & VisualBlueMaskMask) && vinfo->blue_mask != v->blue_mask)
+            continue;
+        if ((vinfo_mask & VisualColormapSizeMask) && vinfo->colormap_size != 256)
+            continue;
+        if ((vinfo_mask & VisualBitsPerRGBMask) && vinfo->bits_per_rgb != 8)
             continue;
         out[n].visual = v;
         out[n].visualid = v->visualid;

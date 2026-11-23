@@ -39,6 +39,29 @@ const char *xlocaledir = "/usr/share/X11/locale";
 int _XFlush(Display *d) { mw_render_drain(d); XFlush(d); return 1; }
 void _XFlushGCCache(Display *d, GC gc) { (void)d; (void)gc; }
 
+static int outbuf_ensure(XDisplayImpl *dp, size_t extra)
+{
+    char *buffer = dp->private12;
+    char *bufptr = dp->private13;
+    char *bufmax = dp->private14;
+    if (!buffer) return 0;
+    if ((size_t)(bufmax - bufptr) >= extra) return 1;
+    size_t used = (size_t)(bufptr - buffer);
+    size_t last_off = dp->private11 ? (size_t)((char *)dp->private11 - buffer) : 0;
+    ptrdiff_t xi2_off = -1;
+    if (dp->xi2_req && (char *)dp->xi2_req >= buffer && (char *)dp->xi2_req <= bufmax)
+        xi2_off = (char *)dp->xi2_req - buffer;
+    size_t ncap = used + extra + (1u << 16);
+    char *nb = realloc(buffer, ncap);
+    if (!nb) return 0;
+    dp->private11 = nb + last_off;
+    dp->private12 = nb;
+    dp->private13 = nb + used;
+    dp->private14 = nb + ncap;
+    if (xi2_off >= 0) dp->xi2_req = (unsigned char *)(nb + xi2_off);
+    return 1;
+}
+
 int _XSend(Display *d, _Xconst char *data, long size)
 {
     XDisplayImpl *dp = MWD(d);
@@ -53,18 +76,8 @@ int _XSend(Display *d, _Xconst char *data, long size)
     /* An overflow append (Xlibint.h's Data()): the bytes belong to the request
      * whose header is already in the buffer, so keep the stream contiguous
      * instead of dropping them. */
+    if (!outbuf_ensure(dp, (size_t)size)) return 1;
     char *bufptr = dp->private13;
-    char *bufmax = dp->private14;
-    if (bufptr + size > bufmax) {
-        size_t used = (size_t)(bufptr - buffer);
-        size_t ncap = used + (size_t)size + (1u << 16);
-        char *nb = realloc(buffer, ncap);
-        if (!nb) return 1;
-        buffer = nb; bufptr = buffer + used;
-        dp->private11 = buffer;   /* last_req */
-        dp->private12 = buffer;
-        dp->private14 = buffer + ncap;
-    }
     memcpy(bufptr, data, (size_t)size);
     dp->private13 = bufptr + size;
     return 1;
@@ -84,19 +97,14 @@ char *_XGetRequest(Display *d, unsigned char type, size_t len)
          * buffer (libXrender builds the whole request, including variable data,
          * inside the reservation). */
         mw_render_drain(d);
-        bufptr = buffer;
-        size_t cap = (size_t)(bufmax - buffer);
-        if (len > cap) {
-            size_t ncap = len + (1u << 16);
-            char *nb = realloc(buffer, ncap);
-            if (!nb) return NULL;
-            buffer = nb; cap = ncap;
-            dp->private11 = buffer;          /* last_req */
-            dp->private12 = buffer;
-            dp->private14 = buffer + cap;
-            bufptr = buffer;
-        }
+        if (!outbuf_ensure(dp, len)) return NULL;
+        buffer = dp->private12;
+        bufptr = dp->private13;
     }
+
+    dp->request++;
+    if (dp->serial < dp->request) dp->serial = dp->request;
+    if (bufptr == buffer) dp->buf_first_req = dp->request;
 
     char *req = bufptr;
     dp->private13 = req + len;
@@ -112,7 +120,7 @@ char *_XGetRequest(Display *d, unsigned char type, size_t len)
     mw_xi2_forget_request(d);
     dp->xi2_req = (unsigned char *)req;
     dp->xi2_req_len = (int)len;
-    if (getenv("MW_TRACE_RENDER"))
+    if (MW_TRACE_RENDER())
         fprintf(stderr, "MW: _XGetRequest type=%d len=%zu\n", type, len);
     return req;
 }
@@ -152,7 +160,9 @@ int _XRead32(Display *d, long *data, long len)
     if (data && len > 0) {
         size_t n = (size_t)len / 4;
         uint32_t *w = (uint32_t *)data;
-        if (mw_xi2_read(d, (char *)data, n * 4) < 0) memset(data, 0, n * 4);
+        if (mw_render_read(d, (char *)data, n * 4) < 0 &&
+            mw_xi2_read(d, (char *)data, n * 4) < 0)
+            memset(data, 0, n * 4);
         for (size_t i = n; i-- > 0; )
             data[i] = (long)(int32_t)w[i];
     }
@@ -161,8 +171,10 @@ int _XRead32(Display *d, long *data, long len)
 
 int _XReadPad(Display *d, char *data, long size)
 {
-    (void)d;
-    if (data && size > 0) memset(data, 0, (size_t)size);
+    if (data && size > 0) {
+        if (mw_render_read(d, data, (size_t)size) >= 0) return (int)size;
+        if (mw_xi2_read(d, data, (size_t)size) < 0) memset(data, 0, (size_t)size);
+    }
     return (int)size;
 }
 
@@ -174,16 +186,18 @@ void _XSetLastRequestRead(Display *d, unsigned long seq)
 
 char *_XAllocScratch(Display *d, unsigned long nbytes)
 {
-    static char *buf;
-    static unsigned long cap;
-    if (nbytes > cap) {
-        free(buf);
-        buf = calloc(1, nbytes + 64);
-        cap = nbytes + 64;
+    XDisplayImpl *dp = MWD(d);
+    if (!dp) return NULL;
+    if (nbytes > dp->scratch_length) {
+        char *nb = calloc(1, nbytes + 64);
+        if (!nb) return NULL;
+        free(dp->scratch_buffer);
+        dp->scratch_buffer = nb;
+        dp->scratch_length = nbytes + 64;
+    } else if (dp->scratch_buffer && nbytes > 0) {
+        memset(dp->scratch_buffer, 0, nbytes);
     }
-    if (buf) memset(buf, 0, cap);
-    (void)d;
-    return buf;
+    return dp->scratch_buffer;
 }
 
 char *_XAllocTemp(Display *d, int nbytes) { (void)d; return calloc(1, (size_t)nbytes); }void _XFreeTemp(Display *d, char *buf, int nbytes) { (void)d; (void)nbytes; free(buf); }
@@ -208,7 +222,24 @@ void _XInitImageFuncPtrs(XImage *image) { (void)image; }
 
 int _XReadEvents(Display *d) { mw_process_events(d, false); return 1; }
 
-int _XDeqAsyncHandler(Display *d, void *handler) { (void)d; (void)handler; return 0; }
+typedef struct _MwAsyncLink {
+    struct _MwAsyncLink *next;
+} MwAsyncLink;
+
+int _XDeqAsyncHandler(Display *d, void *handler)
+{
+    XDisplayImpl *dp = MWD(d);
+    if (!dp || !handler) return 0;
+    MwAsyncLink **pp = (MwAsyncLink **)&dp->async_handlers;
+    while (*pp) {
+        if (*pp == (MwAsyncLink *)handler) {
+            *pp = (*pp)->next;
+            return 1;
+        }
+        pp = &(*pp)->next;
+    }
+    return 0;
+}
 /* Copy a synthesised reply into the caller's buffer, the way Xlib does when it
  * reads one off the wire: the fixed 32-byte reply, then any extra words.  The
  * async handler libXrender registers for QueryVersion calls this and then
@@ -255,23 +286,12 @@ int _XData32(Display *d, void *src, long len)
     XDisplayImpl *dp = MWD(d);
     long nvals = len / 4;
     if (!src || nvals <= 0) return 0;
-    char *buffer = dp->private12;
-    if (!buffer) return 0;
     size_t bytes = (size_t)nvals * 4;
-    char *bufptr = dp->private13, *bufmax = dp->private14;
-    if (bufptr + bytes > bufmax) {
-        size_t used = (size_t)(bufptr - buffer);
-        size_t ncap = used + bytes + (1u << 16);
-        char *nb = realloc(buffer, ncap);
-        if (!nb) return 0;
-        buffer = nb; bufptr = buffer + used;
-        dp->private11 = buffer;
-        dp->private12 = buffer;
-        dp->private14 = buffer + ncap;
-    }
-    uint32_t *s = (uint32_t *)src;
+    if (!outbuf_ensure(dp, bytes)) return 0;
+    char *bufptr = dp->private13;
+    const long *s = (const long *)src;
     for (long i = 0; i < nvals; i++) {
-        uint32_t v = s[i * 2];      /* low 32 bits of each (long) slot */
+        uint32_t v = (uint32_t)s[i];
         memcpy(bufptr + (size_t)i * 4, &v, 4);
     }
     dp->private13 = bufptr + bytes;
