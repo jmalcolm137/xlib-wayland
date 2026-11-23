@@ -19,61 +19,6 @@ See [DESIGN.md](DESIGN.md) for the full rationale.
 Compatibility is good enough to run applications built with Xlib, the Athena Toolkit, the Xt Toolkit,
 CDE / OpenMotif, GIMP 2.10 over GTK2, and Firefox 157 over GTK3 (X11 back-end).
 
-## Status
-
-The shim (`src/`, installed as `libX11.so.6`) is implemented and working.
-It is validated end-to-end, without any X server, against a bundled headless
-Wayland compositor:
-
-| Milestone | State |
-|---|---|
-| M0 model + build + unit tests | ✅ done (`meson test`) |
-| M1 Wayland backend, windows, drawing, `XImage`, events | ✅ done |
-| M2 fonts/text, colours, cursors, selections, Xrm, XRandR, XShape, local XIM | ✅ done |
-| M3 upstream libXt built unmodified; real Xt program runs | ✅ done |
-| M4 Open Motif (`libXm`) built unmodified; a Motif program runs | ✅ done |
-| **XV 6.2 built unmodified and rendering** | ✅ **done** |
-| **NEdit 5.7 built unmodified and rendering** | ✅ **done** |
-| X resource database (`RESOURCE_MANAGER`, `~/.Xresources`, `$XENVIRONMENT`) | ✅ done |
-| Client-side decorations when the compositor has none | ✅ done |
-| M5 Xft/Render, full IME | ✅ **done** — Render is implemented and on by default; XIM is a real bridge to Wayland `zwp_text_input_v3` ([docs/IME-STATUS.md](docs/IME-STATUS.md)) |
-| **Render conformance (rendercheck 1.6)** | ✅ **done** — 10372/10372 tests ([docs/RENDER-STATUS.md](docs/RENDER-STATUS.md)) |
-| GTK+ 2.24.33 built unmodified; gtester 14/14 | ✅ done |
-| MATE 1.10 applications built unmodified (29 components) | ✅ done |
-| GIMP 2.10.24 built unmodified; runs and renders with no XWayland | ✅ done |
-| **Firefox 157 (GTK3, X11 toolkit) built unmodified and running** | ✅ **done** ([docs/FIREFOX-STATUS.md](docs/FIREFOX-STATUS.md)) |
-| EWMH window-manager messages (`_NET_WM_STATE` fullscreen/maximize) | ✅ done |
-| XSETTINGS `_XSETTINGS_S*` manager (theme/font/Xft from a config file) | ✅ done ([docs/XSETTINGS-STATUS.md](docs/XSETTINGS-STATUS.md)) |
-| Clipboard carries non-text (image/uri-list) both ways | ✅ done ([docs/CLIPBOARD-STATUS.md](docs/CLIPBOARD-STATUS.md)) |
-| PRIMARY selection (select-to-paste) bridged to Wayland | ✅ done ([docs/CLIPBOARD-STATUS.md](docs/CLIPBOARD-STATUS.md)) |
-| XDND drag-and-drop bridged to Wayland (both directions) | ✅ done ([docs/XDND-STATUS.md](docs/XDND-STATUS.md)); Motif DnD also bridged (`dnd.c`) |
-| XFIXES (`libXfixes`): selection-owner notifications for GDK | ✅ done ([docs/XFIXES-STATUS.md](docs/XFIXES-STATUS.md)) |
-| Xcursor (`libXcursor`): themed/image cursors for GDK | ✅ done ([docs/XFIXES-STATUS.md](docs/XFIXES-STATUS.md)) |
-| Xext (`libXext`): SHAPE, MIT-SHM, Sync, extutil | ✅ done ([docs/XEXT-STATUS.md](docs/XEXT-STATUS.md)) |
-| Compositing / RGBA windows under Wayland | ✅ done ([docs/COMPOSITE-STATUS.md](docs/COMPOSITE-STATUS.md)) |
-| XInput2 device classes + touch events from Wayland | ✅ done ([docs/XI2-STATUS.md](docs/XI2-STATUS.md)) |
-| Xinerama (`libXinerama`): monitor geometry from the Wayland output | ✅ done |
-| X11 session protocol (WM_SAVE_YOURSELF/WM_DELETE_WINDOW) relayed | ✅ done ([docs/SESSION-STATUS.md](docs/SESSION-STATUS.md)) |
-| XEmbed same-process primitives (reparent + `_XEMBED`) | ✅ primitives; cross-process is a Wayland limit ([docs/XEMBED-STATUS.md](docs/XEMBED-STATUS.md)) |
-
-The GTK2 / MATE 1.10 / GIMP 2.10 targets are built and run by the
-[`gtk2-wayland`](https://github.com/jmalcolm137/gtk2-wayland) project; their
-status is recorded there.
-
-Verified behaviour (see `scripts/run-tests.sh`): display/screen/visual setup,
-the X window tree, GCs and the drawing primitives, `XPutImage`/`XGetImage`
-pixel-exact, core-font text, `Expose`/`Configure`/`Button`/`Key`/`Motion`
-events, atoms and window properties, Xrm, X's integer pixel grid for 1px
-stroked lines, and menu interaction — an override-redirect popup is promoted to
-an `xdg_popup`, takes a grab, arms items on `EnterNotify`, and routes presses
-to the item window.  Beyond the unit/golden tests, the stock **libXt**,
-**libXm**, **XV**, **NEdit** and **Firefox 157** have all been built from
-unmodified sources against the prefix and run under the headless compositor.
-
-> Note: Open Motif needs `-std=gnu17` (its build tools predate C23) and its
-> `configure` must be given `--disable-xft`; NEdit needs `-std=gnu89 -fcommon`.
-> Both are host-compiler accommodations, not shim changes.
-
 ## Quick start
 
 ```sh
