@@ -1175,6 +1175,87 @@ static void check_round6(Display *d)
     }
 }
 
+static void check_motif_hints(Display *d, Window root)
+{
+    char dir[] = "/tmp/mw-mwm-XXXXXX";
+    if (!mkdtemp(dir)) { CHECK(0); return; }
+
+    char helper[256], logf[256];
+    snprintf(helper, sizeof helper, "%s/helper.sh", dir);
+    snprintf(logf, sizeof logf, "%s/calls.log", dir);
+    FILE *f = fopen(helper, "w");
+    if (!f) { rmdir(dir); CHECK(0); return; }
+    fprintf(f, "#!/bin/sh\nprintf '%%s\\n' \"$*\" >> '%s'\n", logf);
+    fclose(f);
+    chmod(helper, 0755);
+
+    setenv("CDE_MOTIF_HELPER", helper, 1);
+
+    Window w = XCreateSimpleWindow(d, root, 0, 0, 120, 80, 0, 0, 0);
+    XStoreName(d, w, "MotifHintTest");
+    Atom motif = XInternAtom(d, "_MOTIF_WM_HINTS", False);
+
+    /* Case 1: border only (no title, menu, min, max). */
+    long hints1[5] = { 2 /* MWM_HINTS_DECORATIONS */, 0, 2 /* MWM_DECOR_BORDER */, 0, 0 };
+    XChangeProperty(d, w, motif, motif, 32, PropModeReplace,
+                    (unsigned char *)hints1, 5);
+    XMapWindow(d, w);
+    XSync(d, False);
+    MwWindow *mw = mw_window(d, w);
+    CHECK(mw && mw->tl && !mw->tl->undecorated);
+    mw_apply_motif_functions(d, mw);
+    usleep(50000);
+
+    FILE *lf = fopen(logf, "r");
+    char buf[2048] = { 0 };
+    if (lf) {
+        size_t n = fread(buf, 1, sizeof buf - 1, lf);
+        buf[n] = 0;
+        fclose(lf);
+    }
+    CHECK(strstr(buf, "cde-decor-noborder") == NULL);
+    CHECK(strstr(buf, "cde-decor-notitle") != NULL);
+    CHECK(strstr(buf, "cde-decor-nomenu") != NULL);
+    CHECK(strstr(buf, "cde-func-min") != NULL);
+    CHECK(strstr(buf, "cde-func-max") != NULL);
+
+    /* Case 2: MWM_DECOR_ALL | MWM_DECOR_BORDER -> hide only border, restore rest. */
+    unlink(logf);
+    long hints2[5] = { 2, 0, 1 | 2 /* MWM_DECOR_ALL | MWM_DECOR_BORDER */, 0, 0 };
+    XChangeProperty(d, w, motif, motif, 32, PropModeReplace,
+                    (unsigned char *)hints2, 5);
+    usleep(50000);
+    memset(buf, 0, sizeof buf);
+    lf = fopen(logf, "r");
+    if (lf) {
+        size_t n = fread(buf, 1, sizeof buf - 1, lf);
+        buf[n] = 0;
+        fclose(lf);
+    }
+    CHECK(strstr(buf, "decor -a default") != NULL);
+    CHECK(strstr(buf, "cde-decor-noborder") != NULL);
+    CHECK(strstr(buf, "cde-decor-notitle") == NULL);
+
+    /* Case 3: decorations == 0 -> undecorated. */
+    long hints3[5] = { 2, 0, 0, 0, 0 };
+    XChangeProperty(d, w, motif, motif, 32, PropModeReplace,
+                    (unsigned char *)hints3, 5);
+    CHECK(mw->tl->undecorated);
+
+    /* Case 4: MWM_FUNC_ALL | MWM_FUNC_MOVE -> mw_motif_no_move() is true. */
+    long hints4[5] = { 1 /* MWM_HINTS_FUNCTIONS */,
+                       1 | 4 /* MWM_FUNC_ALL | MWM_FUNC_MOVE */, 0, 0, 0 };
+    XChangeProperty(d, w, motif, motif, 32, PropModeReplace,
+                    (unsigned char *)hints4, 5);
+    CHECK(mw_motif_no_move(d, w));
+
+    unsetenv("CDE_MOTIF_HELPER");
+    XDestroyWindow(d, w);
+    unlink(logf);
+    unlink(helper);
+    rmdir(dir);
+}
+
 int main(void)
 {
     check_write_all();
@@ -1214,6 +1295,7 @@ int main(void)
     check_keymap(d, w);
     check_key_levels(d, w);
     check_round6(d);
+    check_motif_hints(d, root);
 
     XDestroyWindow(d, w);
     XCloseDisplay(d);

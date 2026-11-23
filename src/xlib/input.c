@@ -1076,7 +1076,8 @@ static void ptr_button(void *data, struct wl_pointer *p, uint32_t serial,
         MwToplevel *tl = dp->ptr_toplevel->tl;
         if (pressed) {
             if (dp->ptr_surf_x >= tl->width - 22) mw_toplevel_close(tl);
-            else if (tl->xdg_toplevel && dp->wl_seat)
+            else if (tl->xdg_toplevel && dp->wl_seat &&
+                     !mw_motif_no_move(d, dp->ptr_toplevel->id))
                 xdg_toplevel_move(tl->xdg_toplevel, dp->wl_seat, serial);
         }
         return;

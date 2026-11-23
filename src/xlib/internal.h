@@ -452,7 +452,8 @@ struct MwToplevel {
                                               * (_MOTIF_WM_HINTS decorations=0) */
     char                  *title;            /* last title sent to the compositor */
     char                  *app_id;           /* app_id sent to the compositor */
-    bool                   motif_functions_sent; /* _MOTIF_WM_HINTS relayed once */
+    bool                   motif_functions_sent; /* _MOTIF_WM_HINTS relayed */
+    uint32_t               motif_profiles_mask;  /* last relayed profile mask */
 };
 
 /* ------------------------------------------------------------ display impl */
@@ -938,10 +939,11 @@ MwWindow *mw_deepest_at(MwWindow *toplevel, int x, int y, int *cx, int *cy);
 /* toplevel helpers (wayland/surface.c) */
 MwToplevel *mw_toplevel_of(MwWindow *win);
 void        mw_toplevel_create(MwWindow *win);
-/* Relay _MOTIF_WM_HINTS functions to the window manager: hide the titlebar
- * buttons the client disabled (CoW cannot refuse commands per window).  A
- * no-op unless the session sets CDE_MOTIF_HELPER. */
+/* Relay _MOTIF_WM_HINTS (decorations & functions) to the window manager via
+ * sparse decor profiles when CDE_MOTIF_HELPER is set; also updates dynamic
+ * Wayland-side size/decoration state. */
 void        mw_apply_motif_functions(Display *d, MwWindow *win);
+bool        mw_motif_no_move(Display *d, Window id);
 MwWindow   *mw_popup_anchor(MwWindow *win);
 void        mw_toplevel_destroy(MwToplevel *tl);
 void        mw_toplevel_map(MwToplevel *tl);

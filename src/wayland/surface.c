@@ -315,12 +315,30 @@ static const struct xdg_popup_listener popup_listener = {
 
 /* ------------------------------------------------------- decorations */
 
-/* True if the client asked for a window with no decorations via
- * _MOTIF_WM_HINTS (flags bit MWM_HINTS_DECORATIONS set and decorations == 0).
- * Motif wants such a window to be a bare content area -- neither the compositor
- * nor the fallback titlebar may draw chrome on it. */
+/* Full _MOTIF_WM_HINTS decoding (Xm/MwmUtil.h).  Both MWM_FUNC_ALL and
+ * MWM_DECOR_ALL invert the meaning of the remaining bits (listed bits are
+ * excluded rather than included). */
+#define MWM_HINTS_FUNCTIONS   (1u << 0)
 #define MWM_HINTS_DECORATIONS (1u << 1)
-static bool mw_motif_undecorated(Display *d, Window id)
+#define MWM_HINTS_INPUT_MODE  (1u << 2)
+#define MWM_HINTS_STATUS      (1u << 3)
+
+#define MWM_FUNC_ALL          (1u << 0)
+#define MWM_FUNC_RESIZE       (1u << 1)
+#define MWM_FUNC_MOVE         (1u << 2)
+#define MWM_FUNC_MINIMIZE     (1u << 3)
+#define MWM_FUNC_MAXIMIZE     (1u << 4)
+#define MWM_FUNC_CLOSE        (1u << 5)
+
+#define MWM_DECOR_ALL         (1u << 0)
+#define MWM_DECOR_BORDER      (1u << 1)
+#define MWM_DECOR_RESIZEH     (1u << 2)
+#define MWM_DECOR_TITLE       (1u << 3)
+#define MWM_DECOR_MENU        (1u << 4)
+#define MWM_DECOR_MINIMIZE    (1u << 5)
+#define MWM_DECOR_MAXIMIZE    (1u << 6)
+
+static bool mw_motif_decorations(Display *d, Window id, uint32_t *present)
 {
     MwProp *p = mw_get_prop(d, mw_window(d, id),
                             mw_intern_atom(d, "_MOTIF_WM_HINTS", False));
@@ -329,19 +347,29 @@ static bool mw_motif_undecorated(Display *d, Window id)
     uint32_t flags, decorations;
     memcpy(&flags, p->data, 4);
     memcpy(&decorations, p->data + 8, 4);
-    return (flags & MWM_HINTS_DECORATIONS) && decorations == 0;
+    if (!(flags & MWM_HINTS_DECORATIONS))
+        return false;
+    if (decorations == 0) {
+        *present = 0;
+        return true;
+    }
+    *present = (decorations & MWM_DECOR_ALL) ? ~decorations : decorations;
+    return true;
+}
+
+/* True if the client asked for a window with neither border nor titlebar via
+ * _MOTIF_WM_HINTS (e.g. decorations == 0, or MWM_DECOR_ALL removing both). */
+static bool mw_motif_undecorated(Display *d, Window id)
+{
+    uint32_t present;
+    return mw_motif_decorations(d, id, &present) &&
+           !(present & (MWM_DECOR_BORDER | MWM_DECOR_TITLE));
 }
 
 /* Decode the functions the client allows, from _MOTIF_WM_HINTS.  Motif's
  * MWM_FUNC_ALL means the listed bits are the functions to *remove*; without it
  * the bits are the functions that are *present*.  Returns false when the
  * property is absent or says nothing about functions. */
-#define MWM_HINTS_FUNCTIONS (1u << 0)
-#define MWM_FUNC_ALL        (1u << 0)
-#define MWM_FUNC_RESIZE     (1u << 1)
-#define MWM_FUNC_MINIMIZE   (1u << 3)
-#define MWM_FUNC_MAXIMIZE   (1u << 4)
-#define MWM_FUNC_CLOSE      (1u << 5)
 static bool mw_motif_functions(Display *d, Window id, uint32_t *present)
 {
     MwProp *p = mw_get_prop(d, mw_window(d, id),
@@ -363,6 +391,12 @@ static bool mw_motif_no_resize(Display *d, Window id)
     return mw_motif_functions(d, id, &present) && !(present & MWM_FUNC_RESIZE);
 }
 
+bool mw_motif_no_move(Display *d, Window id)
+{
+    uint32_t present;
+    return mw_motif_functions(d, id, &present) && !(present & MWM_FUNC_MOVE);
+}
+
 /* Close is the one function the client owns under Wayland: the compositor asks
  * with xdg_toplevel.close and the client acts.  If the client disabled it, the
  * window manager's close button must not close the window, so ignore it. */
@@ -372,64 +406,128 @@ static bool mw_motif_no_close(Display *d, Window id)
     return mw_motif_functions(d, id, &present) && !(present & MWM_FUNC_CLOSE);
 }
 
-/* _MOTIF_WM_HINTS says which window functions an X client allows, but it is an
- * X property the compositor and window manager (CoW) never see.  CoW has no way
- * to make a command refuse for a single window, but it *can* hide a titlebar
- * button with a sparse decor profile, so ask it to hide the buttons for the
- * functions the client dropped.  The session defines the profiles and points
- * CDE_MOTIF_HELPER at a small retrying wrapper (cde-motif-apply); when that is
- * unset this is a no-op, so the shim stays neutral for other users.
+static void spawn_motif_helper(const char *helper, const char *profile,
+                               const char *target)
+{
+    char *argv[] = { (char *)helper, "decor", "-a", (char *)profile,
+                     "-t", (char *)target, NULL };
+    /* Double fork: the intermediate child spawns the helper and exits at
+     * once, so it is reaped here and the helper is re-parented to init.
+     * Spawning directly left a zombie per helper, and an application's
+     * own waitpid(-1) could collect pids it never started. */
+    pid_t mid = fork();
+    if (mid == 0) {
+        pid_t pid;
+        int rc = posix_spawnp(&pid, helper, NULL, NULL, argv, environ);
+        _exit(rc == 0 ? 0 : 1);
+    }
+    if (mid > 0)
+        while (waitpid(mid, NULL, 0) < 0 && errno == EINTR) {}
+}
+
+/* Relay full _MOTIF_WM_HINTS (both decorations and functions) to the window
+ * manager via sparse CoW decor profiles when CDE_MOTIF_HELPER is set, and keep
+ * Wayland-side min/max size and decoration mode in sync on dynamic updates.
  *
- * A window is addressed by its title (CoW strips a trailing '/' and matches the
- * rest as a substring), or by app_id when it has no title.  Button indices and
- * glyphs live in the session's decor profiles (cde-func-min / cde-func-max). */
+ * Sparse profiles defined by the session (config/cow.conf):
+ *   cde-decor-noborder  border.width 0
+ *   cde-decor-notitle   titlebar.enabled false
+ *   cde-decor-nomenu    titlebar.button.1.vector none
+ *   cde-func-min        titlebar.button.0.vector none
+ *   cde-func-max        titlebar.button.2.vector none
+ */
 void mw_apply_motif_functions(Display *d, MwWindow *win)
 {
     if (!win || !win->tl || !win->tl->xdg_toplevel || win->override_redirect)
         return;
 
+    MwToplevel *tl = win->tl;
+    uint32_t fn = 0, dec = 0;
+    bool has_fn = mw_motif_functions(d, win->id, &fn);
+    bool has_dec = mw_motif_decorations(d, win->id, &dec);
+
+    /* Keep Wayland-side resize and undecorated state in sync when _MOTIF_WM_HINTS
+     * is updated after the toplevel has been created. */
+    if (has_fn) {
+        if (!(fn & MWM_FUNC_RESIZE)) {
+            int cw = win->w > 0 ? win->w : tl->width;
+            int ch = win->h > 0 ? win->h : tl->height;
+            if (cw > 0 && ch > 0) {
+                xdg_toplevel_set_min_size(tl->xdg_toplevel, cw, ch);
+                xdg_toplevel_set_max_size(tl->xdg_toplevel, cw, ch);
+            }
+        } else {
+            xdg_toplevel_set_min_size(tl->xdg_toplevel, 0, 0);
+            xdg_toplevel_set_max_size(tl->xdg_toplevel, 0, 0);
+        }
+    }
+    if (has_dec) {
+        bool undec = !(dec & (MWM_DECOR_BORDER | MWM_DECOR_TITLE));
+        if (undec != tl->undecorated) {
+            tl->undecorated = undec;
+            if (tl->deco) {
+                zxdg_toplevel_decoration_v1_set_mode(tl->deco,
+                    undec ? ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE
+                          : ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+            }
+        }
+    }
+
     const char *helper = getenv("CDE_MOTIF_HELPER");
     if (!helper || !*helper)
         return;
-
-    uint32_t present;
-    if (!mw_motif_functions(d, win->id, &present))
+    if (!has_fn && !has_dec)
         return;
+
+    uint32_t mask = 0;
+    if (has_dec && !(dec & MWM_DECOR_BORDER))                      mask |= (1u << 0);
+    if (has_dec && !(dec & MWM_DECOR_TITLE))                       mask |= (1u << 1);
+    if (has_dec && !(dec & MWM_DECOR_MENU))                        mask |= (1u << 2);
+    if ((has_fn && !(fn & MWM_FUNC_MINIMIZE)) ||
+        (has_dec && !(dec & MWM_DECOR_MINIMIZE)))                  mask |= (1u << 3);
+    if ((has_fn && !(fn & MWM_FUNC_MAXIMIZE)) ||
+        (has_dec && !(dec & MWM_DECOR_MAXIMIZE)))                  mask |= (1u << 4);
+
+    if (tl->motif_functions_sent && mask == tl->motif_profiles_mask)
+        return;
+    if (!tl->motif_functions_sent && mask == 0) {
+        tl->motif_functions_sent = true;
+        tl->motif_profiles_mask = 0;
+        return;
+    }
+
     if (getenv("MW_TRACE"))
-        fprintf(stderr, "MW: apply_motif 0x%lx present=0x%x title=%s\n",
-                win->id, present, win->tl->title ? win->tl->title : "(none)");
+        fprintf(stderr, "MW: apply_motif 0x%lx fn=0x%x dec=0x%x mask=0x%x title=%s\n",
+                win->id, fn, dec, mask, tl->title ? tl->title : "(none)");
 
     char target[512];
-    if (win->tl->title && win->tl->title[0]) {
-        snprintf(target, sizeof target, "/%s", win->tl->title);
-    } else if (win->tl->app_id && win->tl->app_id[0]) {
-        snprintf(target, sizeof target, "%%%s", win->tl->app_id);
+    if (tl->title && tl->title[0]) {
+        snprintf(target, sizeof target, "/%s", tl->title);
+    } else if (tl->app_id && tl->app_id[0]) {
+        snprintf(target, sizeof target, "%%%s", tl->app_id);
     } else {
         return;
     }
 
-    const char *profiles[2];
-    int n = 0;
-    if (!(present & MWM_FUNC_MINIMIZE)) profiles[n++] = "cde-func-min";
-    if (!(present & MWM_FUNC_MAXIMIZE)) profiles[n++] = "cde-func-max";
+    static const char *const prof_names[5] = {
+        "cde-decor-noborder",
+        "cde-decor-notitle",
+        "cde-decor-nomenu",
+        "cde-func-min",
+        "cde-func-max",
+    };
 
-    for (int i = 0; i < n; i++) {
-        char *argv[] = { (char *)helper, "decor", "-a", (char *)profiles[i],
-                         "-t", target, NULL };
-        /* Double fork: the intermediate child spawns the helper and exits at
-         * once, so it is reaped here and the helper is re-parented to init.
-         * Spawning directly left a zombie per helper, and an application's
-         * own waitpid(-1) could collect pids it never started. */
-        pid_t mid = fork();
-        if (mid == 0) {
-            pid_t pid;
-            int rc = posix_spawnp(&pid, helper, NULL, NULL, argv, environ);
-            _exit(rc == 0 ? 0 : 1);
-        }
-        if (mid > 0)
-            while (waitpid(mid, NULL, 0) < 0 && errno == EINTR) {}
+    /* If a previously hidden element is being re-enabled, reset to default
+     * first so the restored element reappears before applying the new mask. */
+    if (tl->motif_functions_sent && (tl->motif_profiles_mask & ~mask) != 0)
+        spawn_motif_helper(helper, "default", target);
+
+    for (int i = 0; i < 5; i++) {
+        if (mask & (1u << i))
+            spawn_motif_helper(helper, prof_names[i], target);
     }
-    win->tl->motif_functions_sent = true;
+    tl->motif_functions_sent = true;
+    tl->motif_profiles_mask = mask;
 }
 
 static void deco_configure(void *data, struct zxdg_toplevel_decoration_v1 *d,
@@ -853,8 +951,11 @@ void mw_wm_moveresize(Display *d, XClientMessageEvent *cm)
     if (!serial) return;
     long direction = cm->data.l[2];
     if (direction == 8) {                 /* _NET_WM_MOVERESIZE_MOVE */
-        xdg_toplevel_move(tl->xdg_toplevel, dp->wl_seat, serial);
+        if (!mw_motif_no_move(d, win->id))
+            xdg_toplevel_move(tl->xdg_toplevel, dp->wl_seat, serial);
     } else if (direction >= 0 && direction <= 7) {
+        if (mw_motif_no_resize(d, win->id))
+            return;
         static const uint32_t edges[8] = {
             XDG_TOPLEVEL_RESIZE_EDGE_TOP_LEFT,
             XDG_TOPLEVEL_RESIZE_EDGE_TOP,
