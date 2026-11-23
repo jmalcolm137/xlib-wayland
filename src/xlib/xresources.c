@@ -37,16 +37,25 @@ static void append_str(char **buf, size_t *len, size_t *cap,
  * newline to each (fgets keeps its own) turned "...\\<newline>" into a
  * continuation onto an empty line, cutting every multi-line resource (Motif
  * translation tables) short, and split lines longer than the buffer. */
+#define XRES_FILE_MAX ((size_t)4 << 20)
+
 static void append_file(char **buf, size_t *len, size_t *cap, const char *path)
 {
     if (!path || !*path) return;
     FILE *f = fopen(path, "r");
     if (!f) return;
+    struct stat st;
+    if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode)) {
+        fclose(f);
+        return;
+    }
     char *text = NULL;
     size_t tl = 0, tc = 0;
     for (;;) {
+        if (tl >= XRES_FILE_MAX) break;
         if (tl + 65536 > tc) {
             size_t nc = tc ? tc * 2 : 65536;
+            if (nc > XRES_FILE_MAX) nc = XRES_FILE_MAX;
             char *nt = realloc(text, nc);
             if (!nt) break;
             text = nt;

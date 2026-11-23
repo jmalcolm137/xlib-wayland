@@ -130,17 +130,24 @@ void mw_smprop_publish(Display *d, Atom prop, Atom type, int format,
     if (format != 8 && format != 16 && format != 32) return;
     const char *pname = XGetAtomName(d, prop);
     const char *tname = XGetAtomName(d, type);
-    if (!pname) return;
-    size_t bytes = (size_t)format / 8 * nitems;
-    if (bytes > SMP_MAX / 2) { XFree((char *)pname); if (tname) XFree((char *)tname); return; }
+    if (!pname || strpbrk(pname, "\t\r\n") ||
+        (tname && strpbrk(tname, "\t\r\n"))) {
+        if (pname) XFree((char *)pname);
+        if (tname) XFree((char *)tname);
+        return;
+    }
+    size_t unit = (size_t)format / 8;
+    if (nitems > (SMP_MAX / 2) / unit) { XFree((char *)pname); if (tname) XFree((char *)tname); return; }
+    size_t bytes = unit * nitems;
 
     char  *hex = malloc(bytes * 2 + 1);
-    char  *line = malloc(strlen(pname) + strlen(tname ? tname : "") + bytes * 2 + 64);
+    size_t line_cap = strlen(pname) + strlen(tname ? tname : "") + bytes * 2 + 64;
+    char  *line = malloc(line_cap);
     if (!hex || !line) { free(hex); free(line); XFree((char *)pname); if (tname) XFree((char *)tname); return; }
     hexenc(data, bytes, hex);
-    int ll = sprintf(line, "%s\t%s\t%d\t%lu\t%s\n", pname, tname ? tname : "",
-                     format, nitems, hex);
-    if (ll < 0) ll = 0;
+    int ll = snprintf(line, line_cap, "%s\t%s\t%d\t%lu\t%s\n", pname, tname ? tname : "",
+                      format, nitems, hex);
+    if (ll < 0 || (size_t)ll >= line_cap) ll = 0;
 
     char path[256];
     int fd = smp_path(path, sizeof path)
@@ -153,6 +160,7 @@ void mw_smprop_publish(Display *d, Atom prop, Atom type, int format,
         ssize_t n;
         bool oom = false;
         while ((n = read(fd, chunk, sizeof chunk)) > 0) {
+            if (len + (size_t)n + 1 > SMP_FILE_MAX) { oom = true; break; }
             if (len + (size_t)n + 1 > cap) {
                 cap = (len + (size_t)n + 1) * 2;
                 char *t = realloc(text, cap);

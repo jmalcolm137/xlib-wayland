@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -24,9 +25,22 @@ int main(int argc, char **argv)
     const char *cmd = argv[1];
     /* The same directory the shim uses (see mw_runtime_dir). */
     const char *rt = getenv("XDG_RUNTIME_DIR");
-    char dir[256];
-    if (rt && *rt) snprintf(dir, sizeof dir, "%s/xlib-wayland/session", rt);
-    else snprintf(dir, sizeof dir, "/tmp/xlib-wayland-%u/session", (unsigned)getuid());
+    char base[220], dir[256];
+    if (rt && *rt) snprintf(base, sizeof base, "%s/xlib-wayland", rt);
+    else snprintf(base, sizeof base, "/tmp/xlib-wayland-%u", (unsigned)getuid());
+
+    struct stat st;
+    if (lstat(base, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != getuid() || (st.st_mode & 077) != 0) {
+        printf("MW-SESSION:%s sent=0 (unsafe runtime dir)\n", cmd);
+        return 1;
+    }
+    snprintf(dir, sizeof dir, "%s/session", base);
+    if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != getuid() || (st.st_mode & 077) != 0) {
+        printf("MW-SESSION:%s sent=0 (no session dir)\n", cmd);
+        return 1;
+    }
 
     DIR *dd = opendir(dir);
     if (!dd) {
@@ -37,12 +51,11 @@ int main(int argc, char **argv)
     struct dirent *e;
     while ((e = readdir(dd))) {
         if (e->d_name[0] == '.') continue;
-        char path[512];
-        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
         struct sockaddr_un sa;
         memset(&sa, 0, sizeof sa);
         sa.sun_family = AF_UNIX;
-        snprintf(sa.sun_path, sizeof sa.sun_path, "%s", path);
+        int w = snprintf(sa.sun_path, sizeof sa.sun_path, "%s/%s", dir, e->d_name);
+        if (w < 0 || (size_t)w >= sizeof sa.sun_path) continue;
         int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
         if (fd < 0) continue;
         if (connect(fd, (struct sockaddr *)&sa, sizeof sa) == 0) {

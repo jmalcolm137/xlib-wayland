@@ -1,9 +1,12 @@
 /* window.c — the in-process X window tree and window-management API. */
 #include "internal.h"
 
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* --------------------------------------------------------------- helpers */
 
@@ -205,20 +208,28 @@ static void mw_read_workspace_state(char *names, size_t namesz, int *current)
                  (rt && *rt) ? rt : "/tmp");
         state = path;
     }
-    FILE *f = fopen(state, "r");
-    if (f) {
-        char line[512];
-        while (fgets(line, sizeof line, f)) {
-            if (strncmp(line, "names=", 6) == 0) {
-                size_t n = strcspn(line + 6, "\r\n");
-                if (n >= namesz) n = namesz - 1;
-                memcpy(names, line + 6, n);
-                names[n] = 0;
-            } else if (strncmp(line, "current=", 8) == 0) {
-                *current = atoi(line + 8);
+    int fd = open(state, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd >= 0) {
+        struct stat st;
+        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == getuid()) {
+            FILE *f = fdopen(fd, "r");
+            if (f) {
+                char line[512];
+                while (fgets(line, sizeof line, f)) {
+                    if (strncmp(line, "names=", 6) == 0) {
+                        size_t n = strcspn(line + 6, "\r\n");
+                        if (n >= namesz) n = namesz - 1;
+                        memcpy(names, line + 6, n);
+                        names[n] = 0;
+                    } else if (strncmp(line, "current=", 8) == 0) {
+                        *current = atoi(line + 8);
+                    }
+                }
+                fclose(f);
+                fd = -1;
             }
         }
-        fclose(f);
+        if (fd >= 0) close(fd);
     }
 
     const char *env = getenv("CDE_WS_NAMES");

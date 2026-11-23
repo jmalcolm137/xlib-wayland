@@ -31,6 +31,7 @@
 
 #define CLIP_FETCH_TIMEOUT_MS 3000
 #define CLIP_SERVE_TIMEOUT_MS 5000
+#define CLIP_MAX_BYTES        ((size_t)64 << 20) /* cap incoming peer transfers */
 
 /* The X toplevel whose surface this is, or NULL.  (There is no reverse map on
  * the toplevel; the object table is small enough to scan.) */
@@ -105,7 +106,9 @@ static bool mime_wants_utf8(const char *m)
 char *mw_clipboard_to_utf8(const unsigned char *in, size_t inlen, size_t *outlen)
 {
     /* Each Latin-1 byte outside ASCII becomes a two-byte UTF-8 sequence. */
+    if (inlen > (SIZE_MAX - 1) / 2) return NULL;
     char *out = malloc(inlen * 2 + 1);
+    if (!out) return NULL;
     size_t o = 0;
     for (size_t i = 0; i < inlen; i++) {
         unsigned char c = in[i];
@@ -125,7 +128,9 @@ char *mw_clipboard_from_utf8(const unsigned char *in, size_t inlen, size_t *outl
 {
     /* Decode UTF-8, substituting '?' for anything that will not fit Latin-1.
      * Versions of this text already in Latin-1 pass through unchanged. */
+    if (inlen == SIZE_MAX) return NULL;
     char *out = malloc(inlen + 1);
+    if (!out) return NULL;
     size_t i = 0, o = 0;
     while (i < inlen) {
         unsigned char c = in[i];
@@ -1101,15 +1106,19 @@ void mw_clipboard_handle_ready(Display *d)
 
     if (f->active) {
         for (;;) {
-            if (f->len + 65536 > f->cap) {
+            if (f->len >= CLIP_MAX_BYTES) { fetch_finish(d); break; }
+            size_t room = CLIP_MAX_BYTES - f->len;
+            size_t chunk = room < 65536 ? room : 65536;
+            if (f->len + chunk > f->cap) {
                 size_t ncap = f->cap ? f->cap * 2 : 65536;
-                if (ncap < f->len + 65536) ncap = f->len + 65536;
+                if (ncap < f->len + chunk) ncap = f->len + chunk;
+                if (ncap > CLIP_MAX_BYTES) ncap = CLIP_MAX_BYTES;
                 unsigned char *nd = realloc(f->data, ncap);
                 if (!nd) { fetch_finish(d); break; }
                 f->data = nd;
                 f->cap = ncap;
             }
-            ssize_t n = read(f->fd, f->data + f->len, 65536);
+            ssize_t n = read(f->fd, f->data + f->len, chunk);
             if (n > 0) { f->len += (size_t)n; continue; }
             if (n == 0) { fetch_finish(d); break; }              /* EOF */
             if (errno == EINTR) continue;

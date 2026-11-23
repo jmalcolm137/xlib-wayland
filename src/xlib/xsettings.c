@@ -71,22 +71,26 @@ struct MwXSettings {
 
 /* ------------------------------------------------------------- byte buffer */
 
-typedef struct { unsigned char *p; size_t n, cap; } XBuf;
+typedef struct { unsigned char *p; size_t n, cap; bool oom; } XBuf;
 
-static void xb_need(XBuf *b, size_t n)
+static bool xb_need(XBuf *b, size_t n)
 {
-    if (b->n + n <= b->cap) return;
+    if (b->oom) return false;
+    if (b->n + n <= b->cap) return true;
     size_t c = b->cap ? b->cap : 256;
     while (c < b->n + n) c *= 2;
-    b->p = realloc(b->p, c);
+    unsigned char *np = realloc(b->p, c);
+    if (!np) { b->oom = true; return false; }
+    b->p = np;
     b->cap = c;
+    return true;
 }
 
-static void xb8(XBuf *b, unsigned v)  { xb_need(b, 1); b->p[b->n++] = (unsigned char)v; }
+static void xb8(XBuf *b, unsigned v)  { if (xb_need(b, 1)) b->p[b->n++] = (unsigned char)v; }
 
 static void xb16(XBuf *b, unsigned v)
 {
-    xb_need(b, 2);
+    if (!xb_need(b, 2)) return;
     uint16_t x = (uint16_t)v;
     memcpy(b->p + b->n, &x, 2);
     b->n += 2;
@@ -94,7 +98,7 @@ static void xb16(XBuf *b, unsigned v)
 
 static void xb32(XBuf *b, uint32_t v)
 {
-    xb_need(b, 4);
+    if (!xb_need(b, 4)) return;
     memcpy(b->p + b->n, &v, 4);
     b->n += 4;
 }
@@ -103,7 +107,7 @@ static void xb32(XBuf *b, uint32_t v)
  * setting name and a string value use). */
 static void xb_pad(XBuf *b, const char *s, size_t len)
 {
-    xb_need(b, len);
+    if (!xb_need(b, len)) return;
     memcpy(b->p + b->n, s, len);
     b->n += len;
     size_t pad = (4 - (len & 3)) & 3;

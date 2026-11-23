@@ -176,27 +176,35 @@ static size_t hexdec(const char *in, unsigned char *out, size_t outsz)
 
 /* The registry maps a shared selection name to the pid of the process whose
  * shim owns it.  It is a small line-oriented file written under an flock. */
+#define MWB_REG_MAX ((size_t)1 << 20)
+#define MWB_PROP_MAX ((size_t)64 << 20)
+
 static void reg_set(MwBroker *b, const char *name, int pid)
 {
-    int fd = open(b->reg_path, O_RDWR | O_CREAT, 0600);
+    if (!name || !*name || strpbrk(name, "\t\r\n")) return;
+    int fd = open(b->reg_path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return;
     flock(fd, LOCK_EX);
 
-    /* Read the whole file. */
+    /* Read the whole file (bounded). */
     char  *text = NULL;
     size_t cap = 0, len = 0;
     char   chunk[512];
     ssize_t n;
+    bool oom = false;
     while ((n = read(fd, chunk, sizeof chunk)) > 0) {
+        if (len + (size_t)n + 1 > MWB_REG_MAX) { oom = true; break; }
         if (len + (size_t)n + 1 > cap) {
             cap = (len + (size_t)n + 1) * 2;
-            text = realloc(text, cap);
-            if (!text) { close(fd); return; }
+            char *nt = realloc(text, cap);
+            if (!nt) { oom = true; break; }
+            text = nt;
         }
         memcpy(text + len, chunk, (size_t)n);
         len += (size_t)n;
     }
-    if (!text) { text = malloc(1); if (!text) { close(fd); return; } }
+    if (oom) { free(text); flock(fd, LOCK_UN); close(fd); return; }
+    if (!text) { text = malloc(1); if (!text) { flock(fd, LOCK_UN); close(fd); return; } }
     text[len] = 0;
 
     /* Rewrite it without any existing entry for this name. */
@@ -232,10 +240,11 @@ static void reg_set(MwBroker *b, const char *name, int pid)
 
 static int reg_get(MwBroker *b, const char *name)
 {
-    int fd = open(b->reg_path, O_RDONLY, 0600);
+    int fd = open(b->reg_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return 0;
+    flock(fd, LOCK_SH);
     FILE *f = fdopen(fd, "r");
-    if (!f) { close(fd); return 0; }
+    if (!f) { flock(fd, LOCK_UN); close(fd); return 0; }
     char line[512];
     int  pid = 0;
     size_t nlen = strlen(name);
@@ -245,6 +254,7 @@ static int reg_get(MwBroker *b, const char *name)
             break;
         }
     }
+    flock(fd, LOCK_UN);
     fclose(f);
     return pid;
 }
@@ -351,8 +361,11 @@ void mw_broker_init(Display *d)
     for (char *tok = strtok_r(list, ",", &save_tok); tok; tok = strtok_r(NULL, ",", &save_tok)) {
         while (*tok == ' ') tok++;
         if (!*tok) continue;
-        b->sets = realloc(b->sets, sizeof(char *) * (size_t)(b->nsets + 1));
-        b->sets[b->nsets++] = strdup(tok);
+        char **ns = realloc(b->sets, sizeof(char *) * (size_t)(b->nsets + 1));
+        char *dup = ns ? strdup(tok) : NULL;
+        if (!ns || !dup) { free(dup); if (ns) b->sets = ns; break; }
+        b->sets = ns;
+        b->sets[b->nsets++] = dup;
     }
     free(list);
 
@@ -844,10 +857,13 @@ bool mw_broker_capture_prop(Display *d, Window w, Atom property, Atom type,
     free(b->serve.pdata);
     b->serve.pdata = NULL;
     b->serve.pnbytes = 0;
-    if (data) {
-        size_t bytes = (size_t)format / 8 * nitems;
-        b->serve.pdata = malloc(bytes ? bytes : 1);
-        if (b->serve.pdata) { memcpy(b->serve.pdata, data, bytes); b->serve.pnbytes = bytes; }
+    if (data && (format == 8 || format == 16 || format == 32)) {
+        size_t unit = (size_t)format / 8;
+        if (nitems <= MWB_PROP_MAX / unit) {
+            size_t bytes = unit * nitems;
+            b->serve.pdata = malloc(bytes ? bytes : 1);
+            if (b->serve.pdata) { memcpy(b->serve.pdata, data, bytes); b->serve.pnbytes = bytes; }
+        }
     }
     b->serve.ptype = type;
     b->serve.pformat = format;

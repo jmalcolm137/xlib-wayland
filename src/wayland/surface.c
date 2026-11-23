@@ -179,8 +179,11 @@ static int buf_alloc(MwBuf *b, MwToplevel *tl, int idx,
                      int pw, int ph, int scale)
 {
     XDisplayImpl *dp = MWD(tl->win->d);
+    if (pw <= 0 || ph <= 0 || pw > 32768 || ph > 32768) return -1;
+    uint64_t size64 = (uint64_t)pw * 4u * (uint64_t)ph;
+    if (size64 > (uint64_t)INT32_MAX) return -1;
     int stride = pw * 4;
-    size_t size = (size_t)stride * (size_t)ph;
+    size_t size = (size_t)size64;
 
     int fd = memfd_create("motif-wl-shm", MFD_CLOEXEC);
     if (fd < 0) return -1;
@@ -1438,12 +1441,16 @@ void mw_toplevel_render(MwToplevel *tl)
 
     static int dump_n;
     if (MW_TRACE_DUMP() && !tl->is_popup) {
+        char rdir[200];
         const char *dir = getenv("MW_DUMP_DIR");
-        if (!dir || !*dir) dir = getenv("TMPDIR");
-        if (!dir || !*dir) dir = "/tmp";
-        char p[256];
-        snprintf(p, sizeof p, "%s/mwroll-%02d.png", dir, (dump_n++) % 16);
-        mw_surface_write_png(tl->frame, p);
+        if (!dir || !*dir)
+            dir = mw_runtime_dir(rdir, sizeof rdir) ? rdir : NULL;
+        if (dir && *dir) {
+            char p[256];
+            int wlen = snprintf(p, sizeof p, "%s/mwroll-%02d.png", dir, (dump_n++) % 16);
+            if (wlen > 0 && (size_t)wlen < sizeof p)
+                mw_surface_write_png(tl->frame, p);
+        }
     }
     if (MW_TRACE())
         fprintf(stderr, "MW: render 0x%lx %dx%d buf=%d full=%d\n",

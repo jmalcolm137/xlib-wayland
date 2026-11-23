@@ -406,13 +406,18 @@ int mw_keyboard_autorepeat_mode(Display *d)
     const char *path = kbd_state_path();
     int mode = AutoRepeatModeOn;   /* default when there is no shared state */
     if (path) {
-        FILE *f = fopen(path, "r");
-        if (f) {
+        int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd >= 0) {
+            flock(fd, LOCK_SH);
             char buf[16];
-            if (fgets(buf, sizeof buf, f))
+            ssize_t n = read(fd, buf, sizeof buf - 1);
+            if (n > 0) {
+                buf[n] = 0;
                 mode = strncmp(buf, "off", 3) == 0
                     ? AutoRepeatModeOff : AutoRepeatModeOn;
-            fclose(f);
+            }
+            flock(fd, LOCK_UN);
+            close(fd);
         }
     }
     dp->auto_repeat = mode;
@@ -429,9 +434,11 @@ void mw_keyboard_set_autorepeat(Display *d, int mode)
 
     const char *path = kbd_state_path();
     if (!path) return;
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    int fd = open(path, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return;
     flock(fd, LOCK_EX);
+    if (ftruncate(fd, 0) != 0) { /* best effort */ }
+    lseek(fd, 0, SEEK_SET);
     const char *s = (mode == AutoRepeatModeOff) ? "off\n" : "on\n";
     if (write(fd, s, strlen(s)) < 0) { /* best effort */ }
     flock(fd, LOCK_UN);

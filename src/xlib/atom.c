@@ -44,23 +44,33 @@ static const char *atom_file_path(void)
     return path;
 }
 
-static void atom_table_ensure(Display *d, int id)
+#define MW_ATOM_ID_MAX 65536
+
+static bool atom_table_ensure(Display *d, int id)
 {
     XDisplayImpl *dp = MWD(d);
-    if (id < dp->atoms_cap) return;
+    if (id < 0 || id >= MW_ATOM_ID_MAX) return false;
+    if (id < dp->atoms_cap) return true;
     int cap = dp->atoms_cap > 0 ? dp->atoms_cap : 512;
-    while (id >= cap) cap *= 2;
-    dp->atom_names = realloc(dp->atom_names, (size_t)cap * sizeof(char *));
+    while (id >= cap && cap < MW_ATOM_ID_MAX) cap *= 2;
+    if (cap > MW_ATOM_ID_MAX) cap = MW_ATOM_ID_MAX;
+    char **nb = realloc(dp->atom_names, (size_t)cap * sizeof(char *));
+    if (!nb) return false;
+    dp->atom_names = nb;
     for (int i = dp->atoms_cap; i < cap; i++) dp->atom_names[i] = NULL;
     dp->atoms_cap = cap;
+    return true;
 }
 
 static void atom_file_load(Display *d)
 {
     const char *path = atom_file_path();
     if (!path) return;
-    FILE *f = fopen(path, "r");
-    if (!f) return;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return;
+    flock(fd, LOCK_SH);
+    FILE *f = fdopen(fd, "r");
+    if (!f) { flock(fd, LOCK_UN); close(fd); return; }
     XDisplayImpl *dp = MWD(d);
     char line[1024];
     while (fgets(line, sizeof line, f)) {
@@ -70,11 +80,12 @@ static void atom_file_load(Display *d)
         long id = atol(line);
         char *nm = sp + 1;
         nm[strcspn(nm, "\r\n")] = 0;
-        if (id <= XA_LAST_PREDEFINED || !*nm) continue;
-        atom_table_ensure(d, (int)id);
+        if (id <= XA_LAST_PREDEFINED || id >= MW_ATOM_ID_MAX || !*nm) continue;
+        if (!atom_table_ensure(d, (int)id)) continue;
         if (!dp->atom_names[id]) dp->atom_names[id] = strdup(nm);
         if ((int)id >= dp->natoms) dp->natoms = (int)id + 1;
     }
+    flock(fd, LOCK_UN);
     fclose(f);
 }
 
@@ -83,8 +94,11 @@ static int atom_file_lookup(const char *name)
 {
     const char *path = atom_file_path();
     if (!path) return 0;
-    FILE *f = fopen(path, "r");
-    if (!f) return 0;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return 0;
+    flock(fd, LOCK_SH);
+    FILE *f = fdopen(fd, "r");
+    if (!f) { flock(fd, LOCK_UN); close(fd); return 0; }
     char line[1024];
     int found = 0;
     while (fgets(line, sizeof line, f)) {
@@ -94,8 +108,10 @@ static int atom_file_lookup(const char *name)
         long id = atol(line);
         char *nm = sp + 1;
         nm[strcspn(nm, "\r\n")] = 0;
-        if (strcmp(nm, name) == 0) { found = (int)id; break; }
+        if (id > XA_LAST_PREDEFINED && id < MW_ATOM_ID_MAX &&
+            strcmp(nm, name) == 0) { found = (int)id; break; }
     }
+    flock(fd, LOCK_UN);
     fclose(f);
     return found;
 }
@@ -104,13 +120,14 @@ static int atom_file_lookup(const char *name)
  * (e.g. no runtime dir), in which case the caller falls back to a local id. */
 static int atom_file_add(const char *name)
 {
+    if (!name || !*name || strpbrk(name, "\r\n")) return 0;
     const char *path = atom_file_path();
     if (!path) return 0;
-    int fd = open(path, O_RDWR | O_CREAT, 0600);
+    int fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return 0;
     flock(fd, LOCK_EX);
     FILE *f = fdopen(fd, "r+");
-    if (!f) { close(fd); return 0; }
+    if (!f) { flock(fd, LOCK_UN); close(fd); return 0; }
     char line[1024];
     int maxid = XA_LAST_PREDEFINED, found = 0;
     while (fgets(line, sizeof line, f)) {

@@ -44,12 +44,16 @@ void mw_session_init(Display *d)
     if (!mw_runtime_dir(base, sizeof base)) return;       /* no safe dir */
     snprintf(dir, sizeof dir, "%s/session", base);
     mkdir(dir, 0700);
-    /* The socket path has to fit sockaddr_un (bind would use a truncated
-     * path that unlink then misses). */
+    struct stat st;
+    if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        st.st_uid != getuid() || (st.st_mode & 077) != 0)
+        return;
+    /* The socket path has to fit both sockaddr_un and session_path. */
     struct sockaddr_un probe;
     int w = snprintf(dp->session_path, sizeof dp->session_path, "%s/%ld", dir,
                      (long)getpid());
-    if (w < 0 || (size_t)w >= sizeof probe.sun_path) {
+    if (w < 0 || (size_t)w >= sizeof probe.sun_path ||
+        (size_t)w >= sizeof dp->session_path) {
         dp->session_path[0] = 0;
         return;
     }
@@ -62,6 +66,7 @@ void mw_session_init(Display *d)
     sa.sun_family = AF_UNIX;
     memcpy(sa.sun_path, dp->session_path, (size_t)w + 1);
     if (bind(fd, (struct sockaddr *)&sa, sizeof sa) != 0 ||
+        chmod(dp->session_path, 0600) != 0 ||
         listen(fd, 8) != 0) {
         close(fd);
         unlink(dp->session_path);
