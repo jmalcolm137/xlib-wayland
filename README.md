@@ -28,9 +28,6 @@ meson install -C build
 ```
 
 ```sh
-meson setup build --prefix="$XLIB_PREFIX"
-meson install -C build
-
 # build the shim and run the unit + headless render tests
 scripts/run-tests.sh
 ```
