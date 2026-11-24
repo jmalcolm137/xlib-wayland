@@ -187,6 +187,7 @@ static void xsetting_set(MwXSettings *x, const char *name, int type,
     it = &x->items[x->n++];
     memset(it, 0, sizeof *it);
     it->name = strdup(name);
+    if (!it->name) { x->n--; return; }
     it->type = type;
     it->i = i;
     it->s = s ? strdup(s) : NULL;

@@ -597,14 +597,15 @@ static void save_screenshot_path(struct mw_compositor *comp, const char *path)
 			 * source rect is in surface-local coordinates, so it is
 			 * scaled by the surface's buffer scale to reach buffer
 			 * (physical) pixels. */
-			int bfs = s->buffer_scale > 0 ? s->buffer_scale : 1;
-			int vsx = s->vp_sx * bfs, vsy = s->vp_sy * bfs;
-			int vsw = s->vp_sw * bfs, vsh = s->vp_sh * bfs;
+			int64_t bfs = s->buffer_scale > 0 ? s->buffer_scale : 1;
+			int64_t vsx = s->vp_sx * bfs, vsy = s->vp_sy * bfs;
+			int64_t vsw = s->vp_sw * bfs, vsh = s->vp_sh * bfs;
 			if (s->has_vp_source && s->vp_sw > 0 && s->vp_sh > 0 &&
+			    vsx >= 0 && vsy >= 0 && vsx < w && vsy < h &&
 			    (vsw < w || vsh < h || vsx || vsy)) {
-				int cw = vsw, ch = vsh, y;
-				if (cw > w - vsx) cw = w - vsx;
-				if (ch > h - vsy) ch = h - vsy;
+				int cw = (int)(vsw < w - vsx ? vsw : w - vsx);
+				int ch = (int)(vsh < h - vsy ? vsh : h - vsy);
+				int y;
 				uint8_t *crop = malloc((size_t)cw * (size_t)ch * 4u);
 				if (crop) {
 					for (y = 0; y < ch; y++)
@@ -1264,8 +1265,8 @@ static void shm_create_pool(struct wl_client *client,
 		close(fd);
 		return;
 	}
-	/* libwayland closes the received fd once this handler returns. */
-	pool->fd = dup(fd);
+	/* The handler owns the received fd. */
+	pool->fd = fd;
 	pool->comp = comp;
 	pool->size = size;
 	pool->resource = wl_resource_create(client, &wl_shm_pool_interface, 1, id);
@@ -1464,7 +1465,7 @@ static void viewport_set_source(struct wl_client *client, struct wl_resource *re
 	(void)client;
 	if (!surface)
 		return;
-	if (w < 0 || h < 0) {            /* NULL source: no crop */
+	if (w < 0 || h < 0 || x < 0 || y < 0) {   /* NULL source: no crop */
 		surface->has_vp_source = 0;
 		return;
 	}
@@ -1763,15 +1764,22 @@ static void broadcast_selection(struct mw_compositor *comp);
 static void data_source_destroyed(struct wl_resource *resource)
 {
 	struct hc_data_source *src = wl_resource_get_user_data(resource);
-	struct hc_data_offer *offer;
+	struct hc_data_offer *offer, *tmp;
 	char **mime;
 
 	if (!src)
 		return;
-	/* Existing offers must stop pointing at us or a later receive() would
-	 * touch freed memory. */
-	wl_list_for_each(offer, &src->offers, link)
+	/* Existing offers must stop pointing at us, and leave our list, or a
+	 * later receive() or offer destroy would touch freed memory. */
+	wl_list_for_each_safe(offer, tmp, &src->offers, link) {
+		wl_list_remove(&offer->link);
+		wl_list_init(&offer->link);
 		offer->source = NULL;
+	}
+	if (src->comp && src->comp->drag_source == src) {
+		src->comp->drag_source = NULL;
+		src->comp->drag_active = 0;
+	}
 	if (src->comp && src->primary && src->comp->primary_selection == src) {
 		src->comp->primary_selection = NULL;
 		broadcast_selection(src->comp);
@@ -2205,6 +2213,8 @@ static void data_device_destroyed(struct wl_resource *resource)
 	struct hc_data_device *dev = wl_resource_get_user_data(resource);
 	if (!dev)
 		return;
+	if (dev->comp && dev->comp->drag_device == resource)
+		dev->comp->drag_device = NULL;
 	wl_list_remove(&dev->link);
 	free(dev);
 }

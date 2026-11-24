@@ -83,6 +83,8 @@ static int utf8_put(unsigned int c, char *o)
 /* Convert 8/16/32-bit characters to UTF-8.  The 8-bit form is Latin-1. */
 static char *to_utf8(const void *s, int len, int bits, int *out_len)
 {
+    *out_len = 0;
+    if (len < 0 || len > INT_MAX / 4 - 1) return NULL;
     if (bits == 8) {
         char *o = malloc((size_t)len * 2 + 1);
         int n = 0;

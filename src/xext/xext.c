@@ -147,7 +147,6 @@ XImage *XShmCreateImage(Display *dpy, Visual *visual, unsigned int depth,
     if (!image) return NULL;
     image->obdata = (char *)shminfo;          /* as libXext does */
     image->f.destroy_image = xshm_destroy_image;
-    if (shminfo) shminfo->shmaddr = image->data;
     return image;
 }
 

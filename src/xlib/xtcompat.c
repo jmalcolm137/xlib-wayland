@@ -26,9 +26,12 @@ void *XVaCreateNestedList(int dummy, ...)
     char *name;
     while ((name = va_arg(ap, char *)) != NULL) {
         long value = va_arg(ap, long);
+        if (!list) continue;               /* drain the varargs, then fail */
         if (n + 2 > cap) {
+            MwArg *nl = realloc(list, cap * 2 * sizeof(MwArg));
+            if (!nl) { free(list); list = NULL; continue; }
+            list = nl;
             cap *= 2;
-            list = realloc(list, cap * sizeof(MwArg));
         }
         list[n].name = name;
         list[n].value = value;
@@ -36,7 +39,7 @@ void *XVaCreateNestedList(int dummy, ...)
     }
     va_end(ap);
 
-    if (n + 1 > cap) list = realloc(list, (n + 1) * sizeof(MwArg));
+    if (!list) return NULL;
     list[n].name = NULL;
     list[n].value = 0;
     return list;
