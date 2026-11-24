@@ -846,6 +846,12 @@ void mw_canvas_copy(MwCanvas *dst, MwSurface *src, int sx, int sy,
      * unclipped copy, perform an in-place row memmove with zero allocation. */
     if (src == dst->surface) {
         int ssc = src->scale > 0 ? src->scale : 1;
+        /* Offsets beyond the surface copy nothing; rejecting them also keeps
+         * the clamp sums below from overflowing. */
+        if (sx >= src->w || sy >= src->h || dx >= src->w || dy >= src->h ||
+            sx <= -w || sy <= -h || dx <= -w || dy <= -h ||
+            w > 65535 || h > 65535)
+            return;
         if (!dst->has_clip && src->data) {
             int x0 = dx < 0 ? -dx : 0;
             int y0 = dy < 0 ? -dy : 0;

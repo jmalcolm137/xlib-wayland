@@ -187,28 +187,103 @@ XkbDescPtr XkbAllocKeyboard(void)
     return calloc(1, sizeof(XkbDescRec));
 }
 
+/* Per-key arrays always span the whole X keycode range (see xkb_build_map). */
+#define MW_XKB_NKEYS 256
+
+/* Grow *arr from *cap to at least `want` elements of `size`, zeroing the new
+ * tail.  Callers write up to the size they asked for, so reporting Success
+ * without the room is a heap overflow. */
+static bool xkb_grow(void **arr, unsigned int *cap, unsigned int want,
+                     size_t size, unsigned int max)
+{
+    if (!*arr) *cap = 0;
+    if (want <= *cap && (*arr || want == 0)) return true;
+    if (want > max) return false;
+    void *n = realloc(*arr, (size_t)want * size);
+    if (!n) return false;
+    memset((char *)n + (size_t)*cap * size, 0, (size_t)(want - *cap) * size);
+    *arr = n;
+    *cap = want;
+    return true;
+}
+
+static void *xkb_keys_array(void **arr, size_t size)
+{
+    if (!*arr) *arr = calloc(MW_XKB_NKEYS, size);
+    return *arr;
+}
+
 Status XkbAllocClientMap(XkbDescPtr xkb, unsigned int which, unsigned int nTypes)
 {
-    (void)which; (void)nTypes;
     if (!xkb) return BadAlloc;
     if (!xkb->map) xkb->map = calloc(1, sizeof(XkbClientMapRec));
-    return xkb->map ? Success : BadAlloc;
+    XkbClientMapPtr map = xkb->map;
+    if (!map) return BadAlloc;
+    if ((which & XkbKeyTypesMask) && nTypes > 0) {
+        unsigned int cap = map->size_types;
+        if (!xkb_grow((void **)&map->types, &cap, nTypes,
+                      sizeof(XkbKeyTypeRec), 0xff))
+            return BadAlloc;
+        map->size_types = (unsigned char)cap;
+    }
+    if (which & XkbKeySymsMask) {
+        if (!xkb_keys_array((void **)&map->key_sym_map, sizeof(XkbSymMapRec)))
+            return BadAlloc;
+        if (!map->syms) {
+            map->syms = calloc(MW_XKB_NKEYS, sizeof(KeySym));
+            if (!map->syms) return BadAlloc;
+            map->size_syms = MW_XKB_NKEYS;
+            map->num_syms = 1;               /* syms[0] is NoSymbol */
+        }
+    }
+    if ((which & XkbModifierMapMask) &&
+        !xkb_keys_array((void **)&map->modmap, 1))
+        return BadAlloc;
+    return Success;
 }
 
 Status XkbAllocServerMap(XkbDescPtr xkb, unsigned int which, unsigned int nActions)
 {
-    (void)which; (void)nActions;
     if (!xkb) return BadAlloc;
     if (!xkb->server) xkb->server = calloc(1, sizeof(XkbServerMapRec));
-    return xkb->server ? Success : BadAlloc;
+    XkbServerMapPtr s = xkb->server;
+    if (!s) return BadAlloc;
+    if (which & XkbKeyActionsMask) {
+        unsigned int want = nActions ? nActions + 1 : 1;   /* acts[0] is NoAction */
+        unsigned int cap = s->size_acts;
+        if (!xkb_grow((void **)&s->acts, &cap, want, sizeof(XkbAction), 0xffff))
+            return BadAlloc;
+        s->size_acts = (unsigned short)cap;
+        if (s->num_acts == 0) s->num_acts = 1;
+        if (!xkb_keys_array((void **)&s->key_acts, sizeof(unsigned short)))
+            return BadAlloc;
+    }
+    if ((which & XkbKeyBehaviorsMask) &&
+        !xkb_keys_array((void **)&s->behaviors, sizeof(XkbBehavior)))
+        return BadAlloc;
+    if ((which & XkbExplicitComponentsMask) &&
+        !xkb_keys_array((void **)&s->explicit, 1))
+        return BadAlloc;
+    if ((which & XkbVirtualModMapMask) &&
+        !xkb_keys_array((void **)&s->vmodmap, sizeof(unsigned short)))
+        return BadAlloc;
+    return Success;
 }
 
 Status XkbAllocCompatMap(XkbDescPtr xkb, unsigned int which, unsigned int nInterpret)
 {
-    (void)which; (void)nInterpret;
     if (!xkb) return BadAlloc;
     if (!xkb->compat) xkb->compat = calloc(1, sizeof(XkbCompatMapRec));
-    return xkb->compat ? Success : BadAlloc;
+    XkbCompatMapPtr c = xkb->compat;
+    if (!c) return BadAlloc;
+    if ((which & XkbSymInterpMask) && nInterpret > 0) {
+        unsigned int cap = c->size_si;
+        if (!xkb_grow((void **)&c->sym_interpret, &cap, nInterpret,
+                      sizeof(XkbSymInterpretRec), 0xffff))
+            return BadAlloc;
+        c->size_si = (unsigned short)cap;
+    }
+    return Success;
 }
 
 Status XkbAllocIndicatorMaps(XkbDescPtr xkb)
@@ -229,10 +304,33 @@ Status XkbAllocControls(XkbDescPtr xkb, unsigned int which)
 Status XkbAllocNames(XkbDescPtr xkb, unsigned int which, int nTotalRG,
                      int nTotalAliases)
 {
-    (void)which; (void)nTotalRG; (void)nTotalAliases;
     if (!xkb) return BadAlloc;
     if (!xkb->names) xkb->names = calloc(1, sizeof(XkbNamesRec));
-    return xkb->names ? Success : BadAlloc;
+    XkbNamesPtr n = xkb->names;
+    if (!n) return BadAlloc;
+    if ((which & XkbKeyNamesMask) &&
+        !xkb_keys_array((void **)&n->keys, sizeof(XkbKeyNameRec)))
+        return BadAlloc;
+    if ((which & XkbKeyAliasesMask) && nTotalAliases > 0 &&
+        nTotalAliases > n->num_key_aliases) {
+        if (nTotalAliases > 255) return BadAlloc;
+        XkbKeyAliasPtr a = realloc(n->key_aliases,
+                                   (size_t)nTotalAliases * sizeof *a);
+        if (!a) return BadAlloc;
+        memset(a + n->num_key_aliases, 0,
+               (size_t)(nTotalAliases - n->num_key_aliases) * sizeof *a);
+        n->key_aliases = a;
+        n->num_key_aliases = (unsigned char)nTotalAliases;
+    }
+    if ((which & XkbRGNamesMask) && nTotalRG > 0 && nTotalRG > n->num_rg) {
+        if (nTotalRG > 32) return BadAlloc;
+        Atom *rg = realloc(n->radio_groups, (size_t)nTotalRG * sizeof *rg);
+        if (!rg) return BadAlloc;
+        memset(rg + n->num_rg, 0, (size_t)(nTotalRG - n->num_rg) * sizeof *rg);
+        n->radio_groups = rg;
+        n->num_rg = (unsigned char)nTotalRG;
+    }
+    return Success;
 }
 
 Status XkbAllocGeometry(XkbDescPtr xkb, XkbGeometrySizesPtr sizes)
@@ -437,9 +535,10 @@ Status XkbGetUpdatedMap(Display *dpy, unsigned int which, XkbDescPtr desc)
 
 Status XkbGetNames(Display *dpy, unsigned int which, XkbDescPtr desc)
 {
-    (void)dpy; (void)which;
+    (void)dpy;
     if (!desc) return BadAlloc;
-    return XkbAllocNames(desc, 0, 0, 0);
+    /* Callers index names->keys[kc] after a successful KeyNames fetch. */
+    return XkbAllocNames(desc, which & XkbKeyNamesMask, 0, 0);
 }
 
 Status XkbGetCompatMap(Display *dpy, unsigned int which, XkbDescPtr xkb)
@@ -620,7 +719,11 @@ void XkbFreeKeyboard(XkbDescPtr xkb, unsigned int which, Bool freeDesc)
         free(xkb->names);
         xkb->names = NULL;
     }
-    if (which & XkbCompatMapMask) { free(xkb->compat); xkb->compat = NULL; }
+    if ((which & XkbCompatMapMask) && xkb->compat) {
+        free(xkb->compat->sym_interpret);
+        free(xkb->compat);
+        xkb->compat = NULL;
+    }
     if (which & XkbIndicatorMapMask) { free(xkb->indicators); xkb->indicators = NULL; }
     if (which & XkbControlsMask) { free(xkb->ctrls); xkb->ctrls = NULL; }
     if (which & XkbGeometryMask) { free(xkb->geom); xkb->geom = NULL; }

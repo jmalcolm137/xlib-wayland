@@ -110,7 +110,7 @@ ssize_t mw_write_some(int fd, const void *buf, size_t len)
  * in it.  False when there is no safe directory. */
 bool mw_runtime_dir(char *buf, size_t n)
 {
-    const char *rt = getenv("XDG_RUNTIME_DIR");
+    const char *rt = mw_secure_getenv("XDG_RUNTIME_DIR");
     int w;
     /* The XDG spec requires an absolute path; a relative one would resolve
      * against whatever directory the client happens to run in. */
@@ -143,4 +143,9 @@ bool mw_peer_is_self(int fd)
     return fd >= 0 &&
            getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &clen) == 0 &&
            clen == sizeof cred && cred.uid == getuid();
+}
+
+const char *mw_secure_getenv(const char *name)
+{
+    return secure_getenv(name);
 }

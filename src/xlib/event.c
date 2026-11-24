@@ -36,8 +36,9 @@ void mw_deliver_error(Display *d, int code, int request, int minor,
 {
     XDisplayImpl *dp = MWD(d);
     if (!dp->errq) {
+        dp->errq = calloc(16, sizeof *dp->errq);
+        if (!dp->errq) return;
         dp->errq_cap = 16;
-        dp->errq = calloc(dp->errq_cap, sizeof *dp->errq);
     }
     XErrorEvent *e = &dp->errq[(dp->errq_head + dp->errq_count) % dp->errq_cap];
     memset(e, 0, sizeof *e);
@@ -181,7 +182,7 @@ void mw_put_event(Display *d, XEvent *ev)
     static long evcount[64];
     if (trace < 0) trace = getenv("MW_TRACE") != NULL;
     if (trace) {
-        if (ev->xany.type < 64) evcount[ev->xany.type]++;
+        if ((unsigned)ev->xany.type < 64) evcount[ev->xany.type]++;
         if (++evtotal % 20000 == 0) {
             fprintf(stderr, "MW: events total=%ld:", evtotal);
             for (int i = 0; i < 64; i++) if (evcount[i])
@@ -364,6 +365,15 @@ int XPutBackEvent(Display *d, XEvent *event)
     if (!queue_reserve(dp)) return 0;
     int idx = (dp->qhead - 1 + dp->qcap) % dp->qcap;
     dp->queue[idx] = *event;
+    /* Cookie data the client never claimed goes back to the queue (taking
+     * the event again re-arms it); claimed data is the client's to free, so
+     * the queued copy must not carry the pointer or it is freed twice. */
+    if (event->type == GenericEvent && event->xcookie.data) {
+        if (event->xcookie.data == dp->cookie_unclaimed)
+            dp->cookie_unclaimed = NULL;
+        else
+            dp->queue[idx].xcookie.data = NULL;
+    }
     dp->qhead = idx;
     dp->qcount++;
     dp->qlen = dp->qcount;
@@ -635,6 +645,9 @@ int XSendEvent(Display *d, Window w, Bool propagate, long event_mask, XEvent *ev
     XEvent copy;
     memset(&copy, 0, sizeof copy);
     memcpy(&copy, event_in, core_event_size(event_in->type & 0x7f));
+    /* A cookie's data pointer is the sender's memory; the queue would free
+     * it once the event is taken. */
+    if ((copy.type & 0x7f) == GenericEvent) copy.xcookie.data = NULL;
     XEvent *event = &copy;
     XDisplayImpl *dp = MWD(d);
     /* PointerWindow and InputFocus name the window under the pointer and

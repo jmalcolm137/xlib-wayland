@@ -604,6 +604,17 @@ static void send_copy_exposures(Display *d, Drawable dst, GC gc, int major,
 /* Clip a copy's source rectangle to the source drawable, moving the
  * destination with it: X leaves destination pixels whose source lies
  * outside the drawable untouched.  False when nothing is left. */
+/* CopyArea/CopyPlane carry INT16 offsets and CARD16 sizes on the wire, so
+ * libX11 truncates them; doing the same keeps every sum below in int range
+ * (the raster's self-copy clamps rely on that). */
+static void copy_wire_truncate(int *sx, int *sy, unsigned int *w,
+                               unsigned int *h, int *dx, int *dy)
+{
+    *sx = (short)*sx; *sy = (short)*sy;
+    *dx = (short)*dx; *dy = (short)*dy;
+    *w = (unsigned short)*w; *h = (unsigned short)*h;
+}
+
 static bool clip_to_source(int sw, int sh, int *sx, int *sy, int *w, int *h,
                            int *dx, int *dy, bool *clipped)
 {
@@ -619,7 +630,7 @@ static bool clip_to_source(int sw, int sh, int *sx, int *sy, int *w, int *h,
 int XCopyArea(Display *d, Drawable src, Drawable dst, GC gc,
               int sx, int sy, unsigned int w, unsigned int h, int dx, int dy)
 {
-
+    copy_wire_truncate(&sx, &sy, &w, &h, &dx, &dy);
     if (MW_TRACE())
         fprintf(stderr, "MW: XCopyArea src=0x%lx dst=0x%lx (%d,%d)->(%d,%d) %ux%u%s\n",
                 src, dst, sx, sy, dx, dy, w, h, src == dst ? " SELF" : "");
@@ -649,6 +660,7 @@ int XCopyPlane(Display *d, Drawable src, Drawable dst, GC gc,
                int sx, int sy, unsigned int w, unsigned int h,
                int dx, int dy, unsigned long plane)
 {
+    copy_wire_truncate(&sx, &sy, &w, &h, &dx, &dy);
     int sw, sh, dep;
     mw_render_drain(d);
     MwSurface *ss = mw_drawable_surface(d, src, &sw, &sh, &dep);

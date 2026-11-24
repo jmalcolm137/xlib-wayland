@@ -29,7 +29,7 @@
 static bool session_enabled(Display *d)
 {
     (void)d;
-    const char *env = getenv("XLIB_WAYLAND_SESSION");
+    const char *env = mw_secure_getenv("XLIB_WAYLAND_SESSION");
     return env && *env && env[0] != '0' && env[0] != 'n' && env[0] != 'N';
 }
 

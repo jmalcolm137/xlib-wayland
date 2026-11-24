@@ -283,7 +283,7 @@ static bool xsettings_owns(MwXSettings *x)
 
 static const char *xsettings_path(void)
 {
-    const char *p = getenv("XLIB_WAYLAND_XSETTINGS");
+    const char *p = mw_secure_getenv("XLIB_WAYLAND_XSETTINGS");
     if (p && *p) return p;
 
     static char buf[1024];

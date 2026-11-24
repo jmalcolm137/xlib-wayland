@@ -476,7 +476,7 @@ void mw_apply_motif_functions(Display *d, MwWindow *win)
         }
     }
 
-    const char *helper = getenv("CDE_MOTIF_HELPER");
+    const char *helper = mw_secure_getenv("CDE_MOTIF_HELPER");
     if (!helper || !*helper)
         return;
     if (!has_fn && !has_dec)
@@ -709,9 +709,11 @@ void mw_toplevel_create(MwWindow *win)
                 app_id = sub_id;
             }
         }
-        xdg_toplevel_set_app_id(tl->xdg_toplevel, app_id);
+        char wl_str[MW_WL_STRING_MAX];
+        mw_wl_string(wl_str, sizeof wl_str, app_id, false);
+        xdg_toplevel_set_app_id(tl->xdg_toplevel, wl_str);
         free(tl->app_id);
-        tl->app_id = strdup(app_id);
+        tl->app_id = strdup(wl_str);
         XFree(ch.res_name);
         XFree(ch.res_class);
 
@@ -719,9 +721,10 @@ void mw_toplevel_create(MwWindow *win)
         const char *tname = "Motif";
         if (XFetchName(d, win->id, &name) && name && name[0])
             tname = name;
-        xdg_toplevel_set_title(tl->xdg_toplevel, tname);
+        mw_wl_string(wl_str, sizeof wl_str, tname, false);
+        xdg_toplevel_set_title(tl->xdg_toplevel, wl_str);
         free(tl->title);
-        tl->title = strdup(tname);
+        tl->title = strdup(wl_str);
         XFree(name);
     }
 
@@ -1442,7 +1445,7 @@ void mw_toplevel_render(MwToplevel *tl)
     static int dump_n;
     if (MW_TRACE_DUMP() && !tl->is_popup) {
         char rdir[200];
-        const char *dir = getenv("MW_DUMP_DIR");
+        const char *dir = mw_secure_getenv("MW_DUMP_DIR");
         if (!dir || !*dir)
             dir = mw_runtime_dir(rdir, sizeof rdir) ? rdir : NULL;
         if (dir && *dir) {

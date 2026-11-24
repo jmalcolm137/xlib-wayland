@@ -388,9 +388,9 @@ static void repeat_notify(Display *d)
 static const char *kbd_state_path(void)
 {
     static char path[1024];
-    const char *p = getenv("XLIB_WAYLAND_KEYBOARD");
+    const char *p = mw_secure_getenv("XLIB_WAYLAND_KEYBOARD");
     if (p && *p) return p;
-    const char *rt = getenv("XDG_RUNTIME_DIR");
+    const char *rt = mw_secure_getenv("XDG_RUNTIME_DIR");
     if (!rt || rt[0] != '/') return NULL;      /* must be absolute (XDG spec) */
     snprintf(path, sizeof path, "%s/xlib-wayland-keyboard", rt);
     return path;

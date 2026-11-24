@@ -101,7 +101,7 @@ void mw_load_resources(Display *d)
 
     char path[PATH_MAX];
     const char *home = getenv("HOME");
-    const char *xenv = getenv("XENVIRONMENT");
+    const char *xenv = mw_secure_getenv("XENVIRONMENT");
 
     /* System-wide defaults first, then per-user (later entries win on
      * conflicting resources in Xrm's last-write-wins model). */

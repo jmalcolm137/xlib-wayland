@@ -200,10 +200,10 @@ static void mw_read_workspace_state(char *names, size_t namesz, int *current)
     snprintf(names, namesz, "ws0,ws1,ws2,ws3");
     *current = 0;
 
-    const char *state = getenv("CDE_WSM_STATE");
+    const char *state = mw_secure_getenv("CDE_WSM_STATE");
     char path[1024];
     if (!state || !*state) {
-        const char *rt = getenv("XDG_RUNTIME_DIR");
+        const char *rt = mw_secure_getenv("XDG_RUNTIME_DIR");
         snprintf(path, sizeof path, "%s/cde-wayland/workspace",
                  (rt && *rt) ? rt : "/tmp");
         state = path;
@@ -486,6 +486,26 @@ static MwWindow *open_menu_after(MwWindow *win)
 
 static void destroy_tree(Display *d, MwWindow *win, bool top);
 
+/* Dismiss every popup whose xdg_popup hangs off win's toplevel, for when that
+ * toplevel is about to go away. */
+static void dismiss_anchored_popups(Display *d, MwWindow *win)
+{
+    XDisplayImpl *dp = MWD(d);
+    for (size_t i = 0; i < dp->table_cap; i++) {
+        if (!dp->table[i].id || dp->table[i].kind != MW_OBJ_WINDOW)
+            continue;
+        MwWindow *o = dp->table[i].obj;
+        if (!o || o == win) continue;
+        bool anchored = o->popup_parent == win ||
+                        (o->tl && o->tl->parent_tl == win);
+        if (!anchored) continue;
+        if (o->mapped) mw_unmap_window(d, o);
+        mw_pointer_drop_grab(d, o);
+        if (o->tl) { mw_toplevel_destroy(o->tl); o->tl = NULL; }
+        o->popup_parent = NULL;
+    }
+}
+
 void mw_destroy_window(Display *d, MwWindow *win)
 {
     destroy_tree(d, win, true);
@@ -516,22 +536,7 @@ static void destroy_tree(Display *d, MwWindow *win, bool top)
      * compositor's popup_done does; mapping one again builds a new popup on
      * a live anchor.  Only a window with a Wayland surface can be an anchor,
      * so the object table is not scanned for every child widget. */
-    if (win->tl) {
-        XDisplayImpl *dp = MWD(d);
-        for (size_t i = 0; i < dp->table_cap; i++) {
-            if (!dp->table[i].id || dp->table[i].kind != MW_OBJ_WINDOW)
-                continue;
-            MwWindow *o = dp->table[i].obj;
-            if (!o || o == win) continue;
-            bool anchored = o->popup_parent == win ||
-                            (o->tl && o->tl->parent_tl == win);
-            if (!anchored) continue;
-            if (o->mapped) mw_unmap_window(d, o);
-            mw_pointer_drop_grab(d, o);
-            if (o->tl) { mw_toplevel_destroy(o->tl); o->tl = NULL; }
-            o->popup_parent = NULL;
-        }
-    }
+    if (win->tl) dismiss_anchored_popups(d, win);
     if (win->tl) { mw_toplevel_destroy(win->tl); win->tl = NULL; }
 
     /* Destroying the owner gives a selection up (without SelectionClear). */
@@ -1218,6 +1223,9 @@ int XReparentWindow(Display *d, Window w, Window parent, int x, int y)
         }
     } else {
         if (win->tl) {
+            /* Popups anchored here would otherwise keep pointing at a window
+             * whose later destruction skips them (it no longer has a tl). */
+            dismiss_anchored_popups(d, win);
             MwToplevel *tl = win->tl;
             win->tl = NULL;
             mw_toplevel_destroy(tl);
@@ -1515,9 +1523,11 @@ void mw_window_props_changed(Display *d, MwWindow *win, Atom a)
                                   : mw_get_prop(d, win, netname);
         if (p && p->data) name = (char *)p->data;
         if (name && tl->xdg_toplevel) {
-            xdg_toplevel_set_title(tl->xdg_toplevel, name);
+            char title[MW_WL_STRING_MAX];
+            mw_wl_string(title, sizeof title, name, p->type == XA_STRING);
+            xdg_toplevel_set_title(tl->xdg_toplevel, title);
             free(tl->title);
-            tl->title = strdup(name);
+            tl->title = strdup(title);
             /* Re-address the window in case the title is what we match on. */
             mw_apply_motif_functions(d, win);
         }

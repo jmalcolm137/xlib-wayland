@@ -878,6 +878,14 @@ bool      mw_runtime_dir(char *buf, size_t n);
 bool      mw_fd_owned_regular(int fd);
 /* True when the peer of a connected Unix socket runs as this user. */
 bool      mw_peer_is_self(int fd);
+/* getenv for variables that name files or programs: NULL in a setuid or
+ * setgid client, so the invoking user cannot steer it with raised privileges. */
+const char *mw_secure_getenv(const char *name);
+/* Copy a client-supplied title or app_id into valid UTF-8 (Latin-1 when
+ * `latin1`, else invalid bytes become '?') of at most `n`-1 bytes.  A string
+ * longer than libwayland's message buffer would abort the connection. */
+void      mw_wl_string(char *out, size_t n, const char *in, bool latin1);
+#define   MW_WL_STRING_MAX 1024
 XImage   *mw_create_image_alloc(Display *d, Visual *visual, unsigned int depth,
                                 int format, unsigned int width,
                                 unsigned int height, int bitmap_pad);
