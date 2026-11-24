@@ -203,6 +203,7 @@ Region XCreateRegion(void)
     }
     r->size = 1;
     r->numRects = 0;
+    memset(&r->extents, 0, sizeof r->extents);
     pixman_region32_init(&r->pix);
     return r;
 }

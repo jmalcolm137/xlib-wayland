@@ -87,6 +87,7 @@ struct _XGC *mw_create_gc_internal(Display *d, Drawable dr, unsigned long mask,
 {
     (void)dr;
     struct _XGC *gc = calloc(1, sizeof *gc);
+    if (!gc) return NULL;
     gc->gid = mw_alloc_id(d);
     gc->function = GXcopy;
     gc->plane_mask = AllPlanes;
@@ -319,7 +320,7 @@ int XSetClipRectangles(Display *d, GC gc, int clip_x, int clip_y,
                        XRectangle *rects, int n, int ordering)
 {
     (void)d; (void)ordering;
-    if (n < 0) n = 0;
+    if (n < 0 || !rects) n = 0;
     XRectangle *copy = n ? malloc(sizeof(XRectangle) * (size_t)n) : NULL;
     if (n && !copy) return 0;
     if (n && rects) memcpy(copy, rects, sizeof(XRectangle) * (size_t)n);
@@ -340,7 +341,7 @@ int XSetRegion(Display *d, GC gc, Region r)
 {
     if (gc->clip_region) XDestroyRegion(gc->clip_region);
     gc->clip_region = XCreateRegion();
-    XUnionRegion(gc->clip_region, r, gc->clip_region);
+    if (gc->clip_region) XUnionRegion(gc->clip_region, r, gc->clip_region);
     XRectangle *rects = NULL;
     int n = mw_region_rectangles(r, &rects);
     if (n < 0) return 0;

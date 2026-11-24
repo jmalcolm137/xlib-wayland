@@ -252,6 +252,7 @@ static void mw_set_workspace_props(Display *d, MwWindow *wm)
     mw_read_workspace_state(names_buf, sizeof names_buf, &current);
 
     char *names = strdup(names_buf);
+    if (!names) return;
     Atom ws[64];
     int nws = 0;
     char *save_tok = NULL;
@@ -384,6 +385,7 @@ MwWindow *mw_create_window(Display *d, Window parent, int x, int y, int w, int h
                            XSetWindowAttributes *attr)
 {
     MwWindow *win = calloc(1, sizeof *win);
+    if (!win) return NULL;
     win->id = mw_alloc_id(d);
     win->d = d;
     win->x = x; win->y = y;
@@ -1291,22 +1293,26 @@ int XClearArea(Display *d, Window w, int x, int y,
 {
     MwWindow *win = mw_window(d, w);
     if (!win || win->input_only) return 0;
-    int cw = width ? (int)width : win->w - x;
-    int ch = height ? (int)height : win->h - y;
-    if (x < 0) { cw += x; x = 0; }
-    if (y < 0) { ch += y; y = 0; }
-    if (x + cw > win->w) cw = win->w - x;
-    if (y + ch > win->h) ch = win->h - y;
+    /* In long long: a huge width or offset must not wrap past the clamps. */
+    long long lx = x, ly = y;
+    long long cw = width ? (long long)width : win->w - lx;
+    long long ch = height ? (long long)height : win->h - ly;
+    if (lx < 0) { cw += lx; lx = 0; }
+    if (ly < 0) { ch += ly; ly = 0; }
+    if (lx + cw > win->w) cw = win->w - lx;
+    if (ly + ch > win->h) ch = win->h - ly;
     if (cw <= 0 || ch <= 0) return 1;
+    x = (int)lx; y = (int)ly;
+    int iw = (int)cw, ih = (int)ch;
     if (MW_TRACE())
         fprintf(stderr, "MW: XClearArea 0x%lx %d,%d %dx%d exposures=%d\n",
-                w, x, y, cw, ch, exposures);
+                w, x, y, iw, ih, exposures);
     if (win->surface || win->background_pixmap != None) {
         mw_window_ensure_surface(win);
-        clear_win_rect(win, x, y, cw, ch);
+        clear_win_rect(win, x, y, iw, ih);
     }
-    mw_window_damage_rect(win, x, y, cw, ch);
-    if (exposures) mw_window_expose(win, x, y, cw, ch);
+    mw_window_damage_rect(win, x, y, iw, ih);
+    if (exposures) mw_window_expose(win, x, y, iw, ih);
     return 1;
 }
 
@@ -1404,6 +1410,7 @@ Status XQueryTree(Display *d, Window w, Window *root_return, Window *parent_retu
     int n = 0;
     for (MwWindow *c = win->children; c; c = c->next_sib) n++;
     Window *arr = n ? malloc(sizeof(Window) * n) : NULL;
+    if (n && !arr) return 0;
     int i = 0;
     for (MwWindow *c = win->children; c; c = c->next_sib) arr[i++] = c->id;
     if (children_return) *children_return = arr; else free(arr);

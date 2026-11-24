@@ -287,6 +287,15 @@ Display *XOpenDisplay(_Xconst char *display_name)
     MwWindow *root = mw_create_window(d, None, 0, 0, sw, sh, 0, 24,
                                       InputOutput, &dp->visual,
                                       CWBackPixel | CWEventMask, &rattr);
+    if (!root) {                 /* out of memory: fail the open cleanly */
+        mw_wl_disconnect(dp);
+        free(dp->screens);
+        free(dp->private12);
+        free(dp->vendor);
+        free(dp->display_name);
+        free(dp);
+        return NULL;
+    }
     scr->root = root->id;
 
     /* Default colormap + GC. */
@@ -562,7 +571,8 @@ int (*XSetIOErrorHandler(int (*handler)(Display *)))(Display *)
 int XGetErrorText(Display *d, int code, char *buffer, int length)
 {
     (void)d;
-    snprintf(buffer, length, "X error %d", code);
+    if (!buffer || length <= 0) return 0;
+    snprintf(buffer, (size_t)length, "X error %d", code);
     return 0;
 }
 
@@ -570,7 +580,8 @@ int XGetErrorDatabaseText(Display *d, _Xconst char *name, _Xconst char *msg,
                           _Xconst char *def, char *buf, int len)
 {
     (void)d; (void)name; (void)msg;
-    snprintf(buf, len, "%s", def ? def : "");
+    if (!buf || len <= 0) return 0;
+    snprintf(buf, (size_t)len, "%s", def ? def : "");
     return 0;
 }
 

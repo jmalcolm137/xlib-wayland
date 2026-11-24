@@ -242,6 +242,7 @@ XOM XOpenOM(Display *d, struct _XrmHashBucketRec *db, _Xconst char *res_name,
 {
     (void)db; (void)res_name; (void)res_class;
     struct _XOM *om = calloc(1, sizeof *om);
+    if (!om) return NULL;
     om->display = d;
     return om;
 }
@@ -255,6 +256,7 @@ char *XSetOMValues(XOM om, ...) { (void)om; return NULL; }
 XOC XCreateOC(XOM om, ...)
 {
     struct _XOC *oc = calloc(1, sizeof *oc);
+    if (!oc) return NULL;
     oc->om = om;
     return oc;
 }

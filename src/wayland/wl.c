@@ -107,7 +107,10 @@ static void output_mode(void *data, struct wl_output *o, uint32_t flags,
     (void)o;
     Display *d = data;
     XDisplayImpl *dp = MWD(d);
-    if (flags & WL_OUTPUT_MODE_CURRENT) {
+    /* Clients divide by DisplayWidth/Height; a zero or negative mode from the
+     * compositor must not reach the screen. */
+    if ((flags & WL_OUTPUT_MODE_CURRENT) && width > 0 && height > 0 &&
+        width <= 65535 && height <= 65535) {
         dp->output_mode_w = width;
         dp->output_mode_h = height;
         if (refresh > 0) dp->output_refresh_mhz = refresh;

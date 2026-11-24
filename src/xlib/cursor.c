@@ -62,6 +62,7 @@ void mw_cursor_fini(Display *d)
 Cursor XCreateFontCursor(Display *d, unsigned int shape)
 {
     MwCursor *c = calloc(1, sizeof *c);
+    if (!c) return None;
     c->id = mw_alloc_id(d);
     c->shape = shape;
     c->fg = 0xff000000;
@@ -83,6 +84,7 @@ Cursor XCreatePixmapCursor(Display *d, Pixmap source, Pixmap mask,
 {
     (void)source; (void)mask; (void)xhot; (void)yhot;
     MwCursor *c = calloc(1, sizeof *c);
+    if (!c) return None;
     c->id = mw_alloc_id(d);
     if (foreground) c->fg = 0xff000000u | (uint32_t)(foreground->pixel & 0xffffff);
     if (background) c->bg = 0xff000000u | (uint32_t)(background->pixel & 0xffffff);
@@ -96,6 +98,7 @@ Cursor XCreateGlyphCursor(Display *d, Font source_font, Font mask_font,
 {
     (void)source_font; (void)mask_font; (void)mask_char;
     MwCursor *c = calloc(1, sizeof *c);
+    if (!c) return None;
     c->id = mw_alloc_id(d);
     c->shape = source_char;
     if (foreground) c->fg = 0xff000000u | (uint32_t)(foreground->pixel & 0xffffff);
@@ -130,7 +133,8 @@ static struct wl_buffer *make_argb_buffer(Display *d, const uint32_t *pix,
                                           int w, int h)
 {
     XDisplayImpl *dp = MWD(d);
-    if (!dp->wl_shm || w <= 0 || h <= 0) return NULL;
+    /* Real cursors are at most a few hundred pixels; bound w*4 and size. */
+    if (!dp->wl_shm || w <= 0 || h <= 0 || w > 1024 || h > 1024) return NULL;
     size_t size = (size_t)w * h * 4;
     int fd = memfd_create("mw-cursor", MFD_CLOEXEC);
     if (fd < 0) return NULL;
@@ -183,10 +187,12 @@ static void apply_cursor(Display *d, MwCursor *c)
                                                                "left_ptr");
             if (def) {
                 MwCursor *dc = calloc(1, sizeof *dc);
-                dc->id = mw_alloc_id(d);
-                dc->wl = def;
-                mw_register(d, dc->id, MW_OBJ_CURSOR, dc);
-                dp->default_cursor = dc;
+                if (dc) {
+                    dc->id = mw_alloc_id(d);
+                    dc->wl = def;
+                    mw_register(d, dc->id, MW_OBJ_CURSOR, dc);
+                    dp->default_cursor = dc;
+                }
             }
         }
         if (dp->default_cursor) c = dp->default_cursor;
@@ -366,7 +372,7 @@ void mw_cursor_theme_set(Display *d, const char *theme)
 void mw_cursor_size_set(Display *d, int size)
 {
     XDisplayImpl *dp = MWD(d);
-    if (size <= 0) return;
+    if (size <= 0 || size > 1024) return;
     dp->xcursor_size = size;
     cursor_theme_reload(d);
 }

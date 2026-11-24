@@ -48,16 +48,21 @@ XRRScreenResources *XRRGetScreenResources(Display *d, Window w)
 {
     (void)w;
     XRRScreenResources *r = calloc(1, sizeof *r);
+    if (!r) return NULL;
+    r->crtcs = malloc(sizeof(RRCrtc));
+    r->outputs = malloc(sizeof(RROutput));
+    r->modes = malloc(sizeof(XRRModeInfo));
+    if (!r->crtcs || !r->outputs || !r->modes) {
+        XRRFreeScreenResources(r);
+        return NULL;
+    }
     r->timestamp = mw_now();
     r->configTimestamp = r->timestamp;
     r->ncrtc = 1;
-    r->crtcs = malloc(sizeof(RRCrtc));
     r->crtcs[0] = 2;
     r->noutput = 1;
-    r->outputs = malloc(sizeof(RROutput));
     r->outputs[0] = 3;
     r->nmode = 1;
-    r->modes = malloc(sizeof(XRRModeInfo));
     fill_mode(d, &r->modes[0]);
     return r;
 }
@@ -78,9 +83,16 @@ XRROutputInfo *XRRGetOutputInfo(Display *d, XRRScreenResources *res, RROutput ou
 {
     (void)res;
     XRROutputInfo *o = calloc(1, sizeof *o);
+    if (!o) return NULL;
+    o->name = strdup("WAYLAND-1");
+    o->crtcs = malloc(sizeof(RRCrtc));
+    o->modes = malloc(sizeof(RRMode));
+    if (!o->name || !o->crtcs || !o->modes) {
+        XRRFreeOutputInfo(o);
+        return NULL;
+    }
     o->timestamp = mw_now();
     o->crtc = out == 3 ? 2 : 0;
-    o->name = strdup("WAYLAND-1");
     o->nameLen = (int)strlen(o->name);
     /* Prefer the compositor's physical size (wl_output.geometry); fall back to
      * a 96-dpi guess only when it does not report one.  GDK turns pixel size
@@ -94,12 +106,10 @@ XRROutputInfo *XRRGetOutputInfo(Display *d, XRRScreenResources *res, RROutput ou
     o->connection = RR_Connected;
     o->subpixel_order = SubPixelUnknown;
     o->ncrtc = 1;
-    o->crtcs = malloc(sizeof(RRCrtc));
     o->crtcs[0] = 2;
     o->nclone = 0;
     o->nmode = 1;
     o->npreferred = 1;
-    o->modes = malloc(sizeof(RRMode));
     o->modes[0] = 1;
     return o;
 }
@@ -115,6 +125,13 @@ XRRCrtcInfo *XRRGetCrtcInfo(Display *d, XRRScreenResources *res, RRCrtc crtc)
 {
     (void)res; (void)crtc;
     XRRCrtcInfo *c = calloc(1, sizeof *c);
+    if (!c) return NULL;
+    c->outputs = malloc(sizeof(RROutput));
+    c->possible = malloc(sizeof(RROutput));
+    if (!c->outputs || !c->possible) {
+        free(c->outputs); free(c->possible); free(c);
+        return NULL;
+    }
     XDisplayImpl *dp = MWD(d);
     c->timestamp = mw_now();
     c->x = 0; c->y = 0;
@@ -123,11 +140,9 @@ XRRCrtcInfo *XRRGetCrtcInfo(Display *d, XRRScreenResources *res, RRCrtc crtc)
     c->mode = 1;
     c->rotation = RR_Rotate_0;
     c->noutput = 1;
-    c->outputs = malloc(sizeof(RROutput));
     c->outputs[0] = 3;
     c->rotations = RR_Rotate_0;
     c->npossible = 1;
-    c->possible = malloc(sizeof(RROutput));
     c->possible[0] = 3;
     return c;
 }

@@ -228,6 +228,8 @@ static int buffer_create(MwToplevel *tl, int w, int h)
     if (!dp->wl_shm) return -1;
 
     int sc = mw_display_scale(tl->win->d);
+    if (sc < 1) sc = 1;
+    if (w > 32767 / sc || h > 32767 / sc) return -1;
     int pw = w * sc, ph = h * sc;
 
     bool want_crop = dp->viewporter && !getenv("MW_NOVIEWPORT");
@@ -280,8 +282,8 @@ static void popup_configure(void *data, struct xdg_popup *p, int32_t x, int32_t 
     MwToplevel *tl = data;
     if (getenv("MW_TRACE"))
         fprintf(stderr, "MW: popup configure placed x=%d y=%d %dx%d\n", x, y, w, h);
-    if (w > 0) tl->req_w = w;
-    if (h > 0) tl->req_h = h;
+    if (w > 0) tl->req_w = w > 32767 ? 32767 : w;
+    if (h > 0) tl->req_h = h > 32767 ? 32767 : h;
     mw_toplevel_damage(tl);
 }
 
@@ -1567,8 +1569,8 @@ static void tl_configure(void *data, struct xdg_toplevel *t, int32_t w, int32_t 
         if (*s == XDG_TOPLEVEL_STATE_MAXIMIZED)  maximized = true;
         else if (*s == XDG_TOPLEVEL_STATE_FULLSCREEN) fullscreen = true;
     }
-    if (w > 0) tl->req_w = w;
-    if (h > 0) tl->req_h = h;
+    if (w > 0) tl->req_w = w > 32767 ? 32767 : w;
+    if (h > 0) tl->req_h = h > 32767 ? 32767 : h;
     if (!tl->is_popup && tl->win &&
         (maximized != tl->maximized || fullscreen != tl->fullscreen)) {
         tl->maximized = maximized;

@@ -12,6 +12,7 @@ Colormap XCreateColormap(Display *d, Window w, Visual *visual, int alloc)
 {
     (void)w; (void)alloc;
     MwColormap *cm = calloc(1, sizeof *cm);
+    if (!cm) return None;
     cm->id = mw_alloc_id(d);
     cm->screen = MWSCR(d);
     cm->visual = visual ? visual : &MWD(d)->visual;
@@ -40,6 +41,7 @@ Colormap *XListInstalledColormaps(Display *d, Window w, int *nret)
 {
     (void)w;
     Colormap *cmaps = malloc(sizeof(Colormap));
+    if (!cmaps) { if (nret) *nret = 0; return NULL; }
     cmaps[0] = MWSCR(d)->cmap;
     if (nret) *nret = 1;
     return cmaps;
@@ -118,6 +120,7 @@ static void load_rgb(void)
     char line[256];
     int cap = 1024;
     g_named = calloc(cap, sizeof(NamedColor));
+    if (!g_named) { fclose(f); g_nnamed = -1; return; }
     while (fgets(line, sizeof line, f)) {
         if (line[0] == '!' || line[0] == '#') continue;
         int r, g, b;
@@ -381,6 +384,7 @@ int *XListDepths(Display *d, int scr, int *count)
 {
     (void)d; (void)scr;
     int *a = malloc(2 * sizeof(int));
+    if (!a) { *count = 0; return NULL; }
     a[0] = 24; a[1] = 32; *count = 2;
     return a;
 }
@@ -389,6 +393,7 @@ XPixmapFormatValues *XListPixmapFormats(Display *d, int *count)
 {
     (void)d;
     XPixmapFormatValues *a = malloc(2 * sizeof(XPixmapFormatValues));
+    if (!a) { *count = 0; return NULL; }
     a[0].depth = 24; a[0].bits_per_pixel = 32; a[0].scanline_pad = 32;
     a[1].depth = 32; a[1].bits_per_pixel = 32; a[1].scanline_pad = 32;
     *count = 2;

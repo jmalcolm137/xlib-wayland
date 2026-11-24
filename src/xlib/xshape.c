@@ -66,6 +66,7 @@ void XShapeCombineMask(Display *d, Window dest, int kind, int x_off, int y_off,
     (void)x_off; (void)y_off; (void)src; (void)op;
     MwWindow *w = mw_window(d, dest);
     if (w && kind == ShapeBounding) {
+        if (w->has_shape) pixman_region32_fini(&w->shape);
         w->has_shape = false;
         mw_window_damage(w);
     }
@@ -146,6 +147,7 @@ XRectangle *XShapeGetRectangles(Display *d, Window w, int kind, int *count,
     int n = 0;
     pixman_box32_t *boxes = pixman_region32_rectangles(&reg, &n);
     XRectangle *out = n ? malloc(sizeof(XRectangle) * n) : NULL;
+    if (n && !out) n = 0;
     for (int i = 0; i < n; i++) {
         out[i].x = (short)boxes[i].x1;
         out[i].y = (short)boxes[i].y1;

@@ -15,7 +15,9 @@ static int read_integer(const char *s, const char **next)
     int sign = 1, v = 0;
     if (*s == '+') s++;
     else if (*s == '-') { s++; sign = -1; }
-    for (; *s >= '0' && *s <= '9'; s++) v = v * 10 + (*s - '0');
+    /* Saturate rather than overflow: no geometry needs more than 16 bits. */
+    for (; *s >= '0' && *s <= '9'; s++)
+        if (v < 100000) v = v * 10 + (*s - '0');
     *next = s;
     return sign * v;
 }

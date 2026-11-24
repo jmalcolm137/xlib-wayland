@@ -33,6 +33,7 @@ int XSetSelectionOwner(Display *d, Atom selection, Window owner, Time time)
     MwSelection *s = find_sel(d, selection);
     if (!s) {
         s = calloc(1, sizeof *s);
+        if (!s) return 0;
         s->selection = selection;
         s->next = dp->selections;
         dp->selections = s;
@@ -152,7 +153,9 @@ int XStoreBuffer(Display *d, _Xconst char *bytes, int nbytes, int buffer)
     if (buffer < 0 || buffer > 7) return 0;
     free(dp->cutbuf[buffer]);
     if (nbytes < 0) nbytes = bytes ? (int)strlen(bytes) : 0;
+    if (!bytes) nbytes = 0;
     dp->cutbuf[buffer] = malloc((size_t)nbytes + 1);
+    if (!dp->cutbuf[buffer]) { dp->cutbuf_len[buffer] = 0; return 0; }
     if (bytes) memcpy(dp->cutbuf[buffer], bytes, nbytes);
     dp->cutbuf[buffer][nbytes] = 0;
     dp->cutbuf_len[buffer] = (size_t)nbytes;
@@ -169,6 +172,7 @@ char *XFetchBuffer(Display *d, int *nbytes, int buffer)
     if (!dp->cutbuf[buffer]) { if (nbytes) *nbytes = 0; return NULL; }
     if (nbytes) *nbytes = (int)dp->cutbuf_len[buffer];
     char *out = malloc(dp->cutbuf_len[buffer] + 1);
+    if (!out) { if (nbytes) *nbytes = 0; return NULL; }
     memcpy(out, dp->cutbuf[buffer], dp->cutbuf_len[buffer] + 1);
     return out;
 }

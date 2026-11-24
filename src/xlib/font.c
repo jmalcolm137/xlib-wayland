@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdio.h>
 
-static void fill_font_struct(Display *d, MwXFont *xf, XFontStruct *fs);
+static bool fill_font_struct(Display *d, MwXFont *xf, XFontStruct *fs);
 
 static MwXFont *load_xfont(Display *d, const char *name, bool query)
 {
@@ -22,7 +22,9 @@ static MwXFont *load_xfont(Display *d, const char *name, bool query)
     xf->descent = mw_font_descent(rf);
     xf->max_width = mw_font_max_width(rf);
     fs->fid = xf->id;
-    fill_font_struct(d, xf, fs);
+    if (!fill_font_struct(d, xf, fs)) {
+        free(xf); free(fs); mw_font_destroy(rf); return NULL;
+    }
     xf->fs = fs;
     mw_register(d, xf->id, MW_OBJ_FONT, xf);
     return xf;
@@ -79,7 +81,7 @@ static void release_font_id(Display *d, Font id)
     if (xf->refs <= 0) destroy_xfont(d, xf);
 }
 
-static void fill_font_struct(Display *d, MwXFont *xf, XFontStruct *fs)
+static bool fill_font_struct(Display *d, MwXFont *xf, XFontStruct *fs)
 {
     (void)d;
     fs->ext_data = NULL;
@@ -93,6 +95,7 @@ static void fill_font_struct(Display *d, MwXFont *xf, XFontStruct *fs)
     fs->n_properties = 0;
     fs->properties = NULL;
     fs->per_char = calloc(256, sizeof(XCharStruct));
+    if (!fs->per_char) return false;
     fs->ascent = xf->ascent;
     fs->descent = xf->descent;
 
@@ -122,6 +125,7 @@ static void fill_font_struct(Display *d, MwXFont *xf, XFontStruct *fs)
         MW_BOUND(ascent); MW_BOUND(descent);
 #undef MW_BOUND
     }
+    return true;
 }
 
 Font XLoadFont(Display *d, _Xconst char *name)
