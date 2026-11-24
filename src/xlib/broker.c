@@ -184,6 +184,7 @@ static void reg_set(MwBroker *b, const char *name, int pid)
     if (!name || !*name || strpbrk(name, "\t\r\n")) return;
     int fd = open(b->reg_path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return;
+    if (!mw_fd_owned_regular(fd)) { close(fd); return; }
     flock(fd, LOCK_EX);
 
     /* Read the whole file (bounded). */
@@ -211,7 +212,7 @@ static void reg_set(MwBroker *b, const char *name, int pid)
     size_t nlen = strlen(name);
     size_t ocap = len + nlen + 32;
     char  *out = malloc(ocap);
-    if (!out) { free(text); close(fd); return; }
+    if (!out) { free(text); flock(fd, LOCK_UN); close(fd); return; }
     size_t olen = 0;
     char  *p = text;
     while (*p) {
@@ -242,6 +243,7 @@ static int reg_get(MwBroker *b, const char *name)
 {
     int fd = open(b->reg_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return 0;
+    if (!mw_fd_owned_regular(fd)) { close(fd); return 0; }
     flock(fd, LOCK_SH);
     FILE *f = fdopen(fd, "r");
     if (!f) { flock(fd, LOCK_UN); close(fd); return 0; }
@@ -388,6 +390,7 @@ void mw_broker_init(Display *d)
         b->listen_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
         if (b->listen_fd < 0 ||
             bind(b->listen_fd, (struct sockaddr *)&sa, sizeof sa) != 0 ||
+            chmod(b->sock_path, 0600) != 0 ||
             listen(b->listen_fd, 8) != 0) {
             if (b->listen_fd >= 0) close(b->listen_fd);
             b->listen_fd = -1;
@@ -741,6 +744,7 @@ static void serve_accept(Display *d)
     if (b->serve.active || b->accept_fd >= 0) return;   /* one at a time */
     int fd = accept4(b->listen_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
     if (fd < 0) return;
+    if (!mw_peer_is_self(fd)) { close(fd); return; }
     TR("serve_accept fd=%d\n", fd);
     b->accept_fd = fd;
     b->accept_len = 0;
@@ -791,11 +795,17 @@ static void serve_read(Display *d)
     hexdec(ht, (unsigned char *)tname, sizeof tname - 1);
     hexdec(hp, (unsigned char *)pname, sizeof pname - 1);
 
-    Atom sel = XInternAtom(d, selname, False);
-    Atom tgt = XInternAtom(d, tname, False);
-    Atom prop = pname[0] ? XInternAtom(d, pname, False) : None;
+    /* Only a selection this process already knows can have an owner here, so
+     * look it up without creating it: a peer must not be able to grow the
+     * shared atom file with arbitrary names. */
+    Atom sel = selname[0] ? XInternAtom(d, selname, True) : None;
+    Atom tgt = None, prop = None;
+    if (sel != None) {
+        tgt = XInternAtom(d, tname, False);
+        prop = pname[0] ? XInternAtom(d, pname, False) : None;
+    }
     TR("serve request fd=%d sel=%s tgt=%s prop=%s\n", fd, selname, tname, pname);
-    Window owner = XGetSelectionOwner(d, sel);
+    Window owner = sel != None ? XGetSelectionOwner(d, sel) : None;
     if (owner == None || (dp->clip_window != None && owner == dp->clip_window)) {
         /* An explicit refusal, so the requestor need not wait for EOF. */
         char msg[1600];

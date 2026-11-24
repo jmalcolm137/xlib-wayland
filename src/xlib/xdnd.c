@@ -440,8 +440,9 @@ bool mw_xdnd_notify(Display *d, XSelectionEvent *se)
     unsigned char *data = NULL;
     XGetWindowProperty(d, se->requestor, se->property, 0, 0x7fffffff, True,
                        XA_ATOM, &type, &fmt, &n, &ba, &data);
+    if (data && fmt != 32) { XFree(data); data = NULL; }
     if (data) {
-        Atom *targets = malloc((size_t)n * sizeof(Atom));
+        Atom *targets = malloc((n ? n : 1) * sizeof(Atom));
         int nt = 0;
         if (targets) {
             for (unsigned long i = 0; i < n; i++) {

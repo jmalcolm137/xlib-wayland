@@ -391,7 +391,7 @@ static const char *kbd_state_path(void)
     const char *p = getenv("XLIB_WAYLAND_KEYBOARD");
     if (p && *p) return p;
     const char *rt = getenv("XDG_RUNTIME_DIR");
-    if (!rt || !*rt) return NULL;
+    if (!rt || rt[0] != '/') return NULL;      /* must be absolute (XDG spec) */
     snprintf(path, sizeof path, "%s/xlib-wayland-keyboard", rt);
     return path;
 }
@@ -407,6 +407,7 @@ int mw_keyboard_autorepeat_mode(Display *d)
     int mode = AutoRepeatModeOn;   /* default when there is no shared state */
     if (path) {
         int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd >= 0 && !mw_fd_owned_regular(fd)) { close(fd); fd = -1; }
         if (fd >= 0) {
             flock(fd, LOCK_SH);
             char buf[16];
@@ -436,6 +437,7 @@ void mw_keyboard_set_autorepeat(Display *d, int mode)
     if (!path) return;
     int fd = open(path, O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return;
+    if (!mw_fd_owned_regular(fd)) { close(fd); return; }
     flock(fd, LOCK_EX);
     if (ftruncate(fd, 0) != 0) { /* best effort */ }
     lseek(fd, 0, SEEK_SET);

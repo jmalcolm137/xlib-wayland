@@ -40,6 +40,10 @@ static MwSurface *surface_new(void *data, int w, int h, int stride, int scale,
     if (w < 1) w = 1;
     if (h < 1) h = 1;
     if (scale < 1) scale = 1;
+    /* cairo's image surfaces top out at 32767 pixels a side; beyond that it
+     * returns an error surface with no pixel data, which every caller would
+     * then dereference. */
+    if (scale > 16 || w > 32767 / scale || h > 32767 / scale) return NULL;
     MwSurface *s = calloc(1, sizeof *s);
     if (!s) return NULL;
     s->w = w;
@@ -56,6 +60,12 @@ static MwSurface *surface_new(void *data, int w, int h, int stride, int scale,
         s->data = data;
     }
     if (!s->cs) { free(s); return NULL; }
+    if (cairo_surface_status(s->cs) != CAIRO_STATUS_SUCCESS ||
+        (owned && !cairo_image_surface_get_data(s->cs))) {
+        cairo_surface_destroy(s->cs);
+        free(s);
+        return NULL;
+    }
     if (scale > 1) cairo_surface_set_device_scale(s->cs, scale, scale);
     s->stride = cairo_image_surface_get_stride(s->cs);
     if (owned) s->data = cairo_image_surface_get_data(s->cs);
@@ -629,6 +639,11 @@ void mw_fill_pattern(MwCanvas *c, MwSurface *pat, int x_origin, int y_origin,
     }
     cairo_surface_t *tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, pw, ph);
     uint32_t *td = (uint32_t *)cairo_image_surface_get_data(tmp);
+    if (cairo_surface_status(tmp) != CAIRO_STATUS_SUCCESS || !td) {
+        cairo_surface_destroy(tmp);
+        cairo_new_path(c->cr);
+        return;
+    }
     int ts = cairo_image_surface_get_stride(tmp) / 4;
     cairo_surface_flush(pat->cs);
     const uint32_t *sp = (const uint32_t *)cairo_image_surface_get_data(pat->cs);
@@ -1045,6 +1060,7 @@ static MwFont *font_from_match(FcPattern *match, int px_hint, int antialias)
     FcPatternGetDouble(match, FC_PIXEL_SIZE, 0, &mpx);
 
     MwFont *f = calloc(1, sizeof *f);
+    if (!f) { FcPatternDestroy(match); return NULL; }
     for (int i = 0; i < 256; i++) f->wcache[i] = -1;
     f->pixel_size = (int)(mpx + 0.5);
     if (!file || FT_New_Face(g_ft, (const char *)file, index, &f->ft) != 0) {

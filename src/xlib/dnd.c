@@ -368,14 +368,16 @@ static void ensure_src_window(Display *d)
 static void dnd_apply_payload(Display *d, MwDnd *x, const char *hexpayload)
 {
     unsigned char raw[4096];
-    size_t n = hex_decode(hexpayload, raw, sizeof raw);
+    /* Leave room for a terminator so a payload without a final NUL never
+     * makes the string scans below run into uninitialised stack. */
+    size_t n = hex_decode(hexpayload, raw, sizeof raw - 1);
     if (n == 0) return;
-    raw[sizeof raw - 1] = 0;
+    raw[n] = 0;
 
     /* first NUL-terminated string is the icc handle name */
     const char *icc = (const char *)raw;
     size_t icclen = strnlen(icc, n);
-    if (icclen >= n) return;
+    if (icclen == 0 || icclen >= n || icclen > 255) return;
 
     /* the rest are target names */
     Atom list[64];
@@ -384,6 +386,7 @@ static void dnd_apply_payload(Display *d, MwDnd *x, const char *hexpayload)
     const char *end = (const char *)raw + n;
     while (p < end && *p && nl < 64) {
         size_t l = strnlen(p, (size_t)(end - p));
+        if (l > 255) break;              /* not a plausible atom name */
         list[nl++] = mw_intern_atom(d, p, False);
         TR("  want target %s\n", p);
         p += l + 1;

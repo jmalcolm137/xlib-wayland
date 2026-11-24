@@ -214,7 +214,8 @@ Bool mw_xi2_reply(Display *d, void *repbuf)
 {
     XDisplayImpl *dp = MWD(d);
     unsigned char *req = dp->xi2_req;
-    if (!req || req[0] != MW_XI_OPCODE) return False;
+    if (!req || dp->xi2_req_len < 4 || req[0] != MW_XI_OPCODE) return False;
+    int req_len = dp->xi2_req_len;
     unsigned char *rep = repbuf;
     memset(rep, 0, 32);
     unsigned minor = req[1];
@@ -236,7 +237,7 @@ Bool mw_xi2_reply(Display *d, void *repbuf)
         return True;
     case MW_XI_QUERY_DEVICE: {
         /* xXIQueryDeviceReq: reqType, ReqType, length, then deviceid. */
-        int filter = (int)req[4] | ((int)req[5] << 8);
+        int filter = req_len >= 8 ? ((int)req[4] | ((int)req[5] << 8)) : 0;
         int count = 0; size_t len = 0;
         build_device_info(d, filter, &count, &len);
         if (getenv("MW_TRACE"))
@@ -254,8 +255,9 @@ Bool mw_xi2_reply(Display *d, void *repbuf)
         put32(rep, 4, 0);                     /* no such property */
         return True;
     case MW_XI_GET_SELECTED_EVENTS: {
-        uint32_t w32;
-        memcpy(&w32, req + 4, 4);        /* a CARD32 on the wire; Window is 64-bit */
+        uint32_t w32 = 0;
+        if (req_len >= 8)
+            memcpy(&w32, req + 4, 4);    /* a CARD32 on the wire; Window is 64-bit */
         Window win = w32;
         MwXiSelect *s = xi_select_find(d, win, false);
         int any = 0;

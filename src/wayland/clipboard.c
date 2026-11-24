@@ -1070,8 +1070,12 @@ static void serve_append(MwClipServe *sv, const unsigned char *b, size_t n)
         sv->pend_off = 0;
     }
     if (sv->pend_len + n > sv->pend_cap) {
+        /* A peer that never drains its pipe must not grow this without
+         * bound while the X owner keeps feeding INCR chunks. */
+        if (n > CLIP_MAX_BYTES || sv->pend_len > CLIP_MAX_BYTES - n) return;
         size_t ncap = sv->pend_cap ? sv->pend_cap * 2 : 4096;
         while (ncap < sv->pend_len + n) ncap *= 2;
+        if (ncap > CLIP_MAX_BYTES) ncap = CLIP_MAX_BYTES;
         unsigned char *nb = realloc(sv->pend, ncap);
         if (!nb) return;
         sv->pend = nb;
@@ -1410,11 +1414,16 @@ void mw_clipboard_incr_notify(Display *d, Atom property)
     unsigned char *bytes = NULL;
     if (format == 32) {
         bytes = malloc(blen);
-        if (bytes)
-            for (unsigned long i = 0; i < n; i++) {
-                uint32_t v = (uint32_t)((const long *)data)[i];
-                memcpy(bytes + i * 4, &v, 4);
-            }
+        if (!bytes) {               /* never fall back to the long array */
+            if (data) XFree(data);
+            serve_end(dp);
+            mw_io_update_wake(d);
+            return;
+        }
+        for (unsigned long i = 0; i < n; i++) {
+            uint32_t v = (uint32_t)((const long *)data)[i];
+            memcpy(bytes + i * 4, &v, 4);
+        }
     }
     const unsigned char *src = bytes ? bytes : data;
     if (sv->to_utf8 && format == 8) {
@@ -1456,12 +1465,15 @@ void mw_clipboard_owner_changed(Display *d, Atom selection, Window owner)
     }
 
     MwWlSource *s = calloc(1, sizeof *s);
+    if (!s) return;
     s->selection = selection;
     if (is_prim) {
         s->source = zwp_primary_selection_device_manager_v1_create_source(dp->primary_mgr);
+        if (!s->source) { free(s); return; }
         zwp_primary_selection_source_v1_add_listener(s->source, &prim_source_listener, d);
     } else {
         s->source = wl_data_device_manager_create_data_source(dp->dnd_mgr);
+        if (!s->source) { free(s); return; }
         wl_data_source_add_listener(s->source, &source_listener, d);
     }
     for (int i = 0; mime_priority[i]; i++) source_offer(s, mime_priority[i]);

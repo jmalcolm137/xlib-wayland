@@ -34,7 +34,9 @@ Status XGetRGBColormaps(Display *d, Window w, XStandardColormap **cmaps,
 {
     Atom at; int af; unsigned long ni, ba; unsigned char *data = NULL;
     if (XGetWindowProperty(d, w, property, 0, 0x7fffffff, False, XA_RGB_COLOR_MAP,
-                           &at, &af, &ni, &ba, &data) != Success || !data) {
+                           &at, &af, &ni, &ba, &data) != Success || !data ||
+        af != 32) {
+        free(data);
         *cmaps = NULL; *count = 0; return 0;
     }
     *cmaps = (XStandardColormap *)data;
@@ -598,9 +600,11 @@ int XGetIconSizes(Display *d, Window w, XIconSize **size_list, int *count)
     if (XGetWindowProperty(d, w, XA_WM_ICON_SIZE, 0, 0x7fffffff, False,
                            XA_WM_ICON_SIZE, &at, &af, &ni, &ba, &data) != Success
         || !data) { *size_list = NULL; *count = 0; return 0; }
+    if (af != 32) { free(data); *size_list = NULL; *count = 0; return 0; }
     /* Property data comes back as a long array; XIconSize holds ints. */
     int n = (int)(ni / 6);
     XIconSize *out = n ? malloc((size_t)n * sizeof(XIconSize)) : NULL;
+    if (n && !out) { free(data); *size_list = NULL; *count = 0; return 0; }
     const long *p = (const long *)data;
     for (int i = 0; i < n; i++) {
         out[i].min_width  = (int)p[i * 6 + 0];

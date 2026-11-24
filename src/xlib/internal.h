@@ -874,6 +874,10 @@ int       mw_region_rectangles(Region r, XRectangle **out);
 int       mw_write_all(int fd, const void *buf, size_t len, int timeout_ms);
 ssize_t   mw_write_some(int fd, const void *buf, size_t len);
 bool      mw_runtime_dir(char *buf, size_t n);
+/* True when fd is a regular file owned by this user (shared state files). */
+bool      mw_fd_owned_regular(int fd);
+/* True when the peer of a connected Unix socket runs as this user. */
+bool      mw_peer_is_self(int fd);
 XImage   *mw_create_image_alloc(Display *d, Visual *visual, unsigned int depth,
                                 int format, unsigned int width,
                                 unsigned int height, int bitmap_pad);

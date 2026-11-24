@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 
 static uint64_t mono_ms(void)
 {
@@ -111,6 +112,9 @@ bool mw_runtime_dir(char *buf, size_t n)
 {
     const char *rt = getenv("XDG_RUNTIME_DIR");
     int w;
+    /* The XDG spec requires an absolute path; a relative one would resolve
+     * against whatever directory the client happens to run in. */
+    if (rt && *rt && rt[0] != '/') return false;
     if (rt && *rt) w = snprintf(buf, n, "%s/xlib-wayland", rt);
     else           w = snprintf(buf, n, "/tmp/xlib-wayland-%u", (unsigned)getuid());
     if (w < 0 || (size_t)w >= n) return false;
@@ -120,4 +124,23 @@ bool mw_runtime_dir(char *buf, size_t n)
         st.st_uid != getuid() || (st.st_mode & 077) != 0)
         return false;
     return true;
+}
+
+bool mw_fd_owned_regular(int fd)
+{
+    struct stat st;
+    return fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+           st.st_uid == getuid();
+}
+
+/* The runtime directory is 0700, but a socket path is still reachable by
+ * anyone who can traverse to it (a misconfigured or shared XDG_RUNTIME_DIR,
+ * a /tmp fallback).  Only talk to processes of the same user. */
+bool mw_peer_is_self(int fd)
+{
+    struct ucred cred;
+    socklen_t clen = sizeof cred;
+    return fd >= 0 &&
+           getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &clen) == 0 &&
+           clen == sizeof cred && cred.uid == getuid();
 }

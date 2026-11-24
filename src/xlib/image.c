@@ -1,6 +1,7 @@
 /* image.c — XImage objects and pixmaps (including bitmaps). */
 #include "internal.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -24,8 +25,15 @@ static bool img_planar(const XImage *img)
     return img->format == XYPixmap && img->depth > 1;
 }
 
+static bool img_in_bounds(const XImage *img, int x, int y)
+{
+    return img && img->data && x >= 0 && y >= 0 &&
+           x < img->width && y < img->height;
+}
+
 static unsigned long img_get_pixel(XImage *img, int x, int y)
 {
+    if (!img_in_bounds(img, x, y)) return 0;
     long off = (long)y * img->bytes_per_line;
     if (img_planar(img)) {
         size_t plane = (size_t)img->bytes_per_line * img->height;
@@ -47,6 +55,7 @@ static unsigned long img_get_pixel(XImage *img, int x, int y)
 
 static int img_put_pixel(XImage *img, int x, int y, unsigned long v)
 {
+    if (!img_in_bounds(img, x, y)) return 0;
     long off = (long)y * img->bytes_per_line;
     if (img_planar(img)) {
         size_t plane = (size_t)img->bytes_per_line * img->height;
@@ -108,6 +117,16 @@ XImage *XCreateImage(Display *d, Visual *visual, unsigned int depth, int format,
                      int offset, char *data, unsigned int width,
                      unsigned int height, int bitmap_pad, int bytes_per_line)
 {
+    /* Reject geometry the pixel accessors cannot address safely: the X
+     * protocol caps sizes at 16 bits, depth must be a real pixel depth (the
+     * planar path shifts by depth-1), and a pad below one byte would make
+     * bytes_per_line zero. */
+    if (width > 65535 || height > 65535 || depth < 1 || depth > 32)
+        return NULL;
+    if (bitmap_pad != 0 && bitmap_pad != 8 && bitmap_pad != 16 &&
+        bitmap_pad != 32)
+        return NULL;
+    if (bytes_per_line < 0) return NULL;
     XImage *img = calloc(1, sizeof *img);
     if (!img) return NULL;
     img->width = (int)width;
@@ -125,12 +144,16 @@ XImage *XCreateImage(Display *d, Visual *visual, unsigned int depth, int format,
     img->red_mask = v ? v->red_mask : 0x00ff0000;
     img->green_mask = v ? v->green_mask : 0x0000ff00;
     img->blue_mask = v ? v->blue_mask : 0x000000ff;
-    if (bytes_per_line > 0) img->bytes_per_line = bytes_per_line;
-    else {
-        long bits = (long)width * img->bits_per_pixel;
-        int pad = img->bitmap_pad;
-        if (pad <= 0) pad = 8;
-        img->bytes_per_line = (int)(((bits + pad - 1) / pad) * (pad / 8));
+    long bits = (long)width * img->bits_per_pixel;
+    int pad = img->bitmap_pad;
+    long min_bpl = ((bits + pad - 1) / pad) * (pad / 8);
+    if (bytes_per_line > 0) {
+        /* A caller-supplied pitch shorter than a row would let the accessors
+         * index past each row into the next and off the end of the buffer. */
+        if (bytes_per_line < min_bpl) { free(img); return NULL; }
+        img->bytes_per_line = bytes_per_line;
+    } else {
+        img->bytes_per_line = (int)min_bpl;
     }
     /* As in libX11, the pixels are the caller's: NULL stays NULL. */
     img->data = data;
@@ -191,6 +214,8 @@ XImage *XGetImage(Display *d, Drawable dr, int x, int y,
                   unsigned int width, unsigned int height,
                   unsigned long plane_mask, int format)
 {
+    if (width == 0 || height == 0 || width > 32767 || height > 32767)
+        return NULL;
     mw_render_drain(d);
     int dw, dh, depth;
     MwSurface *s = mw_drawable_surface(d, dr, &dw, &dh, &depth);
@@ -248,13 +273,20 @@ int XPutImage(Display *d, Drawable dr, GC gc, XImage *img,
 {
     if (!img) return 0;
     /* As in libX11, the source rectangle is clipped to the image; a negative
-     * source offset moves the destination with it. */
-    int w = (int)width, h = (int)height;
-    if (src_x < 0) { dest_x -= src_x; w += src_x; src_x = 0; }
-    if (src_y < 0) { dest_y -= src_y; h += src_y; src_y = 0; }
-    if (src_x + w > img->width)  w = img->width - src_x;
-    if (src_y + h > img->height) h = img->height - src_y;
-    if (w <= 0 || h <= 0) return 1;
+     * source offset moves the destination with it.  Work in long long so the
+     * arithmetic cannot overflow on hostile offsets. */
+    if (width > 65535 || height > 65535) return 0;
+    long long sx = src_x, sy = src_y, dx = dest_x, dy = dest_y;
+    long long lw = width, lh = height;
+    if (sx < 0) { dx -= sx; lw += sx; sx = 0; }
+    if (sy < 0) { dy -= sy; lh += sy; sy = 0; }
+    if (sx + lw > img->width)  lw = img->width - sx;
+    if (sy + lh > img->height) lh = img->height - sy;
+    if (lw <= 0 || lh <= 0) return 1;
+    if (dx < INT_MIN / 2 || dx > INT_MAX / 2 ||
+        dy < INT_MIN / 2 || dy > INT_MAX / 2) return 1;
+    src_x = (int)sx; src_y = (int)sy; dest_x = (int)dx; dest_y = (int)dy;
+    int w = (int)lw, h = (int)lh;
     width = (unsigned int)w;
     height = (unsigned int)h;
     /* A 1-bit image (XYBitmap, or a depth-1 XImage) carries bit values, not
@@ -279,6 +311,7 @@ int XPutImage(Display *d, Drawable dr, GC gc, XImage *img,
      * writes straight into the destination surface without a temp allocation. */
     if (!onebit && !alpha_only && img->format == ZPixmap &&
         img->bits_per_pixel == 32 && img->data &&
+        img->bytes_per_line >= img->width * 4 &&
         mw_surface_scale(dsurf) == 1 && mw_surface_data(dsurf) &&
         (!gc || (gc->function == GXcopy &&
                  (gc->plane_mask & 0xfffffful) == 0xfffffful &&
@@ -457,7 +490,7 @@ static int parse_xbm(_Xconst char *data, int *w, int *h, char **bits_out)
         if (!nl) break;
         l = nl + 1;
     }
-    if (bw <= 0 || bh <= 0) return -1;
+    if (bw <= 0 || bh <= 0 || bw > 32767 || bh > 32767) return -1;
     nbytes = (bw + 7) / 8 * bh;
     char *bits = calloc((size_t)nbytes, 1);
     if (!bits) return -1;
@@ -489,7 +522,9 @@ int XReadBitmapFileData(_Xconst char *filename, unsigned int *width,
     if (!f) return BitmapOpenFailed;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return BitmapFileInvalid; }
     long sz = ftell(f);
-    if (sz < 0) { fclose(f); return BitmapFileInvalid; }
+    /* Even a 32767x32767 XBM in hex text is well under 1 GiB; cap far lower
+     * so a hostile path (/dev/zero, a huge file) cannot exhaust memory. */
+    if (sz < 0 || sz > (64L << 20)) { fclose(f); return BitmapFileInvalid; }
     fseek(f, 0, SEEK_SET);
     char *buf = malloc((size_t)sz + 1);
     if (!buf) { fclose(f); return BitmapNoMemory; }
@@ -529,7 +564,8 @@ int XWriteBitmapFile(Display *d, _Xconst char *filename, Pixmap bitmap,
     fprintf(f, "static unsigned char image_bits[] = {\n");
     MwPixmap *pm = mw_pixmap(d, bitmap);
     int stride = (int)((width + 7) / 8);
-    unsigned char *row = calloc(stride, 1);
+    unsigned char *row = calloc(stride ? stride : 1, 1);
+    if (!row) { fclose(f); return BitmapNoMemory; }
     for (unsigned int y = 0; y < height; y++) {
         memset(row, 0, stride);
         for (unsigned int x = 0; x < width; x++) {

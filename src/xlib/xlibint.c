@@ -36,6 +36,8 @@ const char *xlocaledir = "/usr/share/X11/locale";
 
 /* --------------------------------------------------------- display I/O */
 
+#define MW_OUTBUF_MAX ((size_t)256 << 20)
+
 int _XFlush(Display *d) { mw_render_drain(d); XFlush(d); return 1; }
 void _XFlushGCCache(Display *d, GC gc) { (void)d; (void)gc; }
 
@@ -51,6 +53,9 @@ static int outbuf_ensure(XDisplayImpl *dp, size_t extra)
     ptrdiff_t xi2_off = -1;
     if (dp->xi2_req && (char *)dp->xi2_req >= buffer && (char *)dp->xi2_req <= bufmax)
         xi2_off = (char *)dp->xi2_req - buffer;
+    /* No single request or Data() append legitimately needs more than this;
+     * also keeps used + extra + slack from wrapping. */
+    if (extra > MW_OUTBUF_MAX || used > MW_OUTBUF_MAX) return 0;
     size_t ncap = used + extra + (1u << 16);
     char *nb = realloc(buffer, ncap);
     if (!nb) return 0;
@@ -86,13 +91,17 @@ int _XSend(Display *d, _Xconst char *data, long size)
 char *_XGetRequest(Display *d, unsigned char type, size_t len)
 {
     XDisplayImpl *dp = MWD(d);
+    /* The 16-bit length field caps a core request at 256 KiB; a larger (or
+     * sub-header) length would be truncated on the wire and desynchronise
+     * mw_render_drain's walk of the buffer. */
+    if (len < 4 || len > 0xffffu * 4u) return NULL;
     len = (len + 3) & ~(size_t)3;
     char *buffer = dp->private12;        /* Xlib output buffer */
     char *bufptr = dp->private13;
     char *bufmax = dp->private14;
     if (!buffer) return NULL;
 
-    if (bufptr + len > bufmax) {
+    if ((size_t)(bufmax - bufptr) < len) {
         /* Flush what is complete, then grow if a single request exceeds the
          * buffer (libXrender builds the whole request, including variable data,
          * inside the reservation). */
@@ -188,6 +197,7 @@ char *_XAllocScratch(Display *d, unsigned long nbytes)
 {
     XDisplayImpl *dp = MWD(d);
     if (!dp) return NULL;
+    if (nbytes > MW_OUTBUF_MAX) return NULL;
     if (nbytes > dp->scratch_length) {
         char *nb = calloc(1, nbytes + 64);
         if (!nb) return NULL;
@@ -200,7 +210,13 @@ char *_XAllocScratch(Display *d, unsigned long nbytes)
     return dp->scratch_buffer;
 }
 
-char *_XAllocTemp(Display *d, int nbytes) { (void)d; return calloc(1, (size_t)nbytes); }void _XFreeTemp(Display *d, char *buf, int nbytes) { (void)d; (void)nbytes; free(buf); }
+char *_XAllocTemp(Display *d, int nbytes)
+{
+    (void)d;
+    if (nbytes <= 0) return NULL;
+    return calloc(1, (size_t)nbytes);
+}
+void _XFreeTemp(Display *d, char *buf, int nbytes) { (void)d; (void)nbytes; free(buf); }
 
 int _XGetBitsPerPixel(Display *d, int depth)
 { (void)d; return depth <= 8 ? 8 : depth <= 16 ? 16 : 32; }
@@ -249,12 +265,19 @@ int _XDeqAsyncHandler(Display *d, void *handler)
 char *_XGetAsyncReply(Display *d, char *replbuf, void *rep, char *buf,
                       int len, int extra, Bool discard)
 {
-    (void)d; (void)len; (void)discard;
+    (void)d; (void)discard;
     if (!replbuf) return NULL;
     if (rep) memcpy(replbuf, rep, 32);
     else     memset(replbuf, 0, 32);
-    if (extra > 0 && buf)
-        memcpy(replbuf + 32, buf, (size_t)extra * 4);
+    if (extra > 0) {
+        /* Only `len` bytes of buf are real (callers here pass NULL/0); never
+         * read past them, and zero what the wire would have supplied. */
+        size_t want = (size_t)extra * 4;
+        size_t have = (buf && len > 0) ? (size_t)len : 0;
+        if (have > want) have = want;
+        if (have) memcpy(replbuf + 32, buf, have);
+        if (have < want) memset(replbuf + 32 + have, 0, want - have);
+    }
     return replbuf;
 }
 
@@ -300,7 +323,7 @@ int _XData32(Display *d, void *src, long len)
 int _XCopyToArg(void *src, void *dst, unsigned int n) { (void)src; (void)dst; (void)n; return 0; }
 unsigned long _XAllocID(Display *d) { return mw_alloc_id(d); }
 void _XAllocIDs(Display *d, XID *ids, int count)
-{ for (int i = 0; i < count; i++) ids[i] = mw_alloc_id(d); }
+{ if (!ids) return; for (int i = 0; i < count; i++) ids[i] = mw_alloc_id(d); }
 void _XProcessWindowAttributes(Display *d, void *v, unsigned long mask, void *attr)
 { (void)d; (void)v; (void)mask; (void)attr; }
 int _XGetWindowAttributes(Display *d, Window w, void *attr)

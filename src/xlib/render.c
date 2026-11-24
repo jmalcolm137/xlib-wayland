@@ -20,6 +20,7 @@
 #include <X11/extensions/renderproto.h>
 
 #include <cairo.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -626,6 +627,20 @@ static uint32_t manual_op(int op, int component, int dsta_opaque, int dstfmt,
  * bitmap: bit 0 decides; deeper pixmaps use their alpha); a Picture ID is
  * accepted too, as some clients pass one.  The mask's origin is the clip
  * origin, and outside it nothing is drawn. */
+/* A scratch ARGB32 image, or NULL when cairo cannot make one (it returns an
+ * error surface with no pixels for a size beyond its limits or on OOM). */
+static cairo_surface_t *scratch_argb(int w, int h)
+{
+    if (w <= 0 || h <= 0 || w > 32767 || h > 32767) return NULL;
+    cairo_surface_t *s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    if (cairo_surface_status(s) != CAIRO_STATUS_SUCCESS ||
+        !cairo_image_surface_get_data(s)) {
+        cairo_surface_destroy(s);
+        return NULL;
+    }
+    return s;
+}
+
 static cairo_surface_t *clip_mask_image(Display *d, MwRenderPicture *dst,
                                         int xd, int yd, int w, int h)
 {
@@ -640,7 +655,8 @@ static cairo_surface_t *clip_mask_image(Display *d, MwRenderPicture *dst,
         ms = mw_drawable_surface(d, dst->clip_mask, &mw0, &mh0, &depth);
         bit = depth == 1;
     }
-    cairo_surface_t *out = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    cairo_surface_t *out = scratch_argb(w, h);
+    if (!out) return NULL;
     uint32_t *op = (uint32_t *)cairo_image_surface_get_data(out);
     int ost = cairo_image_surface_get_stride(out) / 4;
     memset(op, 0, (size_t)ost * 4 * (size_t)h);
@@ -679,7 +695,8 @@ static void composite_manual(Display *d, MwRenderPicture *dst, MwRenderPicture *
     if (!dcs || w <= 0 || h <= 0) return;
     int component = mask && mask->component_alpha;
 
-    cairo_surface_t *stmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    cairo_surface_t *stmp = scratch_argb(w, h);
+    if (!stmp) return;
     cairo_t *sc = cairo_create(stmp);
     cairo_set_operator(sc, CAIRO_OPERATOR_SOURCE);
     set_source(d, sc, src, 0, 0, xs, ys);
@@ -691,7 +708,8 @@ static void composite_manual(Display *d, MwRenderPicture *dst, MwRenderPicture *
     if (mask) {
         /* Any picture can be a mask -- solid fills and gradients included,
          * not just drawables. */
-        mtmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+        mtmp = scratch_argb(w, h);
+        if (!mtmp) { cairo_surface_destroy(stmp); return; }
         cairo_t *mc = cairo_create(mtmp);
         cairo_set_operator(mc, CAIRO_OPERATOR_SOURCE);
         set_source(d, mc, mask, 0, 0, xm, ym);
@@ -783,7 +801,8 @@ static void composite_manual_xform(Display *d, MwRenderPicture *dst,
         return;
     }
 
-    cairo_surface_t *stmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    cairo_surface_t *stmp = scratch_argb(w, h);
+    if (!stmp) return;
     cairo_t *sc = cairo_create(stmp);
     cairo_set_operator(sc, CAIRO_OPERATOR_SOURCE);
     set_source(d, sc, src, 0, 0, xs, ys);
@@ -797,7 +816,8 @@ static void composite_manual_xform(Display *d, MwRenderPicture *dst,
     if (mask) {
         /* Any picture can be a mask -- solid fills and gradients included,
          * not just drawables. */
-        mtmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+        mtmp = scratch_argb(w, h);
+        if (!mtmp) { cairo_surface_destroy(stmp); return; }
         cairo_t *mc = cairo_create(mtmp);
         cairo_set_operator(mc, CAIRO_OPERATOR_SOURCE);
         set_source(d, mc, mask, 0, 0, xm, ym);
@@ -815,7 +835,13 @@ static void composite_manual_xform(Display *d, MwRenderPicture *dst,
      * -T_linear(xd,yd). */
     double ox = -(t.xx * xd + t.xy * yd);
     double oy = -(t.yx * xd + t.yy * yd);
-    cairo_surface_t *ptmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, w, h);
+    cairo_surface_t *ptmp = scratch_argb(w, h);
+    if (!ptmp) {
+        if (ctmp) cairo_surface_destroy(ctmp);
+        if (mtmp) cairo_surface_destroy(mtmp);
+        cairo_surface_destroy(stmp);
+        return;
+    }
     cairo_t *pc = cairo_create(ptmp);
     cairo_set_operator(pc, CAIRO_OPERATOR_SOURCE);
     cairo_set_matrix(pc, &inv);
@@ -1031,8 +1057,12 @@ static MwRenderPicture *new_picture(Display *d, XID id, int format, int kind)
     return p;
 }
 
-static void parse_stops(MwRenderPicture *p, const unsigned char *base, size_t n)
+/* `avail` is the number of request bytes after the fixed header; a stop
+ * count the request cannot hold is truncated to what it does carry. */
+static void parse_stops(MwRenderPicture *p, const unsigned char *base,
+                        size_t n, size_t avail)
 {
+    if (n > avail / 12) n = avail / 12;
     p->stops = calloc(n ? n : 1, sizeof(MwStop));
     if (!p->stops) return;
     p->nstops = 0;
@@ -1047,8 +1077,15 @@ static void parse_stops(MwRenderPicture *p, const unsigned char *base, size_t n)
 
 /* Apply a ChangePicture/CreatePicture value list to a picture.  `vals` points
  * at the CARD32 values; returns the number consumed. */
-static void apply_values(MwRenderPicture *p, CARD32 mask, const CARD32 *v)
+static void apply_values(MwRenderPicture *p, CARD32 mask, const unsigned char *vb,
+                         size_t avail)
 {
+    /* Every set bit consumes one CARD32; refuse a mask the request does not
+     * carry values for rather than reading past it. */
+    mask &= (1u << (CPLastBit + 1)) - 1;
+    if ((size_t)__builtin_popcount(mask) > avail / 4) return;
+    CARD32 v[32];
+    memcpy(v, vb, (size_t)__builtin_popcount(mask) * 4);
     int i = 0;
 #define NEXT() (v[i++])
     if (mask & CPRepeat)          p->repeat = (int)NEXT();
@@ -1176,7 +1213,7 @@ static MwSurface *glyph_surface(const unsigned char *data, size_t avail,
 {
     if (w <= 0 || h <= 0) return NULL;
     size_t stride = glyph_stride(format, w);
-    if (avail < stride * (size_t)h) return NULL;
+    if (stride == 0 || stride > avail / (size_t)h) return NULL;
     MwSurface *s = mw_surface_create(w, h);
     if (!s) return NULL;
     uint32_t *px = mw_surface_data(s);
@@ -1238,7 +1275,8 @@ static void req_create_picture(Display *d, const unsigned char *b, size_t len)
                 (unsigned long)r->pid, (unsigned long)r->drawable,
                 (void *)mw_window(d, r->drawable),
                 (void *)mw_pixmap(d, r->drawable));
-    apply_values(p, r->mask, (const CARD32 *)(b + sz_xRenderCreatePictureReq));
+    apply_values(p, r->mask, b + sz_xRenderCreatePictureReq,
+                 len - sz_xRenderCreatePictureReq);
 }
 
 static void req_change_picture(Display *d, const unsigned char *b, size_t len)
@@ -1247,11 +1285,13 @@ static void req_change_picture(Display *d, const unsigned char *b, size_t len)
     if (len < sz_xRenderChangePictureReq) return;
     MwRenderPicture *p = pic(d, r->picture);
     if (!p) return;
-    apply_values(p, r->mask, (const CARD32 *)(b + sz_xRenderChangePictureReq));
+    apply_values(p, r->mask, b + sz_xRenderChangePictureReq,
+                 len - sz_xRenderChangePictureReq);
 }
 
-static void req_free_picture(Display *d, const unsigned char *b)
+static void req_free_picture(Display *d, const unsigned char *b, size_t len)
 {
+    if (len < sz_xRenderFreePictureReq) return;
     free_picture(d, pic(d, ((const xRenderFreePictureReq *)b)->picture));
 }
 
@@ -1318,9 +1358,10 @@ static void req_fill_rectangles(Display *d, const unsigned char *b, size_t len)
     }
 }
 
-static void req_create_solid(Display *d, const unsigned char *b)
+static void req_create_solid(Display *d, const unsigned char *b, size_t len)
 {
     const xRenderCreateSolidFillReq *r = (const void *)b;
+    if (len < sz_xRenderCreateSolidFillReq) return;
     MwRenderPicture *p = new_picture(d, r->pid, FMT_ARGB32, PK_SOLID);
     if (p) p->color = r->color;
 }
@@ -1332,7 +1373,8 @@ static void req_create_linear(Display *d, const unsigned char *b, size_t len)
     MwRenderPicture *p = new_picture(d, r->pid, FMT_ARGB32, PK_LINEAR);
     if (!p) return;
     p->p1 = r->p1; p->p2 = r->p2;
-    parse_stops(p, b + sz_xRenderCreateLinearGradientReq, r->nStops);
+    parse_stops(p, b + sz_xRenderCreateLinearGradientReq, r->nStops,
+                len - sz_xRenderCreateLinearGradientReq);
 }
 
 static void req_create_radial(Display *d, const unsigned char *b, size_t len)
@@ -1343,7 +1385,8 @@ static void req_create_radial(Display *d, const unsigned char *b, size_t len)
     if (!p) return;
     p->inner = r->inner; p->outer = r->outer;
     p->inner_radius = r->inner_radius; p->outer_radius = r->outer_radius;
-    parse_stops(p, b + sz_xRenderCreateRadialGradientReq, r->nStops);
+    parse_stops(p, b + sz_xRenderCreateRadialGradientReq, r->nStops,
+                len - sz_xRenderCreateRadialGradientReq);
 }
 
 static void req_create_conical(Display *d, const unsigned char *b, size_t len)
@@ -1353,7 +1396,8 @@ static void req_create_conical(Display *d, const unsigned char *b, size_t len)
     MwRenderPicture *p = new_picture(d, r->pid, FMT_ARGB32, PK_CONICAL);
     if (!p) return;
     p->center = r->center; p->angle = r->angle;
-    parse_stops(p, b + sz_xRenderCreateConicalGradientReq, r->nStops);
+    parse_stops(p, b + sz_xRenderCreateConicalGradientReq, r->nStops,
+                len - sz_xRenderCreateConicalGradientReq);
 }
 
 static void req_set_transform(Display *d, const unsigned char *b, size_t len)
@@ -1378,16 +1422,19 @@ static void req_set_filter(Display *d, const unsigned char *b, size_t len)
     MwRenderPicture *p = pic(d, r->picture);
     if (!p) return;
     const char *name = (const char *)(b + sz_xRenderSetPictureFilterReq);
-    if      (!strncmp(name, "nearest",  r->nbytes)) p->filter = 0;
-    else if (!strncmp(name, "bilinear", r->nbytes)) p->filter = 1;
-    else if (!strncmp(name, "convolution", r->nbytes)) p->filter = 1;
+    size_t nb = r->nbytes;
+    if (nb > len - sz_xRenderSetPictureFilterReq) return;   /* truncated */
+#define FILTER_IS(s) (nb == sizeof(s) - 1 && !memcmp(name, s, nb))
+    if      (FILTER_IS("nearest"))  p->filter = 0;
+    else if (FILTER_IS("bilinear") || FILTER_IS("convolution")) p->filter = 1;
     else p->filter = -1;
-    (void)len;
+#undef FILTER_IS
 }
 
-static void req_create_glyphset(Display *d, const unsigned char *b)
+static void req_create_glyphset(Display *d, const unsigned char *b, size_t len)
 {
     const xRenderCreateGlyphSetReq *r = (const void *)b;
+    if (len < sz_xRenderCreateGlyphSetReq) return;
     MwGlyphSet *gs = calloc(1, sizeof *gs);
     if (!gs) return;
     gs->id = r->gsid;
@@ -1397,17 +1444,19 @@ static void req_create_glyphset(Display *d, const unsigned char *b)
 }
 
 /* Another ID for the same glyph set: the glyphs are shared. */
-static void req_reference_glyphset(Display *d, const unsigned char *b)
+static void req_reference_glyphset(Display *d, const unsigned char *b, size_t len)
 {
     const xRenderReferenceGlyphSetReq *r = (const void *)b;
+    if (len < sz_xRenderReferenceGlyphSetReq) return;
     MwGlyphSet *gs = glyphset(d, r->existing);
-    if (!gs) return;
+    if (!gs || gs->refs >= INT_MAX) return;
     gs->refs++;
     mw_register(d, r->gsid, MW_OBJ_GLYPHSET, gs);
 }
 
-static void req_free_glyphset(Display *d, const unsigned char *b)
+static void req_free_glyphset(Display *d, const unsigned char *b, size_t len)
 {
+    if (len < sz_xRenderFreeGlyphSetReq) return;
     release_glyphset(d, ((const xRenderFreeGlyphSetReq *)b)->glyphset);
 }
 
@@ -1442,9 +1491,12 @@ static void req_add_glyphs(Display *d, const unsigned char *b, size_t len)
         xGlyphInfo info;
         memcpy(&gid, ids + 4 * i, 4);
         memcpy(&info, infos + 12 * i, 12);
-        size_t need = glyph_stride(gs->format, info.width) * info.height;
+        size_t gst = glyph_stride(gs->format, info.width);
+        size_t room = (size_t)(end - img);
+        if (info.height && gst > room / info.height) break;
+        size_t need = gst * info.height;
         need = (need + 3) & ~(size_t)3;
-        if (need > (size_t)(end - img)) break;
+        if (need > room) break;
         MwGlyph *g = glyph_slot(gs, gid, 1);
         if (g) {
             if (g->surface) mw_surface_destroy(g->surface);
@@ -2090,18 +2142,18 @@ static void handle_request(Display *d, const unsigned char *b, size_t len,
     case X_RenderCreatePicture:       req_create_picture(d, b, len); break;
     case X_RenderChangePicture:       req_change_picture(d, b, len); break;
     case X_RenderSetPictureClipRectangles: req_clip_rectangles(d, b, len); break;
-    case X_RenderFreePicture:         req_free_picture(d, b); break;
+    case X_RenderFreePicture:         req_free_picture(d, b, len); break;
     case X_RenderComposite:           req_composite(d, b, len); break;
     case X_RenderFillRectangles:      req_fill_rectangles(d, b, len); break;
-    case X_RenderCreateSolidFill:     req_create_solid(d, b); break;
+    case X_RenderCreateSolidFill:     req_create_solid(d, b, len); break;
     case X_RenderCreateLinearGradient:req_create_linear(d, b, len); break;
     case X_RenderCreateRadialGradient:req_create_radial(d, b, len); break;
     case X_RenderCreateConicalGradient:req_create_conical(d, b, len); break;
     case X_RenderSetPictureTransform: req_set_transform(d, b, len); break;
     case X_RenderSetPictureFilter:    req_set_filter(d, b, len); break;
-    case X_RenderCreateGlyphSet:      req_create_glyphset(d, b); break;
-    case X_RenderReferenceGlyphSet:   req_reference_glyphset(d, b); break;
-    case X_RenderFreeGlyphSet:        req_free_glyphset(d, b); break;
+    case X_RenderCreateGlyphSet:      req_create_glyphset(d, b, len); break;
+    case X_RenderReferenceGlyphSet:   req_reference_glyphset(d, b, len); break;
+    case X_RenderFreeGlyphSet:        req_free_glyphset(d, b, len); break;
     case X_RenderFreeGlyphs:          req_free_glyphs(d, b, len); break;
     case X_RenderAddGlyphs:           req_add_glyphs(d, b, len); break;
     case X_RenderCompositeGlyphs8:    req_composite_glyphs(d, b, len, 1); break;

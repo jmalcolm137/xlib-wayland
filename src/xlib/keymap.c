@@ -166,12 +166,18 @@ void mw_keymap_init_fd(Display *d, int fd, uint32_t size, uint32_t format)
 {
     XDisplayImpl *dp = MWD(d);
     if (format != WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 || fd < 0) return;
+    /* The keymap comes from the compositor; bound its size, and never hand
+     * xkbcommon a mapping as a C string -- a page-aligned keymap without a
+     * terminating NUL would be read past the end of the mapping. */
+    if (size == 0 || size > (16u << 20)) return;
     char *map = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (map == MAP_FAILED) return;
     if (!dp->xkb_ctx) dp->xkb_ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+    if (!dp->xkb_ctx) { munmap(map, size); return; }
     /* Compile before replacing: on failure keep the working keymap rather
      * than leave xkb_state pointing at a freed one. */
-    struct xkb_keymap *km = xkb_keymap_new_from_string(dp->xkb_ctx, map,
+    struct xkb_keymap *km = xkb_keymap_new_from_buffer(dp->xkb_ctx, map,
+                        strnlen(map, size),
                         XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
     munmap(map, size);
     struct xkb_state *st = km ? xkb_state_new(km) : NULL;

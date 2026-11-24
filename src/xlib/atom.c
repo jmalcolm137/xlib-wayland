@@ -39,7 +39,7 @@ static const char *atom_file_path(void)
     const char *p = getenv("XLIB_WAYLAND_ATOMS");
     if (p && *p) return p;
     const char *rt = getenv("XDG_RUNTIME_DIR");
-    if (!rt || !*rt) return NULL;
+    if (!rt || rt[0] != '/') return NULL;      /* must be absolute (XDG spec) */
     snprintf(path, sizeof path, "%s/xlib-wayland-atoms", rt);
     return path;
 }
@@ -68,6 +68,7 @@ static void atom_file_load(Display *d)
     if (!path) return;
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return;
+    if (!mw_fd_owned_regular(fd)) { close(fd); return; }
     flock(fd, LOCK_SH);
     FILE *f = fdopen(fd, "r");
     if (!f) { flock(fd, LOCK_UN); close(fd); return; }
@@ -96,6 +97,7 @@ static int atom_file_lookup(const char *name)
     if (!path) return 0;
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return 0;
+    if (!mw_fd_owned_regular(fd)) { close(fd); return 0; }
     flock(fd, LOCK_SH);
     FILE *f = fdopen(fd, "r");
     if (!f) { flock(fd, LOCK_UN); close(fd); return 0; }
@@ -120,11 +122,12 @@ static int atom_file_lookup(const char *name)
  * (e.g. no runtime dir), in which case the caller falls back to a local id. */
 static int atom_file_add(const char *name)
 {
-    if (!name || !*name || strpbrk(name, "\r\n")) return 0;
+    if (!name || !*name || strlen(name) > 900 || strpbrk(name, "\r\n")) return 0;
     const char *path = atom_file_path();
     if (!path) return 0;
     int fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) return 0;
+    if (!mw_fd_owned_regular(fd)) { close(fd); return 0; }
     flock(fd, LOCK_EX);
     FILE *f = fdopen(fd, "r+");
     if (!f) { flock(fd, LOCK_UN); close(fd); return 0; }
@@ -137,10 +140,11 @@ static int atom_file_add(const char *name)
         long id = atol(line);
         char *nm = sp + 1;
         nm[strcspn(nm, "\r\n")] = 0;
-        if (id > maxid) maxid = (int)id;
+        if (id > maxid && id < MW_ATOM_ID_MAX) maxid = (int)id;
         if (strcmp(nm, name) == 0) { found = (int)id; break; }
     }
-    if (!found) {
+    if (found <= XA_LAST_PREDEFINED || found >= MW_ATOM_ID_MAX) found = 0;
+    if (!found && maxid + 1 < MW_ATOM_ID_MAX) {
         found = maxid + 1;
         fseek(f, 0, SEEK_END);
         fprintf(f, "%d %s\n", found, name);
@@ -212,8 +216,11 @@ static char *atom_file_lookup_id(int id)
 {
     const char *path = atom_file_path();
     if (!path) return NULL;
-    FILE *f = fopen(path, "r");
-    if (!f) return NULL;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return NULL;
+    if (!mw_fd_owned_regular(fd)) { close(fd); return NULL; }
+    FILE *f = fdopen(fd, "r");
+    if (!f) { close(fd); return NULL; }
     char line[1024];
     char *result = NULL;
     while (fgets(line, sizeof line, f)) {
@@ -812,6 +819,8 @@ Status XGetWMNormalHints(Display *d, Window w, XSizeHints *hints,
                            False, XA_WM_SIZE_HINTS, &at, &af, &ni, &ba,
                            &data) != Success || !data)
         return 0;
+    /* A format-8/16 property of the right type holds n bytes, not n longs. */
+    if (af != 32 || !hints) { free(data); return 0; }
     longs_to_size_hints((const long *)data, ni, hints);
     if (supplied) *supplied = hints->flags;
     free(data);
@@ -849,8 +858,10 @@ XWMHints *XGetWMHints(Display *d, Window w)
                            XA_WM_HINTS, &at, &af, &ni, &ba, &data) != Success
         || !data)
         return NULL;
+    if (af != 32) { free(data); return NULL; }
     const long *p = (const long *)data;
     XWMHints *h = calloc(1, sizeof(XWMHints));
+    if (!h) { free(data); return NULL; }
     if (ni > 0) h->flags = p[0];
     if (ni > 1) h->input = (Bool)p[1];
     if (ni > 2) h->initial_state = (int)p[2];
@@ -878,7 +889,8 @@ Status XGetWMProtocols(Display *d, Window w, Atom **protocols, int *count)
     Atom at; int af; unsigned long ni, ba; unsigned char *data = NULL;
     if (XGetWindowProperty(d, w, mw_intern_atom(d, "WM_PROTOCOLS", True),
                            0, 1024, False, XA_ATOM, &at, &af, &ni, &ba,
-                           &data) != Success || !data) {
+                           &data) != Success || !data || af != 32) {
+        free(data);
         *protocols = NULL; *count = 0; return 0;
     }
     *protocols = (Atom *)data; *count = (int)ni;
@@ -898,6 +910,7 @@ Status XGetTransientForHint(Display *d, Window w, Window *prop_window)
     if (XGetWindowProperty(d, w, XA_WM_TRANSIENT_FOR, 0, 1, False, XA_WINDOW,
                            &at, &af, &ni, &ba, &data) != Success || !data)
         return 0;
+    if (af != 32 || ni < 1 || !prop_window) { free(data); return 0; }
     *prop_window = *(Window *)data;
     free(data);
     return 1;
@@ -914,7 +927,8 @@ Status XGetWMColormapWindows(Display *d, Window w, Window **cw, int *n)
     Atom at; int af; unsigned long ni, ba; unsigned char *data = NULL;
     if (XGetWindowProperty(d, w, mw_intern_atom(d, "WM_COLORMAP_WINDOWS", True),
                            0, 1024, False, XA_WINDOW, &at, &af, &ni, &ba,
-                           &data) != Success || !data) {
+                           &data) != Success || !data || af != 32) {
+        free(data);
         *cw = NULL; *n = 0; return 0;
     }
     *cw = (Window *)data; *n = (int)ni; return 1;
@@ -934,6 +948,7 @@ Status XGetWMSizeHints(Display *d, Window w, XSizeHints *h, long *s, Atom a)
     if (XGetWindowProperty(d, w, a, 0, sizeof(XSizeHints) / 4, False,
                            XA_WM_SIZE_HINTS, &at, &af, &ni, &ba, &data)
         != Success || !data) return 0;
+    if (af != 32 || !h) { free(data); return 0; }
     longs_to_size_hints((const long *)data, ni, h);
     if (s) *s = h->flags;
     free(data);

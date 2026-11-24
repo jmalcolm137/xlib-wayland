@@ -110,6 +110,7 @@ static void session_deliver(Display *d, Atom msg)
                                     &type, &fmt, &n, &ba, &data);
         if (ok != Success) continue;
         int has = 0;
+        if (data && fmt != 32) { XFree(data); data = NULL; }
         if (data) {
             for (unsigned long i = 0; i < n; i++) {
                 long v = 0;
@@ -144,6 +145,7 @@ void mw_session_handle_ready(Display *d)
     if (dp->session_fd < 0) return;
     int fd = accept4(dp->session_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
     if (fd < 0) return;
+    if (!mw_peer_is_self(fd)) { close(fd); return; }
     /* The connection is accepted as soon as it is made, possibly before
      * mw-session has written its command: wait briefly for it rather than
      * drop it. */

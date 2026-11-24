@@ -21,10 +21,14 @@
  *     gcc -c -std=gnu11 -Wall -Wextra -I/usr/include resource.c
  */
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <X11/Xlib.h>
 #include <X11/Xresource.h>
@@ -360,6 +364,7 @@ put_entry(XrmDatabase db, XrmBindingList bindings, XrmQuarkList quarks,
         if (e->n == n && entry_key_equal(e, bindings, quarks)) {
             free(e->value);
             e->value = NULL;
+            e->size = 0;
             sz = value ? value->size : 0;
             if (sz && value && value->addr) {
                 copy = (char *)malloc(sz);
@@ -788,14 +793,20 @@ static char *read_in_file(const char *filename);
 /* `#include "file"`: a relative name is taken from the including file's
  * directory (the current directory for a string database), as in libX11. */
 static void parse_database_in(XrmDatabase db, const char *data, Bool doall,
-                              const char *dir, int depth);
+                              const char *dir, int depth, int *includes);
+
+/* Depth alone does not bound the work: a file that includes itself twice
+ * doubles at every level.  Cap the total number of includes per parse. */
+#define XRM_MAX_INCLUDES 256
+#define XRM_MAX_FILE     (16L << 20)
 
 static void include_file(XrmDatabase db, const char *line, const char *dir,
-                         int depth)
+                         int depth, int *includes)
 {
     const char *q = strchr(line, '"');
     const char *e = q ? strchr(q + 1, '"') : NULL;
-    if (!q || !e || e == q + 1 || depth >= 100)
+    if (!q || !e || e == q + 1 || depth >= 100 ||
+        ++*includes > XRM_MAX_INCLUDES)
         return;
     size_t nlen = (size_t)(e - q - 1);
     size_t dlen = (q[1] != '/' && dir) ? strlen(dir) : 0;
@@ -815,7 +826,8 @@ static void include_file(XrmDatabase db, const char *line, const char *dir,
     if (text) {
         char *slash = strrchr(path, '/');
         if (slash) *slash = 0;
-        parse_database_in(db, text, True, slash ? path : NULL, depth + 1);
+        parse_database_in(db, text, True, slash ? path : NULL, depth + 1,
+                          includes);
         free(text);
     }
     free(path);
@@ -824,17 +836,20 @@ static void include_file(XrmDatabase db, const char *line, const char *dir,
 static void
 parse_database(XrmDatabase db, const char *data, Bool doall)
 {
-    parse_database_in(db, data, doall, NULL, 0);
+    parse_database_in(db, data, doall, NULL, 0, NULL);
 }
 
 static void
 parse_database_in(XrmDatabase db, const char *data, Bool doall,
-                  const char *dir, int depth)
+                  const char *dir, int depth, int *includes)
 {
     const char *p = data;
+    int local_includes = 0;
 
     if (!db || !p)
         return;
+    if (!includes)
+        includes = &local_includes;
 
     for (;;) {
         while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
@@ -858,7 +873,7 @@ parse_database_in(XrmDatabase db, const char *data, Bool doall,
                 if (line) {
                     memcpy(line, start, l);
                     line[l] = 0;
-                    include_file(db, line, dir, depth);
+                    include_file(db, line, dir, depth, includes);
                     free(line);
                 }
             }
@@ -892,36 +907,37 @@ XrmGetStringDatabase(const char *data)
 static char *
 read_in_file(const char *filename)
 {
-    FILE *f;
-    long sz;
+    struct stat st;
     char *buf;
-    size_t rd;
+    size_t rd = 0;
+    int fd;
 
     if (!filename)
         return NULL;
-    f = fopen(filename, "rb");
-    if (!f)
+    /* O_NONBLOCK so a FIFO named in an #include cannot hang the open; only
+     * regular files of sane size are read. */
+    fd = open(filename, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0)
         return NULL;
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return NULL;
-    }
-    sz = ftell(f);
-    if (sz < 0) {
-        fclose(f);
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        st.st_size > XRM_MAX_FILE) {
+        close(fd);
         return NULL;
     }
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return NULL;
-    }
-    buf = (char *)malloc((size_t)sz + 1);
+    buf = (char *)malloc((size_t)st.st_size + 1);
     if (!buf) {
-        fclose(f);
+        close(fd);
         return NULL;
     }
-    rd = fread(buf, 1, (size_t)sz, f);
-    fclose(f);
+    while (rd < (size_t)st.st_size) {
+        ssize_t r = read(fd, buf + rd, (size_t)st.st_size - rd);
+        if (r < 0 && errno == EINTR)
+            continue;
+        if (r <= 0)
+            break;
+        rd += (size_t)r;
+    }
+    close(fd);
     buf[rd] = '\0';
     return buf;
 }
@@ -943,7 +959,7 @@ XrmGetFileDatabase(const char *filename)
         char *dir = strdup(filename);
         char *slash = dir ? strrchr(dir, '/') : NULL;
         if (slash) *slash = 0;
-        parse_database_in(db, str, True, slash ? dir : NULL, 0);
+        parse_database_in(db, str, True, slash ? dir : NULL, 0, NULL);
         free(dir);
     }
     free(str);
@@ -1055,7 +1071,7 @@ XrmCombineFileDatabase(const char *filename, XrmDatabase *target, Bool override)
         char *dir = strdup(filename);
         char *slash = dir ? strrchr(dir, '/') : NULL;
         if (slash) *slash = 0;
-        parse_database_in(db, str, True, slash ? dir : NULL, 0);
+        parse_database_in(db, str, True, slash ? dir : NULL, 0, NULL);
         free(dir);
     }
     free(str);

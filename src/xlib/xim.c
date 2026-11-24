@@ -321,14 +321,16 @@ static void call_preedit_caret(struct _XIC *ic, int pos)
 static void ti_commit_event(Display *d, struct _XIC *ic, const char *text)
 {
     if (!text || !*text) return;
+    char *copy = strdup(text);
+    if (!copy) return;
     if (ic->ncommits == ic->commit_cap) {
         int cap = ic->commit_cap ? ic->commit_cap * 2 : 4;
         char **n = realloc(ic->commits, (size_t)cap * sizeof *n);
-        if (!n) return;
+        if (!n) { free(copy); return; }
         ic->commits = n;
         ic->commit_cap = cap;
     }
-    ic->commits[ic->ncommits++] = strdup(text);
+    ic->commits[ic->ncommits++] = copy;
 
     /* libX11 delivers a commit as a synthetic KeyPress with keycode 0; the
      * client's XFilterEvent sees it (False) and XmbLookupString returns the
@@ -379,6 +381,10 @@ static void set_preedit(struct _XIC *ic, const char *text, int cbegin, int cend)
     int old = ic->preedit_chars;
     free(ic->preedit);
     ic->preedit = strdup(text);
+    if (!ic->preedit) {
+        ic->preedit_len = ic->preedit_chars = ic->preedit_cursor = 0;
+        return;
+    }
     ic->preedit_len = (int)strlen(text);
     ic->preedit_chars = chars;
     int caret = (cbegin < 0) ? chars : utf8_byte_to_char(text, cbegin);
@@ -506,10 +512,16 @@ static void ti_commit_string(void *data, struct zwp_text_input_v3 *ti,
 static void ti_delete_surrounding_text(void *data, struct zwp_text_input_v3 *ti,
                                        uint32_t before_length, uint32_t after_length)
 {
+#define MW_XIM_DELETE_MAX 4096u
     (void)ti;
     Display *d = data;
     struct _XIC *ic = MWD(d)->text_input_ic;
     if (!ic) return;
+    /* Each unit becomes a synthetic key press/release pair; an input method
+     * (or a hostile compositor) sending UINT32_MAX would queue billions of
+     * events.  No real edit spans more than a few thousand bytes. */
+    if (before_length > MW_XIM_DELETE_MAX) before_length = MW_XIM_DELETE_MAX;
+    if (after_length > MW_XIM_DELETE_MAX) after_length = MW_XIM_DELETE_MAX;
     ic->pend.before = before_length;
     ic->pend.after = after_length;
 }
@@ -1166,6 +1178,7 @@ void mw_xim_overlay(Display *d, MwToplevel *tl)
                                       : 0xfffff0c0u;
 
     MwCanvas *c = mw_canvas_begin(tl->frame, NULL, 0, 0, 0);
+    if (!c) return;
     mw_set_operator(c, GXcopy);
     mw_set_source_argb(c, bg);
     mw_rect(c, x, y - asc, tw + 2, th);
