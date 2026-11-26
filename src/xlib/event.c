@@ -600,51 +600,15 @@ Bool XPeekIfEvent(Display *d, XEvent *event, Bool (*pred)(), XPointer arg)
     }
 }
 
-/* The size of a core event's own structure.  Callers pass the specific
- * struct (an XClientMessageEvent on the stack, say), not a whole XEvent. */
-static size_t core_event_size(int type)
-{
-    switch (type) {
-    case KeyPress: case KeyRelease:       return sizeof(XKeyEvent);
-    case ButtonPress: case ButtonRelease: return sizeof(XButtonEvent);
-    case MotionNotify:                    return sizeof(XMotionEvent);
-    case EnterNotify: case LeaveNotify:   return sizeof(XCrossingEvent);
-    case FocusIn: case FocusOut:          return sizeof(XFocusChangeEvent);
-    case KeymapNotify:                    return sizeof(XKeymapEvent);
-    case Expose:                          return sizeof(XExposeEvent);
-    case GraphicsExpose:                  return sizeof(XGraphicsExposeEvent);
-    case NoExpose:                        return sizeof(XNoExposeEvent);
-    case VisibilityNotify:                return sizeof(XVisibilityEvent);
-    case CreateNotify:                    return sizeof(XCreateWindowEvent);
-    case DestroyNotify:                   return sizeof(XDestroyWindowEvent);
-    case UnmapNotify:                     return sizeof(XUnmapEvent);
-    case MapNotify:                       return sizeof(XMapEvent);
-    case MapRequest:                      return sizeof(XMapRequestEvent);
-    case ReparentNotify:                  return sizeof(XReparentEvent);
-    case ConfigureNotify:                 return sizeof(XConfigureEvent);
-    case ConfigureRequest:                return sizeof(XConfigureRequestEvent);
-    case GravityNotify:                   return sizeof(XGravityEvent);
-    case ResizeRequest:                   return sizeof(XResizeRequestEvent);
-    case CirculateNotify:                 return sizeof(XCirculateEvent);
-    case CirculateRequest:                return sizeof(XCirculateRequestEvent);
-    case PropertyNotify:                  return sizeof(XPropertyEvent);
-    case SelectionClear:                  return sizeof(XSelectionClearEvent);
-    case SelectionRequest:                return sizeof(XSelectionRequestEvent);
-    case SelectionNotify:                 return sizeof(XSelectionEvent);
-    case ColormapNotify:                  return sizeof(XColormapEvent);
-    case ClientMessage:                   return sizeof(XClientMessageEvent);
-    case MappingNotify:                   return sizeof(XMappingEvent);
-    default:                              return sizeof(XEvent);
-    }
-}
-
 int XSendEvent(Display *d, Window w, Bool propagate, long event_mask, XEvent *event_in)
 {
     /* The caller's event is not ours to modify (send_event is set on the
      * copy that is delivered). */
     XEvent copy;
     memset(&copy, 0, sizeof copy);
-    memcpy(&copy, event_in, core_event_size(event_in->type & 0x7f));
+    /* Callers pass the specific struct (an XClientMessageEvent on the stack,
+     * say), not a whole XEvent: copy only that type's size. */
+    memcpy(&copy, event_in, mw_event_size(event_in->type & 0x7f));
     /* A cookie's data pointer is the sender's memory; the queue would free
      * it once the event is taken. */
     if ((copy.type & 0x7f) == GenericEvent) copy.xcookie.data = NULL;

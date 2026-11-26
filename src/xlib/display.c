@@ -441,6 +441,9 @@ int XCloseDisplay(Display *d)
     memset(dp->table, 0, dp->table_cap * sizeof *dp->table);
     dp->table_used = 0;
 
+    /* The wake thread polls the session socket and other fds closed below;
+     * stop it first so it never polls a closed (or reused) descriptor. */
+    mw_wakeup_stop(dp);
     mw_contexts_fini(d);
     mw_cursor_fini(d);
     mw_xdnd_fini(d);

@@ -126,7 +126,7 @@ XImage *XCreateImage(Display *d, Visual *visual, unsigned int depth, int format,
     if (bitmap_pad != 0 && bitmap_pad != 8 && bitmap_pad != 16 &&
         bitmap_pad != 32)
         return NULL;
-    if (bytes_per_line < 0) return NULL;
+    if (bytes_per_line < 0 || offset < 0 || offset > 65535) return NULL;
     XImage *img = calloc(1, sizeof *img);
     if (!img) return NULL;
     img->width = (int)width;
@@ -144,7 +144,9 @@ XImage *XCreateImage(Display *d, Visual *visual, unsigned int depth, int format,
     img->red_mask = v ? v->red_mask : 0x00ff0000;
     img->green_mask = v ? v->green_mask : 0x0000ff00;
     img->blue_mask = v ? v->blue_mask : 0x000000ff;
-    long bits = (long)width * img->bits_per_pixel;
+    /* As in libX11: an XY-format row also holds the `offset` leading bits. */
+    long bits = format == ZPixmap ? (long)width * img->bits_per_pixel
+                                  : (long)width + offset;
     int pad = img->bitmap_pad;
     long min_bpl = ((bits + pad - 1) / pad) * (pad / 8);
     if (bytes_per_line > 0) {

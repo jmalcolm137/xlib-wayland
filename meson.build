@@ -326,6 +326,15 @@ if get_option('tests')
     dependencies: [wl_dep, wcursor_dep, xkb_dep, pixman_dep],
     link_with: libx11)
 
+  # Regression tests for the security fixes (malformed requests, hostile
+  # properties, out-of-range arguments, object lifetimes).
+  test_security = executable('test_security', 'tests/test_security.c',
+    client_protos,
+    include_directories: inc,
+    dependencies: [wl_dep, wcursor_dep, xkb_dep, pixman_dep, xrender_dep,
+                   xcb_dep],
+    link_with: [libx11, libx11xcb])
+
   # Motif-free reproduction of the menu item-selection path: override-redirect
   # popup + XGrabPointer(owner_events=True) + item child windows.  Driven by
   # tests/popup.input against the headless compositor.
@@ -516,6 +525,8 @@ if get_option('tests')
     test('unit', with_compositor, args: [headless_compositor, test_core])
     test('internal', with_compositor,
       args: [headless_compositor, test_internal])
+    test('security', with_compositor,
+      args: [headless_compositor, test_security], timeout: 60)
     test('render', with_compositor, args: [headless_compositor, test_render])
     test('ext', with_compositor, args: [headless_compositor, test_ext])
     test('broker', with_compositor, args: [headless_compositor, test_broker],
