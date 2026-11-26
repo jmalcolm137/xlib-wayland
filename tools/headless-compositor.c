@@ -16,6 +16,7 @@
  *   wl_shm          v2   create_pool; ARGB8888 + XRGB8888
  *   wl_seat         v7   get_pointer / get_keyboard (+ real xkb keymap)
  *   wp_pointer_warp_v1   move the pointer within a client's own surface
+ *   ext_input_observation_v1  pointer position relative to a client's surface
  *   wl_output       v3   geometry / mode / scale
  *   xdg_wm_base     v1   toplevels are sized to --size (default 800x600)
  *
@@ -117,6 +118,14 @@
 #  endif
 #endif
 
+#if defined(__has_include)
+#  if __has_include("ext-input-observation-v1-server-protocol.h")
+#    include "ext-input-observation-v1-server-protocol.h"
+#  elif __has_include(<ext-input-observation-v1-server-protocol.h>)
+#    include <ext-input-observation-v1-server-protocol.h>
+#  endif
+#endif
+
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
     (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
 #  define MW_LITTLE_ENDIAN 1
@@ -200,6 +209,14 @@ struct mw_surface {
 
 	struct mw_xdg_surface *xdg_surface;
 	struct wl_list frame_callbacks;   /* mw_frame_cb */
+};
+
+/* A client observing the pointer position relative to one of its surfaces. */
+struct hc_input_observer {
+	struct wl_resource *resource;
+	struct mw_compositor *comp;
+	struct mw_surface *surface;
+	struct wl_list link;              /* comp->input_observers */
 };
 
 struct mw_xdg_surface {
@@ -303,6 +320,7 @@ struct mw_compositor {
 	struct wl_list data_devices;      /* hc_data_device */
 	struct hc_data_source *data_selection; /* compositor clipboard owner */
 	struct wl_list primary_devices;   /* hc_data_device (primary) */
+	struct wl_list input_observers;   /* hc_input_observer */
 	struct hc_data_source *primary_selection; /* primary selection owner */
 
 	/* Minimal drag-and-drop: the source sets a data source, the pointer
@@ -1540,6 +1558,128 @@ static const struct wp_viewporter_interface viewporter_implementation = {
 	.get_viewport = viewporter_get_viewport,
 };
 
+/* ------------------------------------------------------------------ */
+/* ext-input-observation-v1 — pointer position relative to a surface    */
+/*                                                                      */
+/* The shim uses this for Serenity's set_global_mouse_tracking: it must */
+/* know where the pointer is even when it is outside its window (the    */
+/* Eyes/CatDog demos), which wl_pointer never reports. Positions are    */
+/* signed 16:16 fixpoint, as the draft specifies.                       */
+/* ------------------------------------------------------------------ */
+
+static void send_input_position(struct hc_input_observer *observer)
+{
+	struct mw_surface *surface = observer->surface;
+	if (!surface || !surface->mapped)
+		return;
+	int scale = surface->buffer_scale > 0 ? surface->buffer_scale : 1;
+	int width = surface->buf_w / scale;
+	int height = surface->buf_h / scale;
+	if (width <= 0 || height <= 0)
+		return;
+	/* Surfaces are placed at (0,0) in this compositor. */
+	int rel_x = (int)((int64_t)observer->comp->ptr_x * 65536 / width);
+	int rel_y = (int)((int64_t)observer->comp->ptr_y * 65536 / height);
+	ext_input_position_observer_v1_send_position(observer->resource,
+			surface->resource, 0, rel_x, rel_y);
+}
+
+/* Report the current position after any cursor movement: once per observer,
+ * whether or not the pointer is over the observed surface. */
+static void notify_input_observers(struct mw_compositor *comp)
+{
+	struct hc_input_observer *observer;
+	wl_list_for_each(observer, &comp->input_observers, link)
+		send_input_position(observer);
+}
+
+static void input_observer_destroy(struct wl_client *client,
+				   struct wl_resource *resource)
+{
+	(void)client;
+	wl_resource_destroy(resource);
+}
+
+static const struct ext_input_position_observer_v1_interface
+input_position_observer_implementation = {
+	.destroy = input_observer_destroy,
+};
+
+static void input_observer_destroyed(struct wl_resource *resource)
+{
+	struct hc_input_observer *observer = wl_resource_get_user_data(resource);
+	if (!observer)
+		return;
+	wl_list_remove(&observer->link);
+	free(observer);
+}
+
+static void input_observer_create(struct wl_client *client,
+				  struct wl_resource *resource, uint32_t id,
+				  struct wl_resource *pointer_resource,
+				  struct wl_resource *surface_resource)
+{
+	struct mw_compositor *comp = wl_resource_get_user_data(resource);
+	struct mw_surface *surface = wl_resource_get_user_data(surface_resource);
+	struct hc_input_observer *observer;
+	struct wl_resource *observer_resource;
+
+	if (!comp || !surface)
+		return;
+	if (wl_resource_get_client(surface_resource) != client ||
+	    wl_resource_get_client(pointer_resource) != client) {
+		wl_resource_post_error(resource, WL_DISPLAY_ERROR_INVALID_METHOD,
+				       "cross-client input observation");
+		return;
+	}
+
+	observer_resource = wl_resource_create(client,
+			&ext_input_position_observer_v1_interface,
+			wl_resource_get_version(resource), id);
+	if (!observer_resource) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+	observer = calloc(1, sizeof *observer);
+	if (!observer) {
+		wl_resource_destroy(observer_resource);
+		wl_client_post_no_memory(client);
+		return;
+	}
+	observer->resource = observer_resource;
+	observer->comp = comp;
+	observer->surface = surface;
+	wl_list_insert(&comp->input_observers, &observer->link);
+	wl_resource_set_implementation(observer_resource,
+			&input_position_observer_implementation,
+			observer, input_observer_destroyed);
+
+	/* Positions go out on the next cursor movement, as in a real compositor. */
+	if (getenv("HC_TRACE"))
+		fprintf(stderr, "HC: input observer %p for surface %p\n",
+			(void*)observer_resource, (void*)surface);
+}
+
+static const struct ext_input_observation_manager_v1_interface
+input_observation_manager_implementation = {
+	.destroy = input_observer_destroy,
+	.create_pointer_observer = input_observer_create,
+};
+
+static void bind_input_observation(struct wl_client *client, void *data,
+				   uint32_t version, uint32_t id)
+{
+	struct wl_resource *resource = wl_resource_create(client,
+			&ext_input_observation_manager_v1_interface,
+			MIN(version, 1), id);
+	if (!resource) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+	wl_resource_set_implementation(resource,
+			&input_observation_manager_implementation, data, NULL);
+}
+
 static void bind_viewporter(struct wl_client *client, void *data,
 			    uint32_t version, uint32_t id)
 {
@@ -1597,6 +1737,7 @@ static void pointer_warp_warp(struct wl_client *client,
 	wl_pointer_send_motion(dev->resource, now_ms(),
 			       wl_fixed_from_int(px), wl_fixed_from_int(py));
 	wl_pointer_send_frame(dev->resource);
+	notify_input_observers(comp);
 	if (getenv("HC_TRACE"))
 		fprintf(stderr, "HC: pointer warp to %d,%d\n", px, py);
 }
@@ -3288,6 +3429,7 @@ static void execute_action(struct mw_compositor *comp, struct mw_action *a)
 				       wl_fixed_from_int(a->x),
 				       wl_fixed_from_int(a->y));
 		wl_pointer_send_frame(dev->resource);
+		notify_input_observers(comp);
 		if (comp->drag_active) {
 			if (surface != comp->drag_surface) {
 				drag_leave(comp);
@@ -3670,6 +3812,7 @@ int main(int argc, char **argv)
 
 	wl_list_init(&comp.surfaces);
 	wl_list_init(&comp.pointers);
+	wl_list_init(&comp.input_observers);
 	wl_list_init(&comp.keyboards);
 	wl_list_init(&comp.touches);
 	wl_list_init(&comp.outputs);
@@ -3717,6 +3860,8 @@ int main(int argc, char **argv)
 			 bind_viewporter);
 	wl_global_create(comp.display, &wp_pointer_warp_v1_interface, 1, &comp,
 			 bind_pointer_warp);
+	wl_global_create(comp.display, &ext_input_observation_manager_v1_interface,
+			 1, &comp, bind_input_observation);
 	/* Text-input v3 (the shim's XIM bridge).  HC_NO_TEXTINPUT mimics a
 	 * compositor without it, so the local XIM fallback stays testable. */
 	if (!getenv("HC_NO_TEXTINPUT"))
