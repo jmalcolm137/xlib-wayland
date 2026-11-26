@@ -1895,9 +1895,16 @@ static void data_source_set_actions(struct wl_client *client,
 				    uint32_t actions)
 {
 	struct hc_data_source *src = wl_resource_get_user_data(resource);
+	struct mw_compositor *comp = src ? src->comp : NULL;
 	(void)client;
-	if (src)
-		src->dnd_actions = actions;
+	if (!src)
+		return;
+	src->dnd_actions = actions;
+	/* A source may change its mask mid-drag; tell the current target so it
+	 * can re-negotiate (wl_data_offer.source_actions is also an event). */
+	if (comp && comp->drag_offer && comp->drag_source == src &&
+	    wl_resource_get_version(comp->drag_offer) >= 3)
+		wl_data_offer_send_source_actions(comp->drag_offer, actions);
 }
 
 static const struct wl_data_source_interface data_source_implementation = {
@@ -1953,7 +1960,11 @@ static void data_offer_finish(struct wl_client *client,
 {
 	struct hc_data_offer *offer = wl_resource_get_user_data(resource);
 	(void)client;
-	if (offer && (!offer->accepted || !offer->action)) {
+	/* The target must have accepted a type. An action is only negotiable
+	 * when the source offered actions (wl_data_source.set_actions, v3); a
+	 * legacy source cannot be finished with an action. */
+	if (offer && (!offer->accepted ||
+	    (offer->source && offer->source->dnd_actions && !offer->action))) {
 		wl_resource_post_error(resource, WL_DATA_OFFER_ERROR_INVALID_FINISH,
 				       "finish without an accepted type and action");
 		return;
@@ -2180,6 +2191,11 @@ static void drag_enter(struct mw_compositor *comp, struct mw_surface *surface,
 	char **mime;
 	wl_array_for_each(mime, &comp->drag_source->mimes)
 		wl_data_offer_send_offer(offer_res, *mime);
+	/* The target needs the source's mask before it can negotiate an action
+	 * (and before it may finish a drop). 0 means the source is pre-v3. */
+	if (wl_resource_get_version(offer_res) >= 3)
+		wl_data_offer_send_source_actions(offer_res,
+				comp->drag_source->dnd_actions);
 	wl_data_device_send_enter(dev, wl_display_next_serial(comp->display),
 				  surface->resource, wl_fixed_from_int(x),
 				  wl_fixed_from_int(y), offer_res);
@@ -2204,22 +2220,17 @@ static void drag_drop(struct mw_compositor *comp)
 			(void*)comp->drag_device, (void*)comp->drag_source);
 	struct hc_data_offer *offer = comp->drag_offer
 		? wl_resource_get_user_data(comp->drag_offer) : NULL;
-	if (offer && offer->accepted) {
-		if (comp->drag_device)
-			wl_data_device_send_drop(comp->drag_device);
-		if (comp->drag_source && comp->drag_source->resource &&
-		    wl_resource_get_version(comp->drag_source->resource) >= 3)
-			wl_data_source_send_dnd_drop_performed(comp->drag_source->resource);
+	/* The drop is delivered whether or not the target has accepted a type
+	 * yet: acceptance is what the target says back with accept/action, and
+	 * the target may still be deciding (or reading the data) when the user
+	 * releases. wlroots sends it unconditionally to the focused client. */
+	if (comp->drag_device)
+		wl_data_device_send_drop(comp->drag_device);
+	if (comp->drag_source && comp->drag_source->resource &&
+	    wl_resource_get_version(comp->drag_source->resource) >= 3)
+		wl_data_source_send_dnd_drop_performed(comp->drag_source->resource);
+	if (offer)
 		offer->dropped = 1;     /* dnd_finished follows the target's finish */
-	} else {
-		/* No type accepted: like wlroots, the drag is cancelled. */
-		if (getenv("HC_TRACE"))
-			fprintf(stderr, "HC: drag_drop refused (nothing accepted)\n");
-		if (comp->drag_device)
-			wl_data_device_send_leave(comp->drag_device);
-		if (comp->drag_source && comp->drag_source->resource)
-			wl_data_source_send_cancelled(comp->drag_source->resource);
-	}
 	comp->drag_active = 0;
 	comp->drag_source = NULL;
 	comp->drag_device = NULL;
