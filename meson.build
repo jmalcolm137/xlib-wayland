@@ -26,6 +26,7 @@ deco_xml = proto_dir / 'unstable/xdg-decoration/xdg-decoration-unstable-v1.xml'
 viewp_xml = proto_dir / 'stable/viewporter/viewporter.xml'
 textinput_xml = proto_dir / 'unstable/text-input/text-input-unstable-v3.xml'
 primary_xml = proto_dir / 'unstable/primary-selection/primary-selection-unstable-v1.xml'
+warp_xml = proto_dir / 'staging/pointer-warp/pointer-warp-v1.xml'
 
 client_protos = [
   custom_target('xdg-shell-client-header',
@@ -503,6 +504,14 @@ if get_option('tools')
       command: [wl_scan, 'server-header', '@INPUT@', '@OUTPUT@']),
     custom_target('primary-selection-server-code',
       input: primary_xml, output: 'primary-selection-protocol-server.c',
+      command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
+    # wp_pointer_warp_v1: lets a client move the pointer to a point on one of
+    # its own surfaces (the libgui-wayland shim's set_global_cursor_position).
+    custom_target('pointer-warp-server-header',
+      input: warp_xml, output: 'pointer-warp-v1-server.h',
+      command: [wl_scan, 'server-header', '@INPUT@', '@OUTPUT@']),
+    custom_target('pointer-warp-server-code',
+      input: warp_xml, output: 'pointer-warp-v1-protocol-server.c',
       command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
   ]
   wl_server_dep = dependency('wayland-server')

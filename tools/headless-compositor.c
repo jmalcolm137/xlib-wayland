@@ -15,6 +15,7 @@
  *   wl_compositor   v5   create_surface / create_region
  *   wl_shm          v2   create_pool; ARGB8888 + XRGB8888
  *   wl_seat         v7   get_pointer / get_keyboard (+ real xkb keymap)
+ *   wp_pointer_warp_v1   move the pointer within a client's own surface
  *   wl_output       v3   geometry / mode / scale
  *   xdg_wm_base     v1   toplevels are sized to --size (default 800x600)
  *
@@ -105,6 +106,14 @@
 #    include "primary-selection-unstable-v1-server-protocol.h"
 #  elif __has_include(<primary-selection-unstable-v1-server-protocol.h>)
 #    include <primary-selection-unstable-v1-server-protocol.h>
+#  endif
+#endif
+
+#if defined(__has_include)
+#  if __has_include("pointer-warp-v1-server.h")
+#    include "pointer-warp-v1-server.h"
+#  elif __has_include(<pointer-warp-v1-server.h>)
+#    include <pointer-warp-v1-server.h>
 #  endif
 #endif
 
@@ -238,6 +247,7 @@ struct mw_device {
 	struct wl_list link;
 	int entered;
 	struct mw_surface *entered_surface;
+	uint32_t enter_serial;   /* serial of the latest wl_pointer.enter */
 };
 
 enum mw_action_kind {
@@ -1538,6 +1548,73 @@ static void bind_viewporter(struct wl_client *client, void *data,
 	(void)data;
 	wl_resource_set_implementation(resource, &viewporter_implementation, NULL,
 				       NULL);
+}
+
+/* ------------------------------------------------------------------ */
+/* wp_pointer_warp_v1 — move the pointer on one of the client's surfaces */
+/*                                                                      */
+/* The shim uses this for Serenity's set_global_cursor_position (the     */
+/* Taskbar puts the cursor back on itself after a workspace switch). The */
+/* request is only honoured within a surface of the requesting client,  */
+/* and only with the serial of that pointer's latest enter there, which  */
+/* is what a compositor must validate.                                   */
+/* ------------------------------------------------------------------ */
+
+static void pointer_warp_destroy(struct wl_client *client,
+				 struct wl_resource *resource)
+{
+	(void)client;
+	wl_resource_destroy(resource);
+}
+
+static void pointer_warp_warp(struct wl_client *client,
+			      struct wl_resource *resource,
+			      struct wl_resource *surface_resource,
+			      struct wl_resource *pointer_resource,
+			      wl_fixed_t x, wl_fixed_t y, uint32_t serial)
+{
+	struct mw_compositor *comp = wl_resource_get_user_data(resource);
+	struct mw_surface *surface = wl_resource_get_user_data(surface_resource);
+	struct mw_device *dev = wl_resource_get_user_data(pointer_resource);
+	int px, py;
+
+	if (!comp || !surface || !dev || !surface->mapped)
+		return;
+	if (wl_resource_get_client(surface_resource) != client ||
+	    wl_resource_get_client(pointer_resource) != client)
+		return;
+	if (!dev->entered || dev->entered_surface != surface ||
+	    serial == 0 || serial != dev->enter_serial)
+		return;
+
+	px = wl_fixed_to_int(x);
+	py = wl_fixed_to_int(y);
+	if (px < 0 || py < 0 || px >= surface->buf_w || py >= surface->buf_h)
+		return;
+
+	comp->ptr_x = px;
+	comp->ptr_y = py;
+	wl_pointer_send_motion(dev->resource, now_ms(),
+			       wl_fixed_from_int(px), wl_fixed_from_int(py));
+	wl_pointer_send_frame(dev->resource);
+	if (getenv("HC_TRACE"))
+		fprintf(stderr, "HC: pointer warp to %d,%d\n", px, py);
+}
+
+static const struct wp_pointer_warp_v1_interface pointer_warp_implementation = {
+	.destroy = pointer_warp_destroy,
+	.warp_pointer = pointer_warp_warp,
+};
+
+static void bind_pointer_warp(struct wl_client *client, void *data,
+			      uint32_t version, uint32_t id)
+{
+	struct mw_compositor *comp = data;
+	struct wl_resource *resource = wl_resource_create(client,
+			&wp_pointer_warp_v1_interface, MIN(version, 1), id);
+
+	wl_resource_set_implementation(resource, &pointer_warp_implementation,
+				       comp, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -3137,6 +3214,7 @@ static void pointer_enter(struct mw_device *dev, struct mw_surface *surface,
 	wl_pointer_send_enter(dev->resource, serial, surface->resource,
 			      wl_fixed_from_int(x), wl_fixed_from_int(y));
 	dev->entered = 1;
+	dev->enter_serial = serial;
 }
 
 static void pointer_leave(struct mw_device *dev, struct mw_surface *surface)
@@ -3147,6 +3225,7 @@ static void pointer_leave(struct mw_device *dev, struct mw_surface *surface)
 			      surface->resource);
 	dev->entered = 0;
 	dev->entered_surface = NULL;
+	dev->enter_serial = 0;
 }
 
 /* Move pointer focus to `surface`, sending leave/enter as a compositor does
@@ -3625,6 +3704,8 @@ int main(int argc, char **argv)
 				 1, &comp, bind_primary_manager);
 	wl_global_create(comp.display, &wp_viewporter_interface, 1, &comp,
 			 bind_viewporter);
+	wl_global_create(comp.display, &wp_pointer_warp_v1_interface, 1, &comp,
+			 bind_pointer_warp);
 	/* Text-input v3 (the shim's XIM bridge).  HC_NO_TEXTINPUT mimics a
 	 * compositor without it, so the local XIM fallback stays testable. */
 	if (!getenv("HC_NO_TEXTINPUT"))
