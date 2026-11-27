@@ -16,6 +16,7 @@
  *   wl_shm          v2   create_pool; ARGB8888 + XRGB8888
  *   wl_seat         v7   get_pointer / get_keyboard (+ real xkb keymap)
  *   wp_pointer_warp_v1   move the pointer within a client's own surface
+ *   xdg_activation_v1    raise/focus a window with an activation token
  *   ext_input_observation_v1  pointer position relative to a client's surface
  *   wl_output       v3   geometry / mode / scale
  *   xdg_wm_base     v1   toplevels are sized to --size (default 800x600)
@@ -115,6 +116,14 @@
 #    include "pointer-warp-v1-server.h"
 #  elif __has_include(<pointer-warp-v1-server.h>)
 #    include <pointer-warp-v1-server.h>
+#  endif
+#endif
+
+#if defined(__has_include)
+#  if __has_include("xdg-activation-v1-server-protocol.h")
+#    include "xdg-activation-v1-server-protocol.h"
+#  elif __has_include(<xdg-activation-v1-server-protocol.h>)
+#    include <xdg-activation-v1-server-protocol.h>
 #  endif
 #endif
 
@@ -1557,6 +1566,93 @@ static const struct wp_viewporter_interface viewporter_implementation = {
 	.destroy = viewporter_destroy,
 	.get_viewport = viewporter_get_viewport,
 };
+
+/* ------------------------------------------------------------------ */
+/* xdg-activation-v1 — raise/focus a window with a token                */
+/*                                                                      */
+/* Tokens are logged and accepted (the test only needs to see the       */
+/* request); a launcher may pass XDG_ACTIVATION_TOKEN, and the shim     */
+/* uses it for the first window.                                      */
+/* ------------------------------------------------------------------ */
+
+static uint32_t s_activation_token_count;
+
+static void activation_token_destroy(struct wl_client *client,
+				     struct wl_resource *resource)
+{
+	(void)client;
+	wl_resource_destroy(resource);
+}
+
+static void activation_token_set_serial(struct wl_client *client,
+					struct wl_resource *resource,
+					uint32_t serial,
+					struct wl_resource *seat_resource)
+{
+	(void)client; (void)resource; (void)serial; (void)seat_resource;
+}
+
+static void activation_token_commit(struct wl_client *client,
+				    struct wl_resource *resource)
+{
+	char token[64];
+	(void)client;
+	snprintf(token, sizeof token, "hc-token-%u", ++s_activation_token_count);
+	xdg_activation_token_v1_send_done(resource, token);
+}
+
+static const struct xdg_activation_token_v1_interface
+activation_token_implementation = {
+	.destroy = activation_token_destroy,
+	.set_serial = activation_token_set_serial,
+	.commit = activation_token_commit,
+};
+
+static void activation_get_token(struct wl_client *client,
+				 struct wl_resource *resource, uint32_t id)
+{
+	struct wl_resource *token = wl_resource_create(client,
+			&xdg_activation_token_v1_interface, 1, id);
+	(void)resource;
+	if (!token) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+	wl_resource_set_implementation(token, &activation_token_implementation,
+				       NULL, NULL);
+}
+
+static void activation_activate(struct wl_client *client,
+				struct wl_resource *resource,
+				const char *token,
+				struct wl_resource *surface_resource)
+{
+	struct mw_surface *surface = wl_resource_get_user_data(surface_resource);
+	(void)client; (void)resource;
+	if (getenv("HC_TRACE"))
+		fprintf(stderr, "HC: activation token '%s' surface %p\n",
+			token ? token : "", (void*)surface);
+}
+
+static const struct xdg_activation_v1_interface activation_implementation = {
+	.destroy = activation_token_destroy,
+	.get_activation_token = activation_get_token,
+	.activate = activation_activate,
+};
+
+static void bind_activation(struct wl_client *client, void *data,
+			    uint32_t version, uint32_t id)
+{
+	struct wl_resource *resource = wl_resource_create(client,
+			&xdg_activation_v1_interface, MIN(version, 1), id);
+	(void)data;
+	if (!resource) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+	wl_resource_set_implementation(resource, &activation_implementation,
+				       NULL, NULL);
+}
 
 /* ------------------------------------------------------------------ */
 /* ext-input-observation-v1 — pointer position relative to a surface    */
@@ -3860,6 +3956,8 @@ int main(int argc, char **argv)
 			 bind_viewporter);
 	wl_global_create(comp.display, &wp_pointer_warp_v1_interface, 1, &comp,
 			 bind_pointer_warp);
+	wl_global_create(comp.display, &xdg_activation_v1_interface, 1, &comp,
+			 bind_activation);
 	wl_global_create(comp.display, &ext_input_observation_manager_v1_interface,
 			 1, &comp, bind_input_observation);
 	/* Text-input v3 (the shim's XIM bridge).  HC_NO_TEXTINPUT mimics a

@@ -26,6 +26,7 @@ deco_xml = proto_dir / 'unstable/xdg-decoration/xdg-decoration-unstable-v1.xml'
 viewp_xml = proto_dir / 'stable/viewporter/viewporter.xml'
 textinput_xml = proto_dir / 'unstable/text-input/text-input-unstable-v3.xml'
 primary_xml = proto_dir / 'unstable/primary-selection/primary-selection-unstable-v1.xml'
+activation_xml = proto_dir / 'staging/xdg-activation/xdg-activation-v1.xml'
 warp_xml = proto_dir / 'staging/pointer-warp/pointer-warp-v1.xml'
 # ext-input-observation-v1: a draft (wayland-protocols MR !335) that reports the
 # pointer position relative to a surface, even outside it. Vendored because it
@@ -516,6 +517,14 @@ if get_option('tools')
       command: [wl_scan, 'server-header', '@INPUT@', '@OUTPUT@']),
     custom_target('pointer-warp-server-code',
       input: warp_xml, output: 'pointer-warp-v1-protocol-server.c',
+      command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
+    # xdg-activation-v1: the shim requests activation for a window (and uses
+    # XDG_ACTIVATION_TOKEN when a launcher passes one).
+    custom_target('xdg-activation-server-header',
+      input: activation_xml, output: 'xdg-activation-v1-server-protocol.h',
+      command: [wl_scan, 'server-header', '@INPUT@', '@OUTPUT@']),
+    custom_target('xdg-activation-server-code',
+      input: activation_xml, output: 'xdg-activation-v1-protocol.c',
       command: [wl_scan, 'private-code', '@INPUT@', '@OUTPUT@']),
     # ext-input-observation-v1: the pointer position relative to one of the
     # client's surfaces, inside or outside it (the shim's global mouse
